@@ -200,8 +200,11 @@ export class Engine {
   }
 
   /** Request a sync soon (debounced). `delay` 0 = as soon as the loop is free. */
+  /** Set once the server said our token is revoked; nothing short of a restart clears it. */
+  private revoked = false;
+
   kick(delay = this.cfg.debounceMs): void {
-    if (this.stopped) return;
+    if (this.stopped || this.revoked) return;
     if (this.kickTimer) clearTimeout(this.kickTimer);
     this.kickTimer = setTimeout(() => {
       this.kickTimer = null;
@@ -478,7 +481,14 @@ export class Engine {
       } catch (err) {
         const offline = err instanceof TypeError || err instanceof NetworkError || (err instanceof HttpError && err.transient);
         let message = String((err as Error).message ?? err);
-        if (err instanceof HttpError && err.status === 401) message = Engine.REMOVED_MESSAGE;
+        if (err instanceof HttpError && err.status === 401) {
+          // Retrying would only flap the status between ✓ and ✗ every poll.
+          // Stay in the error state until the user leaves or re-joins.
+          message = Engine.REMOVED_MESSAGE;
+          this.revoked = true;
+          this.ws?.close();
+          this.ws = null;
+        }
         this.setStatus({ phase: offline ? "offline" : "error", message });
         this.log(offline ? "info" : "error", "sync failed", err);
       } finally {
@@ -929,7 +939,7 @@ export class Engine {
   // ----- live channel -----
 
   private connectLive(): void {
-    if (this.stopped || typeof WebSocket === "undefined") return;
+    if (this.stopped || this.revoked || typeof WebSocket === "undefined") return;
     try {
       const ws = new WebSocket(this.client.liveUrl(this.cfg.vaultId), this.client.liveProtocols());
       this.ws = ws;

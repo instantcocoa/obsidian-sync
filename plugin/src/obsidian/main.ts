@@ -100,7 +100,8 @@ export default class ObsyncPlugin extends Plugin {
     this.hooks = new ConfigHooks(this.app, this.manifest.id);
     this.statusEl = this.addStatusBarItem();
     this.statusEl.setText("obsync: off");
-    this.addSettingTab(new ObsyncSettingTab(this));
+    this.settingTab = new ObsyncSettingTab(this);
+    this.addSettingTab(this.settingTab);
 
     this.addCommand({ id: "sync-now", name: "Sync now", callback: () => this.engine?.kick(0) });
     this.addCommand({ id: "show-conflicts", name: "Show conflicts", callback: () => this.cmdConflicts() });
@@ -250,6 +251,7 @@ export default class ObsyncPlugin extends Plugin {
    * behaviour (for example `adoptConfig`) before a join.
    */
   engineOverrides: Partial<EngineConfig> = {};
+  settingTab: ObsyncSettingTab | null = null;
 
   async startEngine(): Promise<void> {
     if (this.engine || !this.settings.identity) return;
@@ -406,6 +408,7 @@ export default class ObsyncPlugin extends Plugin {
     this.locked = false;
     await this.saveSettings();
     this.statusEl.setText("obsync: off");
+    new Notice("obsync: left the vault. Your files stay on disk.");
   }
 
   // ---------- commands ----------
@@ -499,15 +502,21 @@ export default class ObsyncPlugin extends Plugin {
 
   cmdSetRecovery(): Promise<void> {
     return this.guard(async () => {
-      const v = await PromptModal.ask(this.app, "Set recovery passphrase", [
-        { name: "Passphrase (12+ characters)", secret: true },
-        { name: "Repeat", secret: true },
-      ]);
+      const v = await PromptModal.ask(
+        this.app,
+        "Set recovery passphrase",
+        [
+          { name: "Passphrase (12+ characters)", secret: true },
+          { name: "Repeat", secret: true },
+        ],
+        "Set",
+      );
       if (!v) return;
       if (v[0].length < 12) throw new Error("use at least 12 characters");
       if (v[0] !== v[1]) throw new Error("passphrases differ");
       await this.setRecovery(v[0]);
       new Notice("obsync: recovery passphrase set.");
+      this.settingTab?.display();
     });
   }
 

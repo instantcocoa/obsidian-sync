@@ -631,7 +631,9 @@ about `K_e` from `A_e`, and a revoked device's old `A_e` dies with its epoch.
 Vaults from before this existed have no hash. They accept no writes until
 the administrator installs one with `obsync vault auth` using the token
 shown in a key-holding device's settings; a member may not claim it, since
-on such a vault a token thief would be just as eligible. A key holder can
+on such a vault a token thief would be just as eligible. A device may claim
+only while it is the vault's sole device and the vault holds no op and no
+blob, which is exactly the first-enrolment moment and nothing else. A key holder can
 also overwrite a stored blob at the same epoch (`X-Blob-Replace`), which is
 the repair for a blob whose bytes turn out to be undecryptable.
 
@@ -825,8 +827,13 @@ Failure isolation: one op that cannot be applied (its blob does not decrypt
 because a key holder uploaded garbage under a real id, its name is refused
 by the local file system, its parent vanished) is logged, reported through a
 notice, and skipped; the cursor moves on and the next op for that path heals
-it. Only transport failures abort a batch, because those are retried as a
-whole. Without this, a single bad op would stall every device forever.
+it. The same holds on the push side: a local edit whose server head cannot
+be read is reported and left for the next change rather than failing the
+whole push. Only transport failures abort a batch, because those are
+retried as a whole. Without this, a single bad op would stall every device
+forever. Exclusion patterns match case-insensitively and the config-dir
+alias check folds case and combining marks, because on macOS and Windows
+volumes `Workspace.json` and `plugins/Obsync/` are the excluded paths.
 
 ### 6.7 Mobile
 

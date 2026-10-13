@@ -78,7 +78,12 @@ export function isSafeLogicalPath(p: string): boolean {
  */
 export function aliasesConfigDir(devPath: string, configDir: string): boolean {
   const first = devPath.split("/")[0];
-  return first !== configDir && first.toLowerCase() === configDir.toLowerCase();
+  return first !== configDir && fold(first) === fold(configDir);
+}
+
+/** Lower-case and strip combining marks, so "İ" (U+0130 → "i̇") folds to "i" like a case-insensitive file system might. */
+function fold(s: string): string {
+  return s.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
 }
 
 /** Same rules for a device path (no $CONFIG token allowed at all). */
@@ -116,7 +121,10 @@ export function compileExclusions(patterns: string[]): (logicalPath: string) => 
     const prefix = anchored ? "^" : "(?:^|/)";
     const suffix = dirOnly ? "(?:/|$)" : "$";
     // A non-dir pattern also matches a directory of that name (gitignore semantics).
-    res.push(new RegExp(prefix + re + (dirOnly ? suffix : "(?:/|$)")));
+    // Case-insensitive: on macOS and Windows volumes "Workspace.json" and
+    // "plugins/Obsync/" are the excluded files, and an exclusion that a
+    // remote path can sidestep by changing case is no exclusion.
+    res.push(new RegExp(prefix + re + (dirOnly ? suffix : "(?:/|$)"), "i"));
   }
   return (p) => res.some((r) => r.test(p));
 }

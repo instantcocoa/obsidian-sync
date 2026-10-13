@@ -18,7 +18,7 @@ import { fromB64, bytesEqual } from "./encoding";
 import type { FileStat, StateStore, VaultFS } from "./fs";
 import { mergeJson, mergeText } from "./merge";
 import { aliasesConfigDir, compileExclusions, conflictPath, fromLogical, isJsonPath, isSafeDevicePath, isSafeLogicalPath, isTextPath, toLogical, CONFIG_TOKEN } from "./paths";
-import { NetworkError, Client, HttpError, type OpInput, type WireOp } from "./transport";
+import { NetworkError, Client, HttpError, type OpInput, type OpResult, type WireOp } from "./transport";
 
 // ---------- types ----------
 
@@ -482,12 +482,19 @@ export class Engine {
         const offline = err instanceof TypeError || err instanceof NetworkError || (err instanceof HttpError && err.transient);
         let message = String((err as Error).message ?? err);
         if (err instanceof HttpError && err.status === 401) {
-          // Retrying would only flap the status between ✓ and ✗ every poll.
-          // Stay in the error state until the user leaves or re-joins.
-          message = Engine.REMOVED_MESSAGE;
-          this.revoked = true;
-          this.ws?.close();
-          this.ws = null;
+          if (/vault authority/i.test(err.body)) {
+            // Our authority token is stale: another device rotated between
+            // our pull and push. The next sync adopts the new epoch.
+            message = "keys changed on another device; syncing again";
+            this.wantSync = true;
+          } else {
+            // Token revoked. Retrying would only flap the status between
+            // ✓ and ✗ every poll; stay put until the user leaves or re-joins.
+            message = Engine.REMOVED_MESSAGE;
+            this.revoked = true;
+            this.ws?.close();
+            this.ws = null;
+          }
         }
         this.setStatus({ phase: offline ? "offline" : "error", message });
         this.log(offline ? "info" : "error", "sync failed", err);
@@ -848,22 +855,14 @@ export class Engine {
           const p = chunk[j];
           const r = res.results[j];
           await this.withLock(p.logical, async () => {
-            if (r.seq && !r.conflict && !r.error) {
-              this.state.files[p.logical] = { hash: p.op.blob_id, seq: r.seq, size: p.st?.size ?? 0, mtime: p.st?.mtime ?? 0 };
-              this.dirty.delete(p.logical);
-              // The server's cursor can jump past our own op; keep cursor in step so we do not re-pull it.
-              if (r.seq === this.state.cursor + 1) this.state.cursor = r.seq;
-            } else if (r.conflict) {
-              const meta = await this.vc.decryptMeta(r.conflict.path_id, fromB64(r.conflict.meta_enc));
-              if (p.bytes) await this.resolveConflict(p.logical, p.bytes, p.op.blob_id!, r.conflict, meta);
-              else {
-                // We tried to delete, but the remote moved on: remote wins, drop the delete.
-                await this.applyRemote(p.logical, r.conflict, meta, new Map());
-                this.dirty.delete(p.logical);
-              }
-            } else {
-              this.log("error", `op rejected for ${p.logical}: ${r.error}`);
-              if (/blob not uploaded/.test(r.error ?? "")) return; // retry next round
+            try {
+              await this.settle(p, r);
+            } catch (e) {
+              // A head we cannot read (garbage blob) must not turn every
+              // sync red: leave the path dirty, report once, carry on.
+              if (e instanceof NetworkError || (e instanceof HttpError && e.transient)) throw e;
+              this.log("error", `could not settle ${p.logical} against the server head; will retry after the next change`, e);
+              this.hooks.onSkipped?.(this.device(p.logical), String((e as Error).message ?? e));
               this.dirty.delete(p.logical);
             }
           });
@@ -876,6 +875,29 @@ export class Engine {
     }
     this.setStatus({});
   }
+
+  /** Apply one post result to local state: accepted, conflicting, or rejected. */
+  private async settle(p: { logical: string; op: OpInput; bytes?: Uint8Array; st?: FileStat }, r: OpResult): Promise<void> {
+    if (r.seq && !r.conflict && !r.error) {
+      this.state.files[p.logical] = { hash: p.op.blob_id, seq: r.seq, size: p.st?.size ?? 0, mtime: p.st?.mtime ?? 0 };
+      this.dirty.delete(p.logical);
+      // The server's cursor can jump past our own op; keep cursor in step so we do not re-pull it.
+      if (r.seq === this.state.cursor + 1) this.state.cursor = r.seq;
+    } else if (r.conflict) {
+      const meta = await this.vc.decryptMeta(r.conflict.path_id, fromB64(r.conflict.meta_enc));
+      if (p.bytes) await this.resolveConflict(p.logical, p.bytes, p.op.blob_id!, r.conflict, meta);
+      else {
+        // We tried to delete, but the remote moved on: remote wins, drop the delete.
+        await this.applyRemote(p.logical, r.conflict, meta, new Map());
+        this.dirty.delete(p.logical);
+      }
+    } else {
+      this.log("error", `op rejected for ${p.logical}: ${r.error}`);
+      if (/blob not uploaded/.test(r.error ?? "")) return; // retry next round
+      this.dirty.delete(p.logical);
+    }
+  }
+
 
   /**
    * Re-upload a file's current bytes, replacing whatever the server holds

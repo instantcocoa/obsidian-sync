@@ -51,6 +51,9 @@ func Open(path string) (*Store, error) {
 
 func (s *Store) Close() error { return s.db.Close() }
 
+// DB exposes the handle for tests that need to simulate an older database.
+func (s *Store) DB() *sql.DB { return s.db }
+
 const schema = `
 CREATE TABLE IF NOT EXISTS vaults (
   id TEXT PRIMARY KEY,
@@ -280,8 +283,15 @@ func (s *Store) EnsureVaultAuth(ctx context.Context, vault, device, token string
 			if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM devices WHERE vault_id=? AND revoked_at IS NULL AND recovery=0`, vault).Scan(&live); err != nil {
 				return err
 			}
-			if live != 1 || !s.deviceLiveTx(ctx, tx, device, vault) {
-				return fmt.Errorf("%w: vault authority can only be claimed by the first device; an admin sets it for older vaults", ErrForbidden)
+			// A genuine first enrolment happens before any op or blob exists.
+			// A pre-§5.8 vault with one device and data in it is claimable
+			// only by the admin, not by whoever holds that device's token.
+			var seq, blobs int64
+			if err := tx.QueryRowContext(ctx, `SELECT seq, (SELECT COUNT(*) FROM blobs WHERE vault_id=vaults.id) FROM vaults WHERE id=?`, vault).Scan(&seq, &blobs); err != nil {
+				return err
+			}
+			if live != 1 || seq != 0 || blobs != 0 || !s.deviceLiveTx(ctx, tx, device, vault) {
+				return fmt.Errorf("%w: vault authority can only be claimed by the first device before any data exists; an admin sets it for older vaults", ErrForbidden)
 			}
 			_, err := tx.ExecContext(ctx, `UPDATE vaults SET auth_hash=? WHERE id=?`, h, vault)
 			return err

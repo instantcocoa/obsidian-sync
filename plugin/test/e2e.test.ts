@@ -353,12 +353,25 @@ describe("two devices", () => {
     expect(await b.read("after.md")).toBe("after\n");
     expect(skipped).toEqual(["victim.md"]);
     expect((await b.files()).includes("victim.md")).toBe(false);
+    // B edits the bad path locally before the repair: its push conflicts
+    // with a head it cannot read. That must not turn B's every sync red,
+    // and B's other changes must still go out.
+    await b.write("victim.md", "B's own words\n");
+    await b.write("other.md", "other\n");
+    await b.sync();
+    expect(b.engine.getStatus().phase).toBe("idle");
+    await a.sync();
+    expect(await a.read("other.md")).toBe("other\n");
     // Re-saving on the author would upload nothing (the id is "present"), so
     // the repair is an explicit re-upload: replace the bytes, post a new op.
     await a.write("victim.md", "victim\n");
     await a.engine.reupload("victim.md");
+    await b.write("victim.md", "B's own words\n"); // still dirty on B
+    await b.sync();
     await b.sync();
     expect(await b.read("victim.md").catch(() => "missing")).toBe("victim\n");
+    // B's words survive as a conflict sibling.
+    expect((await b.files()).some((f) => /^victim \(conflict /.test(f))).toBe(true);
     await a.cleanup();
     await b.cleanup();
   });

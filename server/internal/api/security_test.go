@@ -191,6 +191,20 @@ func TestAuthorityClaimRules(t *testing.T) {
 	var red store.Redeemed
 	e.do("POST", "/v1/invites/"+inv.Token, "", map[string]any{"pub_kex": randBytes(65)}, nil).expect(t, 201).json(t, &red)
 	e.do("POST", "/v1/vaults/"+v2.ID+"/auth", red.DeviceToken, map[string]any{"auth": newAuthTok()}, nil).expect(t, 204)
+	// A legacy single-device vault that already holds data is not claimable by its token either.
+	var v3 store.Vault
+	e.do("POST", "/v1/vaults", adminTok, nil, nil).expect(t, 201).json(t, &v3)
+	e.do("POST", "/v1/vaults/"+v3.ID+"/invites", adminTok, map[string]any{"keybox_enc": randBytes(64)}, nil).expect(t, 201).json(t, &inv)
+	e.do("POST", "/v1/invites/"+inv.Token, "", map[string]any{"pub_kex": randBytes(65)}, nil).expect(t, 201).json(t, &red)
+	legacyTok := newAuthTok()
+	e.do("POST", "/v1/vaults/"+v3.ID+"/auth", adminTok, map[string]any{"auth": legacyTok}, nil).expect(t, 204) // simulate: data was written under an admin-installed token…
+	e.do("POST", "/v1/vaults/"+v3.ID+"/ops", red.DeviceToken, []opIn{put("old.md", nil, 0)}, map[string]string{"X-Obsync-Vault-Auth": legacyTok}).expect(t, 200)
+	// …then imagine the hash were absent (pre-§5.8 DB): clear it the way a migration would leave it.
+	if _, err := e.st.DB().Exec(`UPDATE vaults SET auth_hash=NULL WHERE id=?`, v3.ID); err != nil {
+		t.Fatal(err)
+	}
+	e.do("POST", "/v1/vaults/"+v3.ID+"/auth", red.DeviceToken, map[string]any{"auth": newAuthTok()}, nil).expect(t, 401)
+	e.do("POST", "/v1/vaults/"+v3.ID+"/auth", adminTok, map[string]any{"auth": newAuthTok()}, nil).expect(t, 204)
 }
 
 // A device revoked while its long-poll is open gets nothing from it, and an

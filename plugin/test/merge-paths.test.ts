@@ -113,7 +113,15 @@ describe("path safety (what another device may make us write)", () => {
     expect(isSafeLogicalPath("x".repeat(255))).toBe(true);
     expect(isSafeLogicalPath("notes/tilde~1 is fine.md")).toBe(true); // has a dot before the tilde → not an 8.3 alias
   });
+  it("exclusions match case-insensitively (case-insensitive volumes make them the same file)", () => {
+    const ex = compileExclusions(DEFAULT_EXCLUSIONS);
+    expect(ex("$CONFIG/Workspace.json")).toBe(true);
+    expect(ex("$CONFIG/plugins/Obsync/pwn.js")).toBe(true);
+    expect(ex("$CONFIG/WORKSPACE.JSON")).toBe(true);
+    expect(ex("$CONFIG/app.json")).toBe(false);
+  });
   it("case-only variants of the config dir are aliases, not new folders", () => {
+    expect(aliasesConfigDir(".OBS\u0130DIAN/app.json", ".obsidian")).toBe(true); // dotted capital I folds to i
     expect(aliasesConfigDir(".Obsidian/plugins/x/main.js", ".obsidian")).toBe(true);
     expect(aliasesConfigDir(".OBSIDIAN/app.json", ".obsidian")).toBe(true);
     expect(aliasesConfigDir(".obsidian/app.json", ".obsidian")).toBe(false);

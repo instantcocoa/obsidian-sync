@@ -164,5 +164,11 @@ describe.skipIf(!OBSIDIAN_BIN)("inside real Obsidian", () => {
     expect(info.epoch).toBe(2);
     await a.eval((_p, app) => app.vault.create("After rotation.md", "post-rotation\n"));
     expect(await b.waitForFile("After rotation.md", "post-rotation\n", 60_000)).not.toBeNull();
+    // Every surviving device still reads every name after the rotation
+    // pruned epoch 1 (the first-run walkthrough found them all "(unreadable name)").
+    for (const inst of [a, b]) {
+      const names: string[] = await inst.eval(async (plugin) => (await plugin.devices()).filter((d: any) => !d.revoked_at).map((d: any) => d.name));
+      expect(names.filter((n) => /unreadable|unnamed/.test(n))).toEqual([]);
+    }
   }, 180_000);
 });

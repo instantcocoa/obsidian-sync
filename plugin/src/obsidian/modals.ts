@@ -76,8 +76,9 @@ export class PromptModal extends Modal {
   constructor(
     app: App,
     private title: string,
-    private fields: { name: string; placeholder?: string; secret?: boolean; multiline?: boolean }[],
+    private fields: { name: string; placeholder?: string; secret?: boolean; multiline?: boolean; optional?: boolean }[],
     private resolve: (values: string[] | null) => void,
+    private confirmText = "OK",
   ) {
     super(app);
   }
@@ -96,11 +97,17 @@ export class PromptModal extends Modal {
     });
     new Setting(this.contentEl).addButton((b) =>
       b
-        .setButtonText("OK")
+        .setButtonText(this.confirmText)
         .setCta()
         .onClick(() => {
+          const values = this.values.map((v) => v.trim());
+          const missing = this.fields.filter((f, i) => !f.optional && !values[i]).map((f) => f.name);
+          if (missing.length) {
+            new Notice(`obsync: please fill in ${missing.join(", ")}.`);
+            return;
+          }
           this.done = true;
-          this.resolve(this.values.map((v) => v.trim()));
+          this.resolve(values);
           this.close();
         }),
     );
@@ -109,8 +116,8 @@ export class PromptModal extends Modal {
     if (!this.done) this.resolve(null);
     this.contentEl.empty();
   }
-  static ask(app: App, title: string, fields: PromptModal["fields"]): Promise<string[] | null> {
-    return new Promise((res) => new PromptModal(app, title, fields, res).open());
+  static ask(app: App, title: string, fields: PromptModal["fields"], confirmText = "OK"): Promise<string[] | null> {
+    return new Promise((res) => new PromptModal(app, title, fields, res, confirmText).open());
   }
 }
 

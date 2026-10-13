@@ -258,6 +258,9 @@ describe("two devices", () => {
     expect(info.epoch).toBe(2);
     expect(info.min_epoch).toBe(2); // everything re-encrypted
     expect(a.session.identity.keyring.epochs["1"]).toBeUndefined(); // old key pruned
+    // Device names survive the rotation and the pruning of epoch 1 (they are
+    // encrypted under the identity key, not the epoch key).
+    expect((await listDevices(a.session)).filter((d) => !d.revoked_at).map((d) => d.name).sort()).toEqual(["(recovery passphrase)", "laptop"]);
     // B is locked out.
     await expect(b.sync()).rejects.toThrow(/401|forbidden|removed/i);
     // A keeps working under epoch 2.

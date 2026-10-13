@@ -18,7 +18,7 @@ import { fromB64, bytesEqual } from "./encoding";
 import type { FileStat, StateStore, VaultFS } from "./fs";
 import { mergeJson, mergeText } from "./merge";
 import { compileExclusions, conflictPath, fromLogical, isJsonPath, isSafeDevicePath, isSafeLogicalPath, isTextPath, toLogical, CONFIG_TOKEN } from "./paths";
-import { Client, HttpError, type OpInput, type WireOp } from "./transport";
+import { NetworkError, Client, HttpError, type OpInput, type WireOp } from "./transport";
 
 // ---------- types ----------
 
@@ -127,6 +127,8 @@ export class Engine {
   private ws: WebSocket | null = null;
   private wsBackoff = 1000;
   private wsLastMessage = 0;
+  /** What a device sees once its token is revoked (another device removed it). */
+  static readonly REMOVED_MESSAGE = "This device was removed from the vault. Leave this vault, or re-join with an invite link.";
   /** Server heartbeats every 25 s; three missed ones means the channel is dead. */
   private static readonly WS_STALE_MS = 80_000;
   private stopped = true;
@@ -472,8 +474,10 @@ export class Engine {
           this.setStatus({ phase: "idle", lastSync: Date.now() });
         } while (this.wantSync && !this.stopped);
       } catch (err) {
-        const offline = err instanceof TypeError || (err instanceof HttpError && err.transient);
-        this.setStatus({ phase: offline ? "offline" : "error", message: String((err as Error).message ?? err) });
+        const offline = err instanceof TypeError || err instanceof NetworkError || (err instanceof HttpError && err.transient);
+        let message = String((err as Error).message ?? err);
+        if (err instanceof HttpError && err.status === 401) message = Engine.REMOVED_MESSAGE;
+        this.setStatus({ phase: offline ? "offline" : "error", message });
         this.log(offline ? "info" : "error", "sync failed", err);
       } finally {
         await this.flushState();

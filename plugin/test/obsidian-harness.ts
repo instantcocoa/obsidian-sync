@@ -151,6 +151,15 @@ export class ObsidianInstance {
     await this.page.locator(`button:has-text("${text}")`).first().click({ timeout: 10_000 });
   }
 
+  /**
+   * Same, but only in the topmost modal and by exact text: the settings
+   * dialog is itself a modal and has e.g. a "Create…" button behind the
+   * "Create" prompt.
+   */
+  async clickModalButton(text: string): Promise<void> {
+    await this.page.locator(".modal-container").last().locator(`button:text-is("${text}")`).first().click({ timeout: 10_000 });
+  }
+
   /** Type into the input whose placeholder matches. */
   async fill(placeholder: string, value: string): Promise<void> {
     await this.page.locator(`input[placeholder="${placeholder}"]`).first().fill(value, { timeout: 10_000 });

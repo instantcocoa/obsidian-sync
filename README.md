@@ -7,21 +7,25 @@ vault, `.obsidian` included, and is set up in two minutes.
   conflict rules). Starts with what we learned from reading Self-hosted
   LiveSync.
 - `server/` — the Go server: one static binary, SQLite + a blob directory.
-- `plugin/` — the Obsidian plugin (TypeScript).
+  See `server/README.md` for flags, TLS and the API.
+- `plugin/` — the Obsidian plugin (TypeScript). See `plugin/README.md` for
+  setup, what syncs, conflicts, devices and keys.
 
 ## Quick start
 
 ```sh
-# server
+# server (try it locally first; https with --acme-domain or a reverse proxy when phones join)
 cd server && go build -o obsync ./cmd/obsync
-./obsync serve --data /var/lib/obsync --acme-domain sync.example.com   # or --listen :8080 behind a proxy
-# it prints an admin token on first run
+./obsync serve --data ./data --listen 127.0.0.1:8080
+# it prints an admin token on first run and saves it to ./data/admin-token
+# opening http://127.0.0.1:8080 in a browser confirms it is up
 
-# plugin
+# plugin (warnings about esbuild install scripts are harmless)
 cd plugin && npm install && npm run build
 # copy main.js, manifest.json, styles.css into <vault>/.obsidian/plugins/obsync/
-# then: Settings → obsync → Create a new vault (server URL + admin token)
-# other devices: Settings → obsync → Join with invite link
+# restart Obsidian → Settings → Community plugins → turn off Restricted mode → enable obsync
+# then: Settings → obsync → check the Device name → Create a new vault (server URL + admin token)
+# other devices: same install, then Settings → obsync → Join with invite link
 ```
 
 ## Tests

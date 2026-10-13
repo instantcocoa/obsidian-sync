@@ -108,6 +108,12 @@ func (s *Server) Hub() *Hub { return s.hub }
 func (s *Server) routes() {
 	m := s.mux
 	m.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("ok")) })
+	// A human opening the URL in a browser should learn that it is the right
+	// one, not get a bare 404.
+	m.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.Write([]byte("obsync server is running.\n\nPoint the Obsidian plugin at this URL (Settings → obsync → Create a new vault, or paste an invite link).\n"))
+	})
 
 	m.HandleFunc("POST /v1/vaults", s.admin(s.createVault))
 	m.HandleFunc("GET /v1/vaults", s.admin(s.listVaults))

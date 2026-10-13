@@ -8,25 +8,37 @@ Pairs with the `obsync` server in `../server`. Design and rationale are in
 ## Setup in two minutes
 
 1. Run the server once (see `../server/README.md`). Note the admin token it
-   prints and the URL it serves on. Mobile needs HTTPS with a real
-   certificate; `--acme-domain` does that for you.
-2. On the first device: install the plugin, open its settings, choose
-   **Create a new vault**, enter the server URL and the admin token. The
-   vault keys are generated on this device; the server never sees them.
-3. On the first device: **Generate invite link**. On every other device:
-   install the plugin, open its settings, paste the link into **Join with
-   invite link**. Done. The link is single-use and expires in 24 hours.
-4. Optional but recommended: **Set recovery passphrase** so a new device can
-   join with only the server URL, vault id, and passphrase if you lose every
-   other device.
+   prints (also saved to `<data>/admin-token`) and the URL it serves on.
+   Plain `http://` is fine on a desktop or a LAN; mobile needs HTTPS with a
+   real certificate, and `--acme-domain` does that for you.
+2. Install the plugin: copy `main.js`, `manifest.json` and `styles.css` into
+   `<vault>/.obsidian/plugins/obsync/`, restart Obsidian, and under
+   Settings → Community plugins turn off Restricted mode and enable
+   **obsync**. Then open the obsync settings tab.
+3. On the first device: check the **Device name** (it defaults to the
+   machine's hostname; it is how this device appears on every other device
+   and in conflict file names, and can be renamed later), then **Create a new
+   vault → Create…** with the server URL and the admin token. The vault keys
+   are generated on this device; the server never sees them.
+4. On the first device: **Generate invite link**. On every other device:
+   install the plugin the same way, open its settings, paste the link into
+   **Join with invite link** and press **Join**. A notice confirms the join
+   and the status bar shows `obsync ✓`. The link is single-use and expires in
+   24 hours.
+5. Optional but recommended: **Set recovery passphrase** so a new device can
+   join with only the server URL, the vault id and the passphrase if you lose
+   every other device. The vault id is shown under **Status** with a Copy
+   button; keep a copy of it with the passphrase.
 
 There is nothing else to configure. Everything syncs, in both directions,
-immediately, with conflicts handled without dialogs.
+immediately, with conflicts handled without dialogs. The "two minutes" is
+the part after the server is running and the plugin is installed; budget
+another ten for the first time through the build and install steps.
 
 ## What syncs
 
 Everything in the vault, including dot-files and the config folder, except a
-short per-device exclusion list (Settings → Exclusions):
+short per-device exclusion list (Settings → What to sync → Exclusions):
 
 ```
 /$CONFIG/workspace.json            window layout: per device
@@ -35,6 +47,7 @@ short per-device exclusion list (Settings → Exclusions):
 /$CONFIG/plugins/obsync/           this plugin's keys and state
 /$CONFIG/cache/
 /.trash/  /.git/  node_modules/  .DS_Store  desktop.ini  Thumbs.db
+*.obsync-tmp  *.obsync-conflict-tmp   this plugin's own temporary files
 ```
 
 `$CONFIG` stands for the config folder, whatever it is called on each
@@ -71,10 +84,19 @@ vault as new history, so it can be undone.
 
 ## Devices and keys
 
-**Manage devices** lists every device by the name it chose. **Remove** on a
-device rotates the vault keys and re-encrypts everything in the background,
-so the removed device can decrypt nothing the server still holds. Removing a
-lost phone is one click.
+**Manage devices** lists every device by the name it chose (rename this
+one under Status → This device). **Remove** on a device rotates the vault
+keys and re-encrypts everything in the background, so the removed device can
+decrypt nothing the server still holds. Removing a lost phone is one click.
+The removed device, if it is still around, shows `obsync ✗` and a notice
+saying it was removed; use **Leave this vault** on it, or re-join it with a
+new invite link.
+
+**Leaving and uninstalling.** Settings → Advanced → **Leave this vault**
+stops syncing on this device and forgets its keys and token; your files stay
+on disk. The device stays listed on other devices until you **Remove** it
+there, which rotates the keys. To uninstall completely, leave first, then
+delete `.obsidian/plugins/obsync/`.
 
 Keys, the device token and the local state live in
 `.obsidian/plugins/obsync/`. They are never synced. Losing that folder on
@@ -120,15 +142,18 @@ not allowed to use public-key credentials, as verified in the test suite.
 
 ## Commands
 
-Sync now · Show conflicts · Generate invite link · Manage devices · Set
-recovery passphrase · Rotate vault keys · Restore vault to a point in time ·
-Show history for current file · Rebuild local sync state · Apply held
-deletions.
+Sync now · Show conflicts · Generate invite link for another device ·
+Manage devices · Set recovery passphrase · Rotate vault keys · Restore vault
+to a point in time · Show history for current file · Rebuild local sync
+state · Apply held deletions · Unlock vault keys.
 
 ## Status bar
 
-`obsync ✓` idle · `↕ 3` syncing, 3 files pending · `… ` scanning ·
-`⚠ offline` will retry · `✗` error (hover for the message).
+`obsync: off` not connected · `obsync ✓` idle · `↕ 3` syncing, 3 files
+pending · `… ` scanning · `⚠ offline` will retry · `✗` error (hover for the
+message; "removed from the vault" means another device removed this one) ·
+`re-encrypting N` a key rotation is re-encrypting data · `🔒` keys locked,
+run "Unlock vault keys".
 
 ## Mobile status
 

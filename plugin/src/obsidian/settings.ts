@@ -51,11 +51,16 @@ export class ObsyncSettingTab extends PluginSettingTab {
       .setDesc("Needs the server URL, the vault id, and the recovery passphrase set on another device.")
       .addButton((b) =>
         b.setButtonText("Join…").onClick(async () => {
-          const v = await PromptModal.ask(this.app, "Join with recovery passphrase", [
-            { name: "Server URL", placeholder: "https://sync.example.com" },
-            { name: "Vault id" },
-            { name: "Recovery passphrase", secret: true },
-          ]);
+          const v = await PromptModal.ask(
+            this.app,
+            "Join with recovery passphrase",
+            [
+              { name: "Server URL", placeholder: "https://sync.example.com" },
+              { name: "Vault id", placeholder: "32 hex characters, shown under Status on a connected device" },
+              { name: "Recovery passphrase", secret: true },
+            ],
+            "Join",
+          );
           if (v && (await this.plainHttpOk(v[0]))) await this.run(() => this.plugin.joinWithPassphrase(v[0], v[1], v[2]));
         }),
       );
@@ -65,17 +70,22 @@ export class ObsyncSettingTab extends PluginSettingTab {
       .setDesc("First device only. Needs the server's admin token (printed when the server first started).")
       .addButton((b) =>
         b.setButtonText("Create…").onClick(async () => {
-          const v = await PromptModal.ask(this.app, "Create a new vault", [
-            { name: "Server URL", placeholder: "https://sync.example.com" },
-            { name: "Admin token", secret: true },
-          ]);
+          const v = await PromptModal.ask(
+            this.app,
+            "Create a new vault",
+            [
+              { name: "Server URL", placeholder: "https://sync.example.com" },
+              { name: "Admin token", placeholder: "printed by the server on first start; also in <data>/admin-token", secret: true },
+            ],
+            "Create",
+          );
           if (v && (await this.plainHttpOk(v[0]))) await this.run(() => this.plugin.createVault(v[0], v[1]));
         }),
       );
 
     new Setting(el)
       .setName("Device name")
-      .setDesc("Shown in the device list on other devices and used in conflict file names.")
+      .setDesc("How this device appears in Manage devices on every device, and in conflict file names. Pick something you will recognise; it can be changed later.")
       .addText((t) => t.setValue(this.plugin.settings.deviceName).onChange((v) => (this.plugin.settings.deviceName = v.trim() || "device")));
   }
 
@@ -84,10 +94,29 @@ export class ObsyncSettingTab extends PluginSettingTab {
     const id = s.identity!;
     el.createEl("h3", { text: "Status" });
     const st = this.plugin.engine?.getStatus();
+    const statusName = st ? `${st.phase}${st.pending ? `, ${st.pending} pending` : ""}` : "stopped";
     new Setting(el)
-      .setName(st ? `${st.phase}${st.pending ? `, ${st.pending} pending` : ""}` : "stopped")
-      .setDesc(`${id.server}\nvault ${id.vaultId}\nthis device: ${id.deviceName} (${id.deviceId.slice(0, 8)})`)
+      .setName(statusName)
+      .setDesc(st?.message ?? `Server: ${id.server}`)
       .addButton((b) => b.setButtonText("Sync now").onClick(() => this.plugin.engine?.kick(0)));
+    new Setting(el)
+      .setName("Vault id")
+      .setDesc(`${id.vaultId}\nNeeded, with the server URL and the recovery passphrase, to join from a device that has no invite link. Keep a copy somewhere safe.`)
+      .addButton((b) =>
+        b.setButtonText("Copy").onClick(async () => {
+          await navigator.clipboard.writeText(id.vaultId);
+          new Notice("obsync: vault id copied.");
+        }),
+      );
+    new Setting(el)
+      .setName("This device")
+      .setDesc(`${id.deviceName} (${id.deviceId.slice(0, 8)}). Shown on every device in Manage devices and used in conflict file names.`)
+      .addButton((b) =>
+        b.setButtonText("Rename…").onClick(async () => {
+          const v = await PromptModal.ask(this.app, "Rename this device", [{ name: "Device name", placeholder: id.deviceName }], "Rename");
+          if (v) await this.run(() => this.plugin.renameDevice(v[0]));
+        }),
+      );
 
     el.createEl("h3", { text: "Devices" });
     new Setting(el)
@@ -98,10 +127,16 @@ export class ObsyncSettingTab extends PluginSettingTab {
       .setName("Manage devices")
       .setDesc("List devices. Removing one rotates the vault keys and re-encrypts, so the removed device can read nothing new.")
       .addButton((b) => b.setButtonText("Open").onClick(() => this.plugin.cmdDevices()));
-    new Setting(el)
+    const rec = new Setting(el)
       .setName("Recovery passphrase")
       .setDesc("Optional. Lets a new device join with only the server URL, vault id, and this passphrase. Setting it again replaces the old one.")
       .addButton((b) => b.setButtonText("Set…").onClick(() => this.plugin.cmdSetRecovery()));
+    void this.plugin
+      .devices()
+      .then((ds) => {
+        if (ds.some((d) => d.recovery && !d.revoked_at)) rec.setDesc("A passphrase is set. Lets a new device join with only the server URL, vault id, and the passphrase. Setting it again replaces the old one.");
+      })
+      .catch(() => {});
 
     el.createEl("h3", { text: "What to sync" });
     new Setting(el)

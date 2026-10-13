@@ -65,6 +65,7 @@ const INFO_META = utf8("obsync/meta/v1");
 const INFO_BLOB = utf8("obsync/blob/v1");
 const INFO_WRAP = utf8("obsync/wrap/v1");
 const INFO_AUTH = utf8("obsync/auth/v1");
+const INFO_NAME = utf8("obsync/name/v1");
 
 /** Source of randomness; tests inject a deterministic one to pin vectors. */
 export type Rng = (n: number) => Uint8Array;
@@ -299,21 +300,36 @@ export class VaultCrypto {
     return readU32le(metaEnc, 0);
   }
 
-  async encryptName(name: string, opts: { epoch?: number; rng?: Rng } = {}): Promise<Uint8Array> {
-    const epoch = opts.epoch ?? this.keyring.current;
+  /**
+   * Device names are encrypted under a key derived from the identity key
+   * (epoch field 0), not the epoch key: a device can only set its own name,
+   * so a name written under epoch 1 would become unreadable to everyone
+   * once epoch 1 is pruned after a rotation. The identity key never
+   * rotates, and a removed device loses roster access with its token, so
+   * nothing is given up. Epoch values ≥ 1 are read for rows written by
+   * older versions.
+   */
+  async encryptName(name: string, opts: { rng?: Rng } = {}): Promise<Uint8Array> {
     const nonce = (opts.rng ?? defaultRng)(12);
-    const ct = await gcmEncrypt(await this.metaKey(epoch), nonce, utf8("name"), utf8(name));
-    return concat(u32le(epoch), nonce, ct);
+    const ct = await gcmEncrypt(await this.nameKey(), nonce, utf8("name"), utf8(name));
+    return concat(u32le(0), nonce, ct);
   }
 
   async decryptName(nameEnc: Uint8Array): Promise<string> {
     if (nameEnc.length < 16 + 16) throw new CryptoError("bad name");
     const epoch = readU32le(nameEnc, 0);
     try {
-      return fromUtf8(await gcmDecrypt(await this.metaKey(epoch), nameEnc.subarray(4, 16), utf8("name"), nameEnc.subarray(16)));
+      const key = epoch === 0 ? await this.nameKey() : await this.metaKey(epoch);
+      return fromUtf8(await gcmDecrypt(key, nameEnc.subarray(4, 16), utf8("name"), nameEnc.subarray(16)));
     } catch {
       return "(unreadable name)";
     }
+  }
+
+  private nameKeyP?: Promise<CryptoKey>;
+  private nameKey(): Promise<CryptoKey> {
+    this.nameKeyP ??= hkdf(this.keyring.kId, new Uint8Array(0), INFO_NAME).then(aesKey);
+    return this.nameKeyP;
   }
 }
 

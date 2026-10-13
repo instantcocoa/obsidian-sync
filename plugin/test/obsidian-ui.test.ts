@@ -27,12 +27,16 @@ describe.skipIf(!OBSIDIAN_BIN)("real Obsidian, settings UI onboarding, rate limi
     await srv?.stop();
   });
 
-  it("first device: Settings → Create a new vault → server URL + admin token → OK", async () => {
+  it("first device: Settings → Create a new vault → server URL + admin token → Create", async () => {
     await a.openSettings();
     await a.clickButton("Create…");
+    // Empty fields are refused with a notice, not silently closed.
+    await a.clickModalButton("Create");
+    expect(await a.waitFor(() => /fill in/.test(document.querySelector(".notice")?.textContent ?? ""), 5_000)).toBe(true);
     await a.fill("https://sync.example.com", srv.url); // first prompt field (server URL)
     await a.page.locator('input[type="password"]').first().fill(ADMIN);
-    await a.clickButton("OK");
+    await a.clickModalButton("Create");
+    expect(await a.waitFor(() => /vault created/.test(document.querySelector(".notice")?.textContent ?? ""), 20_000)).toBe(true);
     expect(await a.waitFor(() => Boolean((globalThis as any).app.plugins.plugins.obsync.settings.identity), 20_000)).toBe(true);
     expect(await a.waitFor(() => Boolean((globalThis as any).app.plugins.plugins.obsync.engine), 20_000)).toBe(true);
     // The tab re-rendered into the "joined" view.
@@ -143,14 +147,14 @@ describe.skipIf(!OBSIDIAN_BIN)("real Obsidian, settings UI onboarding, rate limi
     expect(await a.waitFor(() => document.querySelectorAll('.modal input[type="password"]').length > 0, 15_000)).toBe(true);
     // Wrong PIN: still locked, a notice explains.
     await a.page.locator('.modal input[type="password"]').first().fill("wrong-pin");
-    await a.clickButton("OK");
+    await a.clickModalButton("Unlock");
     expect(await a.waitFor(() => /wrong PIN/.test(document.querySelector(".notice")?.textContent ?? ""), 10_000)).toBe(true);
     expect(await a.eval((plugin) => plugin.locked)).toBe(true);
     // Right PIN via the "Unlock vault keys" command path.
     await a.eval((plugin) => void plugin.unlock());
     expect(await a.waitFor(() => document.querySelectorAll('.modal input[type="password"]').length > 0, 10_000)).toBe(true);
     await a.page.locator('.modal input[type="password"]').first().fill("4321-abcd");
-    await a.clickButton("OK");
+    await a.clickModalButton("Unlock");
     expect(await a.waitFor(() => Boolean((globalThis as any).app.plugins.plugins.obsync.engine) && !(globalThis as any).app.plugins.plugins.obsync.locked, 20_000)).toBe(true);
     // And it syncs again.
     await a.eval((_p, app) => app.vault.create("After unlock.md", "unlocked\n"));

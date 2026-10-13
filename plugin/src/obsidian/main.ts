@@ -71,6 +71,19 @@ const DEFAULT_SETTINGS: Settings = {
  */
 export const MIN_PIN_LENGTH = 6;
 
+/** Something that tells devices apart by default: the hostname on desktop, the platform on mobile. */
+function defaultDeviceName(): string {
+  if (Platform.isMobile) return Platform.isIosApp ? "iphone" : "android";
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const host = String((require("os") as { hostname(): string }).hostname() ?? "").split(".")[0].trim();
+    if (host) return host;
+  } catch {
+    /* not Electron */
+  }
+  return "desktop";
+}
+
 export default class ObsyncPlugin extends Plugin {
   override settings: Settings = { ...DEFAULT_SETTINGS };
   engine: Engine | null = null;
@@ -126,7 +139,7 @@ export default class ObsyncPlugin extends Plugin {
   async loadSettings(): Promise<void> {
     this.settings = { ...DEFAULT_SETTINGS, ...((await this.loadData()) ?? {}) };
     this.settings.protection = { ...DEFAULT_SETTINGS.protection, ...(this.settings.protection ?? {}) };
-    if (!this.settings.deviceName) this.settings.deviceName = Platform.isMobile ? (Platform.isIosApp ? "iphone" : "android") : "desktop";
+    if (!this.settings.deviceName) this.settings.deviceName = defaultDeviceName();
   }
 
   /**
@@ -199,7 +212,7 @@ export default class ObsyncPlugin extends Plugin {
         this.wrapKey = safeUnwrap(s.protection.safeWrap);
         s.identity = await openKeystore<Identity>(s.sealed, this.wrapKey);
       } else {
-        const v = await PromptModal.ask(this.app, "Unlock obsync", [{ name: "PIN", secret: true }]);
+        const v = await PromptModal.ask(this.app, "Unlock obsync", [{ name: "PIN", secret: true }], "Unlock");
         if (!v) return false;
         this.pinSalt = fromB64(s.sealed.salt!);
         const k = await deriveWrapKeyFromPin(v[0], this.pinSalt);
@@ -296,6 +309,10 @@ export default class ObsyncPlugin extends Plugin {
 
   private renderStatus(s: Status): void {
     const icon = { idle: "✓", scanning: "…", syncing: "↕", offline: "⚠ offline", error: "✗" }[s.phase];
+    if (s.phase === "error" && s.message === Engine.REMOVED_MESSAGE && !this.removedNoticed) {
+      this.removedNoticed = true;
+      new Notice(`obsync: ${s.message}`, 15000);
+    }
     let txt = `obsync ${icon}`;
     if (s.pending) txt += ` ${s.pending}`;
     if (s.progress) txt += ` ${s.progress.done}/${s.progress.total}`;
@@ -305,25 +322,41 @@ export default class ObsyncPlugin extends Plugin {
 
   // ---------- enrolment ----------
 
-  private async adopt(session: Session): Promise<void> {
+  private async adopt(session: Session, what: string): Promise<void> {
     this.settings.identity = session.identity;
+    this.removedNoticed = false;
     await this.saveSettings();
     await this.restartEngine();
-    new Notice("obsync: connected. Initial sync running.");
+    new Notice(`obsync: ${what}. Initial sync running.`);
   }
 
   async joinWithLink(link: string): Promise<void> {
     if (!link) throw new Error("paste an invite link first");
-    await this.adopt(await joinWithLink(link, this.settings.deviceName));
+    await this.adopt(await joinWithLink(link, this.settings.deviceName), "joined the vault");
   }
 
   async joinWithPassphrase(server: string, vaultId: string, passphrase: string): Promise<void> {
-    await this.adopt(await joinWithPassphrase(server, vaultId, passphrase, this.settings.deviceName));
+    await this.adopt(await joinWithPassphrase(server, vaultId, passphrase, this.settings.deviceName), "joined the vault with the recovery passphrase");
   }
 
   async createVault(server: string, adminToken: string): Promise<void> {
-    await this.adopt(await createVault(server, adminToken, this.settings.deviceName));
+    await this.adopt(await createVault(server, adminToken, this.settings.deviceName), "vault created and connected");
   }
+
+  /** Rename this device everywhere: the roster (encrypted) and conflict file names. */
+  async renameDevice(name: string): Promise<void> {
+    name = name.trim();
+    if (!name) throw new Error("device name cannot be empty");
+    const s = this.need();
+    await s.client.setDeviceName(s.identity.vaultId, await s.vc.encryptName(name));
+    s.identity.deviceName = name;
+    this.settings.deviceName = name;
+    await this.saveSettings();
+    await this.restartEngine();
+    new Notice(`obsync: this device is now "${name}".`);
+  }
+
+  private removedNoticed = false;
 
   async leaveVault(): Promise<void> {
     await this.engine?.stop();

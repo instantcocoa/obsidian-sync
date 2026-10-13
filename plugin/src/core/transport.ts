@@ -25,6 +25,16 @@ export class HttpError extends Error {
   }
 }
 
+/** The server could not be reached at all (DNS, refused, TLS, offline). */
+export class NetworkError extends Error {
+  constructor(
+    public base: string,
+    public override cause: unknown,
+  ) {
+    super(`Could not reach ${base}. Check the address and that the server is running.`);
+  }
+}
+
 export interface WireOp {
   seq: number;
   op_id: string;
@@ -153,7 +163,11 @@ export class Client {
         }
         return res;
       } catch (e) {
-        if ((e as { final?: boolean }).final || attempt >= max || init.signal?.aborted) throw e;
+        if ((e as { final?: boolean }).final || attempt >= max || init.signal?.aborted) {
+          // fetch reports every connection problem as a bare TypeError ("Failed to fetch").
+          if (e instanceof TypeError) throw new NetworkError(this.base, e);
+          throw e;
+        }
         this.opts.onRetry?.(e, attempt);
         await new Promise((r) => setTimeout(r, Math.min(8000, 300 * 2 ** attempt) + Math.random() * 200));
       }
@@ -171,7 +185,12 @@ export class Client {
   /** Create a vault with the admin token. */
   static async createVault(server: string, adminToken: string, fetchImpl?: typeof fetch): Promise<VaultInfo> {
     const c = new Client(server, adminToken, { fetchImpl });
-    return c.json<VaultInfo>("POST", "/v1/vaults");
+    try {
+      return await c.json<VaultInfo>("POST", "/v1/vaults", undefined, { retry: false });
+    } catch (e) {
+      if (e instanceof HttpError && e.status === 401) throw new Error(`Admin token rejected by ${c.base}.`);
+      throw e;
+    }
   }
 
   async createInvite(vaultId: string, keyboxEnc: Uint8Array, ttlSeconds?: number): Promise<{ token: string; expires_at: number }> {
@@ -186,7 +205,12 @@ export class Client {
 
   static async redeemInvite(server: string, token: string, pubKex: Uint8Array, nameEnc: Uint8Array, fetchImpl?: typeof fetch): Promise<Redeemed> {
     const c = new Client(server, "", { fetchImpl });
-    return c.json<Redeemed>("POST", `/v1/invites/${token}`, { pub_kex: b64(pubKex), name_enc: b64(nameEnc) }, { retry: false });
+    try {
+      return await c.json<Redeemed>("POST", `/v1/invites/${token}`, { pub_kex: b64(pubKex), name_enc: b64(nameEnc) }, { retry: false });
+    } catch (e) {
+      if (e instanceof HttpError && e.status === 401) throw new Error("This invite link was already used or has expired. Generate a new one on a connected device.");
+      throw e;
+    }
   }
 
   async vault(vaultId: string): Promise<VaultInfo> {
@@ -219,7 +243,12 @@ export class Client {
 
   static async getRecovery(server: string, vaultId: string, fetchImpl?: typeof fetch): Promise<{ device_id: string; pub_kex: string; salt: string }> {
     const c = new Client(server, "", { fetchImpl });
-    return c.json("GET", `/v1/vaults/${vaultId}/recovery`);
+    try {
+      return await c.json("GET", `/v1/vaults/${vaultId}/recovery`, undefined, { retry: false });
+    } catch (e) {
+      if (e instanceof HttpError && e.status === 404) throw new Error("No recovery passphrase is set for that vault id on this server.");
+      throw e;
+    }
   }
 
   static async recoveryJoin(

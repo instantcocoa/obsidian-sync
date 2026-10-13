@@ -10,6 +10,9 @@ vault, `.obsidian` included, and is set up in two minutes.
   See `server/README.md` for flags, TLS and the API.
 - `plugin/` — the Obsidian plugin (TypeScript). See `plugin/README.md` for
   setup, what syncs, conflicts, devices and keys.
+- `docs/` — `MOBILE-TEST-PROMPT.md`, a brief for an agent with an Android
+  emulator or phone (the plugin has not yet been run on a device), and
+  `SECURITY-REVIEW-GUIDE.md`, what a human security reviewer should check.
 
 ## Quick start
 

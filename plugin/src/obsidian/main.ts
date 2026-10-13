@@ -284,7 +284,7 @@ export default class ObsyncPlugin extends Plugin {
         onStatus: (s) => this.renderStatus(s),
         afterApply: (p, k) => this.hooks.afterApply(p, k),
         onConflict: (p, sib) => new Notice(`obsync: conflict on ${p}. Your version was saved as ${sib}.`, 10000),
-        onSkipped: (p, why) => new Notice(`obsync: could not apply the latest version of ${p} (${why}). Sync continues; the next change to that file will fix it.`, 12000),
+        onSkipped: (p, why) => new Notice(`obsync: could not apply the latest version of ${p} (${why}). Your local copy was kept and sync continues; the next change to that file on any device will fix it.`, 12000),
         confirmMassDelete: (paths) =>
           ConfirmModal.ask(
             this.app,
@@ -365,7 +365,7 @@ export default class ObsyncPlugin extends Plugin {
       this.vaultHasAuth = v.has_auth !== false;
       if (v.has_auth !== false || this.authorityNoticed) return;
       this.authorityNoticed = true;
-      new Notice("obsync: this vault was created by an older server version and cannot accept changes until its administrator runs the command shown under Settings → obsync → Advanced → Vault authority.", 20000);
+      new Notice("obsync: this vault was created by an older server version and cannot accept changes until its administrator runs the command shown under Settings → obsync → Advanced → Write protection.", 20000);
     } catch {
       /* offline; the sync loop reports that */
     }
@@ -493,7 +493,7 @@ export default class ObsyncPlugin extends Plugin {
   cmdReupload(): Promise<void> {
     return this.guard(async () => {
       const f = this.app.workspace.getActiveFile();
-      if (!f) throw new Error("open the file to re-upload first");
+      if (!f) throw new Error("no file is open. Open the file you want to re-upload, then run this again");
       if (!this.engine) throw new Error("not connected");
       await this.engine.reupload(f.path);
       new Notice(`obsync: re-uploaded ${f.path}.`);

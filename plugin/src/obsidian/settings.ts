@@ -211,19 +211,19 @@ export class ObsyncSettingTab extends PluginSettingTab {
     // static form is also simply correct, since display() reruns on open.
     const hasAuth = this.plugin.vaultHasAuth;
     new Setting(el)
-      .setName("Vault authority")
+      .setName("Write protection (vault authority)")
       .setDesc(
         hasAuth === false
-          ? "Not installed: this vault was created by an older server version and accepts no changes until the server administrator runs the copied command (the token proves possession of the vault keys; it is derived from them and never sent anywhere else)."
+          ? "Off: this vault was created by an older server version, so the server cannot yet tell key-holding devices from anyone with a token, and accepts no changes until it can. Copy the command below and run it on the server as the admin, replacing <data-dir> with the server's --data directory, then sync again."
           : hasAuth === true
-            ? "Installed. Changes to the vault need this device's keys as well as its token, so a leaked token alone can only read encrypted data. The command re-installs it if the server ever needs that."
+            ? "On. The server only accepts changes from devices that hold this vault's keys, so a stolen device token alone cannot modify or delete anything. You only need the command below if the plugin reports that this vault was created by an older server."
             : "Not checked yet (the server was not reachable at startup).",
       )
       .addButton((b) =>
         b.setButtonText("Copy command").onClick(async () => {
           const tok = await this.plugin.vaultAuthorityToken();
           await navigator.clipboard.writeText(`obsync vault auth --data <data-dir> ${id.vaultId} ${tok}`);
-          new Notice("obsync: command copied. Run it on the server, then sync again.");
+          new Notice(hasAuth === false ? "obsync: command copied. Run it on the server, replace <data-dir>, then sync again." : "obsync: command copied. Only needed if the plugin asked for it.");
         }),
       );
     new Setting(el)

@@ -266,6 +266,8 @@ export class Engine {
 
   private setStatus(patch: Partial<Status>): void {
     this.status = { ...this.status, ...patch, pending: this.dirty.size };
+    // Once revoked, nothing (a scan finishing, a manual kick) may show ✓ again.
+    if (this.revoked) this.status = { ...this.status, phase: "error", message: Engine.REMOVED_MESSAGE };
     this.hooks.onStatus?.(this.status);
   }
 
@@ -349,7 +351,7 @@ export class Engine {
    * skip unchanged files, hashes the rest, and queues local puts and deletes.
    */
   async scan(opts: { onlyDot?: boolean } = {}): Promise<void> {
-    if (this.stopped) return;
+    if (this.stopped || this.revoked) return;
     this.setStatus({ phase: "scanning" });
     try {
       // The dot-only scan covers root-level dot entries (config dir, .trash…),

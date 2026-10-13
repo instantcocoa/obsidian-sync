@@ -65,7 +65,7 @@ Admin routes take the admin token.
 
 A vault created by a server from before this existed has no authority token
 and refuses writes until you install one. On any device that holds the
-keys, Settings → obsync → Advanced → Vault authority → **Copy command**
+keys, Settings → obsync → Advanced → Write protection → **Copy command**
 gives you the exact line:
 
 ```sh

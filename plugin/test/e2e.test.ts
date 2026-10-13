@@ -261,8 +261,14 @@ describe("two devices", () => {
     // Device names survive the rotation and the pruning of epoch 1 (they are
     // encrypted under the identity key, not the epoch key).
     expect((await listDevices(a.session)).filter((d) => !d.revoked_at).map((d) => d.name).sort()).toEqual(["(recovery passphrase)", "laptop"]);
-    // B is locked out.
+    // B is locked out, and stays visibly so: scans and kicks must not flip
+    // the status back to idle (the first-run walkthrough saw the bar lie).
     await expect(b.sync()).rejects.toThrow(/401|forbidden|removed/i);
+    await b.engine.scan({ onlyDot: true });
+    b.engine.kick(0);
+    await new Promise((r) => setTimeout(r, 200));
+    expect(b.engine.getStatus().phase).toBe("error");
+    expect(b.engine.getStatus().message).toMatch(/removed from the vault/);
     // A keeps working under epoch 2.
     await a.write("after.md", "after rotation\n");
     await a.sync();

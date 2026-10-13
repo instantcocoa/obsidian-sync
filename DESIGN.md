@@ -1,14 +1,19 @@
 # obsync — a simple, fast, reliable Obsidian vault sync
 
-Status: 2026-10-08. Server (`server/`) and plugin (`plugin/`) implemented and
+Status: 2026-10-13. Server (`server/`) and plugin (`plugin/`) implemented and
 tested at three levels: unit, multi-device end to end under Node against the
 real server, and the shipped plugin inside real headless Obsidian (two
 instances) against the real server, including onboarding through the real
 settings dialog with the server's rate limiter on, and per-device key
 protection (PIN; OS keychain where available). The server has an
-adversarial route test suite. Not done: any run on iOS or Android, and any
-external security audit. Each component's README has the operational details
-and how to run each suite.
+adversarial route test suite. Two independent reviews were run by separate
+agents given only the code and the documentation: a security review
+(2 high, 3 medium, 5 low findings, all fixed and regression-tested; §5.8 and
+the §6.5 path validation came out of it) and a first-time-user walkthrough
+that set up two devices from the READMEs alone (24 friction points and one
+bug, all addressed). Not done: any run on iOS or Android, and a security
+review by a human specialist. Each component's README has the operational
+details and how to run each suite.
 
 One rule was added during real-Obsidian testing: a device that has never
 synced a config-folder file adopts the vault's version instead of creating a
@@ -371,9 +376,16 @@ blob     = 0x01 || epoch(u32 LE) || salt(16B) || nonce(12B)
 meta_enc = epoch(u32 LE) || nonce(12B)
            || AES-256-GCM(K_meta,e, JSON{path, mtime, size, flags}, aad = "meta" || path_id || epoch)
 
-name_enc = same construction, aad = "name"
+name_enc = 0x00000000 || nonce(12B)
+           || AES-256-GCM(K_name, name, aad = "name"),  K_name = HKDF(K_id, "obsync/name/v1")
            (set by the device itself after enrolment via PATCH /devices/me,
-           because it cannot encrypt anything before it holds the keys)
+           because it cannot encrypt anything before it holds the keys. Under
+           the identity key rather than an epoch key: a device can only write
+           its own name, so names written under epoch e would become
+           unreadable to everyone once e is pruned after a rotation. A
+           removed device loses roster access with its token, so the
+           non-rotating key gives nothing away. A non-zero leading u32 marks
+           a row from an older version, encrypted under K_meta,e.)
 ```
 
 - Per-blob HKDF salt removes the AES-GCM nonce-reuse bound as a concern.
@@ -405,9 +417,10 @@ being online:
 4. The new device decrypts the keys with `I`, then writes its own keybox rows
    (each epoch key wrapped to its own `pub_kex`) so that future rotations can
    address it like any other device.
-5. It encrypts its device name under `K_meta` and sets it with
-   `PATCH /devices/me`, then stores `K_id`, the epoch keys, its private key
-   and token in plugin data.
+5. It encrypts its device name under `K_name` and sets it with
+   `PATCH /devices/me`, registers the vault authority hash (§5.8, a no-op
+   unless it is the first device), then stores `K_id`, the epoch keys, its
+   private key and token in plugin data.
 
 The link is as sensitive as the vault for 24 hours or until used, whichever
 comes first. Send it over a channel you already trust and then discard it.

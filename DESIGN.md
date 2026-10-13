@@ -11,8 +11,11 @@ agents given only the code and the documentation: a security review
 (2 high, 3 medium, 5 low findings, all fixed and regression-tested; §5.8 and
 the §6.5 path validation came out of it) and a first-time-user walkthrough
 that set up two devices from the READMEs alone (24 friction points and one
-bug, all addressed). Not done: any run on iOS or Android, and a security
-review by a human specialist. Each component's README has the operational
+bug, all addressed). The shipped bundle is checked statically for mobile
+safety (`plugin/test/bundle-mobile.test.ts`: no Node modules or globals
+outside feature-guarded paths, `isDesktopOnly: false`). Not done: any run on
+an actual iOS or Android device, and a security review by a human
+specialist. Each component's README has the operational
 details and how to run each suite.
 
 One rule was added during real-Obsidian testing: a device that has never

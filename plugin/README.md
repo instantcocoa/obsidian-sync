@@ -216,3 +216,10 @@ Three layers of tests:
   ```sh
   OBSIDIAN_BIN=$(which obsidian) XVFB_RUN=$(which xvfb-run) npx vitest run test/obsidian.test.ts
   ```
+- **Bundle mobile safety** (`test/bundle-mobile.test.ts`): builds `main.js`
+  the production way and asserts it needs nothing a Capacitor WebView lacks:
+  the only `require`s are `obsidian` and one `os.hostname()` behind
+  `Platform.isMobile` and a `try`, Node globals appear only behind feature
+  checks, I/O and crypto are `fetch`, `WebSocket` and WebCrypto. This is the
+  part of iOS/Android support provable without a device; a run on a real
+  phone has not been done.

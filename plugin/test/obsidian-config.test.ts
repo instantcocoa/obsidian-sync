@@ -23,7 +23,7 @@ import { join } from "node:path";
 import { TestServer, ADMIN } from "./harness";
 import { ObsidianInstance, OBSIDIAN_BIN } from "./obsidian-harness";
 
-const SEED = JSON.stringify({ legacyEditor: false, safeMode: false }); // what the harness writes before launch
+const SEED = JSON.stringify({ legacyEditor: false, safeMode: false, autoUpdate: false }); // what the harness writes before launch
 
 describe.skipIf(!OBSIDIAN_BIN)("real Obsidian, config conflict root cause", () => {
   let srv: TestServer;

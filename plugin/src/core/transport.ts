@@ -76,6 +76,8 @@ export interface VaultInfo {
   epoch: number;
   min_epoch: number;
   seq: number;
+  /** False only for a vault from before vault authority existed; an admin must install it (DESIGN.md §5.8). */
+  has_auth?: boolean;
 }
 
 export interface WireDevice {
@@ -229,8 +231,9 @@ export class Client {
     return (await this.json<{ keybox: KeyboxRow[] }>("GET", `/v1/vaults/${vaultId}/keybox`)).keybox ?? [];
   }
 
-  async putKeybox(vaultId: string, rows: { epoch: number; recipient_id: string; wrapped: Uint8Array }[]): Promise<void> {
-    await this.json("POST", `/v1/vaults/${vaultId}/keybox`, { keybox: rows.map((r) => ({ ...r, wrapped: b64(r.wrapped) })) });
+  /** Rows addressed to anyone but the caller (a recovery identity) need vault authority. */
+  async putKeybox(vaultId: string, rows: { epoch: number; recipient_id: string; wrapped: Uint8Array }[], opts: { authority?: boolean } = {}): Promise<void> {
+    await this.json("POST", `/v1/vaults/${vaultId}/keybox`, { keybox: rows.map((r) => ({ ...r, wrapped: b64(r.wrapped) })) }, { authority: Boolean(opts.authority) });
   }
 
   async rotate(vaultId: string, epoch: number, revoke: string[], rows: { epoch: number; recipient_id: string; wrapped: Uint8Array }[], authNext: string): Promise<VaultInfo> {
@@ -297,9 +300,13 @@ export class Client {
     return (await this.json<{ missing: string[] }>("POST", `/v1/vaults/${vaultId}/blobs/missing`, ids)).missing ?? [];
   }
 
-  /** `replace` is for re-encryption: replacing stored ciphertext needs vault authority. */
+  /**
+   * Every upload needs vault authority (a device token alone is read-only).
+   * `replace` overwrites a stored blob even at the same epoch: the repair for
+   * a blob whose bytes turned out to be undecryptable.
+   */
   async putBlob(vaultId: string, id: string, data: Uint8Array, opts: { replace?: boolean } = {}): Promise<void> {
-    await this.request("PUT", `/v1/vaults/${vaultId}/blobs/${id}`, data, { authority: Boolean(opts.replace) });
+    await this.request("PUT", `/v1/vaults/${vaultId}/blobs/${id}`, data, { authority: true, headers: opts.replace ? { "X-Blob-Replace": "1" } : undefined });
   }
 
   async getBlob(vaultId: string, id: string, signal?: AbortSignal): Promise<Uint8Array> {
@@ -314,7 +321,7 @@ export class Client {
   // ---------- ops ----------
 
   async postOps(vaultId: string, ops: OpInput[]): Promise<{ epoch: number; cursor: number; results: OpResult[] }> {
-    return this.json("POST", `/v1/vaults/${vaultId}/ops`, ops.map((o) => ({ ...o, meta_enc: b64(o.meta_enc) })));
+    return this.json("POST", `/v1/vaults/${vaultId}/ops`, ops.map((o) => ({ ...o, meta_enc: b64(o.meta_enc) })), { authority: true });
   }
 
   async opsBelowMetaEpoch(vaultId: string, epoch: number, limit = 500): Promise<number[]> {
@@ -337,7 +344,7 @@ export class Client {
   }
 
   async restore(vaultId: string, atMs: number): Promise<{ emitted: number; skipped_path_ids: string[]; cursor: number }> {
-    return this.json("POST", `/v1/vaults/${vaultId}/restore`, { at: atMs }, { retry: false });
+    return this.json("POST", `/v1/vaults/${vaultId}/restore`, { at: atMs }, { retry: false, authority: true });
   }
 }
 

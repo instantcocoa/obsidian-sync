@@ -17,7 +17,7 @@ import { VaultCrypto, CryptoError, unwrapEpochKey, type FileMeta } from "./crypt
 import { fromB64, bytesEqual } from "./encoding";
 import type { FileStat, StateStore, VaultFS } from "./fs";
 import { mergeJson, mergeText } from "./merge";
-import { compileExclusions, conflictPath, fromLogical, isJsonPath, isSafeDevicePath, isSafeLogicalPath, isTextPath, toLogical, CONFIG_TOKEN } from "./paths";
+import { aliasesConfigDir, compileExclusions, conflictPath, fromLogical, isJsonPath, isSafeDevicePath, isSafeLogicalPath, isTextPath, toLogical, CONFIG_TOKEN } from "./paths";
 import { NetworkError, Client, HttpError, type OpInput, type WireOp } from "./transport";
 
 // ---------- types ----------
@@ -89,6 +89,8 @@ export interface Status {
 export interface EngineHooks {
   log?: (level: "debug" | "info" | "warn" | "error", msg: string, data?: unknown) => void;
   onStatus?: (s: Status) => void;
+  /** A remote op could not be applied (undecryptable blob, unusable name) and was skipped. */
+  onSkipped?: (devPath: string, reason: string) => void;
   /** Called after a remote change was written (or removed) on disk. Device path. */
   afterApply?: (path: string, kind: "put" | "delete") => void;
   /** Called when a conflict sibling was created. Device paths. */
@@ -565,10 +567,14 @@ export class Engine {
       // vault path and it must be the path this op is actually keyed by;
       // otherwise a compromised member could write outside the vault or
       // smuggle a file past the exclusion rules under another path's id.
-      if (meta && (!isSafeLogicalPath(meta.path) || (await this.vc.pathId(meta.path)) !== op.path_id)) {
+      if (meta && (!isSafeLogicalPath(meta.path) || (await this.vc.pathId(meta.path)) !== op.path_id || aliasesConfigDir(this.device(meta.path), this.fs.configDir))) {
         this.log("error", `op ${op.seq} carries an unsafe or mismatched path; refusing to apply it`, { path: meta.path });
         meta = null;
       }
+      // Paths are keyed by their NFC form (path_id above proves meta.path is
+      // already NFC, since pathId normalises); keep the string NFC too so the
+      // on-disk name matches what the scanner will see.
+      if (meta) meta.path = meta.path.normalize("NFC");
       decoded.push({ op, meta, logical: meta?.path ?? "" });
     }
     // Only the last op per path in this batch matters.
@@ -591,7 +597,18 @@ export class Engine {
     });
     let done = 0;
     for (const d of last.values()) {
-      await this.withLock(d.logical, () => this.applyRemote(d.logical, d.op, d.meta!, blobs));
+      try {
+        await this.withLock(d.logical, () => this.applyRemote(d.logical, d.op, d.meta!, blobs));
+      } catch (e) {
+        // One bad op must never wedge the vault: an undecryptable blob (a
+        // key holder uploaded garbage under a real id), a name the local
+        // file system refuses, or a vanished parent. Transport failures are
+        // retried as a whole; everything else is logged and skipped, and the
+        // cursor moves on. A later op for the path heals it.
+        if (e instanceof NetworkError || (e instanceof HttpError && e.transient)) throw e;
+        this.log("error", `op ${d.op.seq} for ${d.logical} could not be applied; skipping`, e);
+        this.hooks.onSkipped?.(this.device(d.logical), String((e as Error).message ?? e));
+      }
       this.setStatus({ progress: { done: ++done, total: last.size } });
     }
     this.setStatus({ progress: undefined });
@@ -848,6 +865,39 @@ export class Engine {
       this.scheduleSave();
     }
     this.setStatus({});
+  }
+
+  /**
+   * Re-upload a file's current bytes, replacing whatever the server holds
+   * under that blob id, and post a fresh op so every device fetches it
+   * again. The repair for "could not apply the latest version of X":
+   * the author's normal push would see the id as already present and
+   * upload nothing.
+   */
+  async reupload(devPath: string): Promise<void> {
+    const logical = this.logical(devPath);
+    await this.withLock(logical, async () => {
+      const st = await this.fs.stat(devPath);
+      if (!st) throw new Error(`${devPath} does not exist`);
+      const { bytes, hash } = await this.hashFile(devPath);
+      const ct = await this.vc.encryptBlob(hash, bytes, { compress: this.cfg.compress, pad: this.cfg.pad });
+      await this.client.putBlob(this.cfg.vaultId, hash, ct, { replace: true });
+      const pathId = await this.vc.pathId(logical);
+      const e = this.state.files[logical];
+      const meta: FileMeta = { path: logical, mtime: st.mtime, size: st.size };
+      const op: OpInput = { op_id: opId(), path_id: pathId, blob_id: hash, meta_enc: await this.vc.encryptMeta(pathId, meta), meta_epoch: this.vc.keyring.current, base_seq: e?.seq ?? 0 };
+      let r = (await this.client.postOps(this.cfg.vaultId, [op])).results[0];
+      if (r.conflict) {
+        // An explicit repair means "these bytes win": rebase onto the current head once.
+        r = (await this.client.postOps(this.cfg.vaultId, [{ ...op, op_id: opId(), base_seq: r.conflict.seq }])).results[0];
+      }
+      if (!r.seq || r.conflict || r.error) throw new Error(r.error ?? "the file changed elsewhere; sync first, then retry");
+      this.state.files[logical] = { hash, seq: r.seq, size: st.size, mtime: st.mtime };
+      this.dirty.delete(logical);
+      if (r.seq === this.state.cursor + 1) this.state.cursor = r.seq;
+      this.scheduleSave();
+    });
+    this.kick(0);
   }
 
   /** Build the op for a dirty path from what is on disk right now. */

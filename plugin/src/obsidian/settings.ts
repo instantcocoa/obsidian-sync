@@ -205,6 +205,27 @@ export class ObsyncSettingTab extends PluginSettingTab {
     }
 
     el.createEl("h3", { text: "Advanced" });
+    // Rendered from the value the plugin fetched at engine start. Updating
+    // this row's description after display() wedged Obsidian's renderer in
+    // the headless suite (deterministically, and only for this row); the
+    // static form is also simply correct, since display() reruns on open.
+    const hasAuth = this.plugin.vaultHasAuth;
+    new Setting(el)
+      .setName("Vault authority")
+      .setDesc(
+        hasAuth === false
+          ? "Not installed: this vault was created by an older server version and accepts no changes until the server administrator runs the copied command (the token proves possession of the vault keys; it is derived from them and never sent anywhere else)."
+          : hasAuth === true
+            ? "Installed. Changes to the vault need this device's keys as well as its token, so a leaked token alone can only read encrypted data. The command re-installs it if the server ever needs that."
+            : "Not checked yet (the server was not reachable at startup).",
+      )
+      .addButton((b) =>
+        b.setButtonText("Copy command").onClick(async () => {
+          const tok = await this.plugin.vaultAuthorityToken();
+          await navigator.clipboard.writeText(`obsync vault auth --data <data-dir> ${id.vaultId} ${tok}`);
+          new Notice("obsync: command copied. Run it on the server, then sync again.");
+        }),
+      );
     new Setting(el)
       .setName("Compress text before encrypting")
       .setDesc("Smaller uploads for notes at some CPU cost. Safe to toggle at any time.")

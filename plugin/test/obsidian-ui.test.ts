@@ -32,11 +32,11 @@ describe.skipIf(!OBSIDIAN_BIN)("real Obsidian, settings UI onboarding, rate limi
     await a.clickButton("Create…");
     // Empty fields are refused with a notice, not silently closed.
     await a.clickModalButton("Create");
-    expect(await a.waitFor(() => /fill in/.test(document.querySelector(".notice")?.textContent ?? ""), 5_000)).toBe(true);
+    expect(await a.waitForNotice(/fill in/, 5_000)).not.toBeNull();
     await a.fill("https://sync.example.com", srv.url); // first prompt field (server URL)
     await a.page.locator('input[type="password"]').first().fill(ADMIN);
     await a.clickModalButton("Create");
-    expect(await a.waitFor(() => /vault created/.test(document.querySelector(".notice")?.textContent ?? ""), 20_000)).toBe(true);
+    expect(await a.waitForNotice(/vault created/)).not.toBeNull();
     expect(await a.waitFor(() => Boolean((globalThis as any).app.plugins.plugins.obsync.settings.identity), 20_000)).toBe(true);
     expect(await a.waitFor(() => Boolean((globalThis as any).app.plugins.plugins.obsync.engine), 20_000)).toBe(true);
     // The tab re-rendered into the "joined" view.

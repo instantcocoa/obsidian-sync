@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { mergeJson, mergeText } from "../src/core/merge";
 import { utf8, fromUtf8 } from "../src/core/encoding";
-import { compileExclusions, DEFAULT_EXCLUSIONS, conflictPath, CONFLICT_RE, toLogical, fromLogical, isTextPath, isSafeLogicalPath, isSafeDevicePath } from "../src/core/paths";
+import { compileExclusions, DEFAULT_EXCLUSIONS, conflictPath, CONFLICT_RE, toLogical, fromLogical, isTextPath, isSafeLogicalPath, isSafeDevicePath, aliasesConfigDir } from "../src/core/paths";
 
 const t = (s: string) => utf8(s);
 
@@ -105,6 +105,19 @@ describe("path safety (what another device may make us write)", () => {
     for (const p of ["", "../x", "a/../x", "a/..", "/etc/passwd", "a//b", "a/./b", "a\\b", "a\u0000b", "a\nb", "notes/$CONFIG/app.json", "a/", "."]) {
       expect(isSafeLogicalPath(p), JSON.stringify(p)).toBe(false);
     }
+  });
+  it("rejects Windows aliases, reserved names and overlong components", () => {
+    for (const p of [".obsidian./plugins/x/main.js", "notes/trailing space /a.md", "OBSIDI~1/plugins/x/main.js", "a/NUL", "a/con.md", "a/LPT1.txt", "x".repeat(256) + ".md"]) {
+      expect(isSafeLogicalPath(p), JSON.stringify(p)).toBe(false);
+    }
+    expect(isSafeLogicalPath("x".repeat(255))).toBe(true);
+    expect(isSafeLogicalPath("notes/tilde~1 is fine.md")).toBe(true); // has a dot before the tilde → not an 8.3 alias
+  });
+  it("case-only variants of the config dir are aliases, not new folders", () => {
+    expect(aliasesConfigDir(".Obsidian/plugins/x/main.js", ".obsidian")).toBe(true);
+    expect(aliasesConfigDir(".OBSIDIAN/app.json", ".obsidian")).toBe(true);
+    expect(aliasesConfigDir(".obsidian/app.json", ".obsidian")).toBe(false);
+    expect(aliasesConfigDir("notes/a.md", ".obsidian")).toBe(false);
   });
   it("a device path may never contain the $CONFIG token (a real folder with that name is not synced)", () => {
     expect(isSafeDevicePath("$CONFIG/app.json")).toBe(false);

@@ -210,6 +210,10 @@ type Vault struct {
 	MinEpoch  int64  `json:"min_epoch"`
 	Seq       int64  `json:"seq"`
 	CreatedAt int64  `json:"created_at"`
+	// HasAuth is false only for a vault from before vault authority existed
+	// (DESIGN.md §5.8); such a vault accepts no writes until an admin runs
+	// `obsync vault auth`.
+	HasAuth bool `json:"has_auth"`
 }
 
 func (s *Store) CreateVault(ctx context.Context) (*Vault, error) {
@@ -223,14 +227,16 @@ func (s *Store) CreateVault(ctx context.Context) (*Vault, error) {
 
 func (s *Store) GetVault(ctx context.Context, id string) (*Vault, error) {
 	v := &Vault{}
-	err := s.db.QueryRowContext(ctx, `SELECT id, epoch, seq, created_at FROM vaults WHERE id=?`, id).
-		Scan(&v.ID, &v.Epoch, &v.Seq, &v.CreatedAt)
+	var ah []byte
+	err := s.db.QueryRowContext(ctx, `SELECT id, epoch, seq, created_at, auth_hash FROM vaults WHERE id=?`, id).
+		Scan(&v.ID, &v.Epoch, &v.Seq, &v.CreatedAt, &ah)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
 	if err != nil {
 		return nil, err
 	}
+	v.HasAuth = len(ah) > 0
 	v.MinEpoch, err = s.minEpoch(ctx, s.db, id, v.Epoch)
 	return v, err
 }
@@ -250,10 +256,12 @@ type queryer interface {
 // for the next epoch at the same time, so a revoked device's old token stops
 // working together with its old keys.
 
-// EnsureVaultAuth installs the authority hash when the vault has none yet
-// (first enrolment, or a database from before this field existed), accepts a
-// matching token, and refuses a different one.
-func (s *Store) EnsureVaultAuth(ctx context.Context, vault, token string) error {
+// EnsureVaultAuth installs the authority hash on first enrolment: only when
+// the vault has none yet AND the caller is its only live device, so a
+// token-only member of an older multi-device vault cannot claim it (an
+// admin installs it there with SetVaultAuth). A matching token is accepted
+// idempotently; a different one is refused.
+func (s *Store) EnsureVaultAuth(ctx context.Context, vault, device, token string) error {
 	if !validAuthToken(token) {
 		return fmt.Errorf("%w: bad vault auth token", ErrBadRequest)
 	}
@@ -268,6 +276,13 @@ func (s *Store) EnsureVaultAuth(ctx context.Context, vault, token string) error 
 		h := HashToken(token)
 		switch {
 		case len(cur) == 0:
+			var live int
+			if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM devices WHERE vault_id=? AND revoked_at IS NULL AND recovery=0`, vault).Scan(&live); err != nil {
+				return err
+			}
+			if live != 1 || !s.deviceLiveTx(ctx, tx, device, vault) {
+				return fmt.Errorf("%w: vault authority can only be claimed by the first device; an admin sets it for older vaults", ErrForbidden)
+			}
 			_, err := tx.ExecContext(ctx, `UPDATE vaults SET auth_hash=? WHERE id=?`, h, vault)
 			return err
 		case subtle.ConstantTimeCompare(cur, h) == 1:
@@ -275,6 +290,34 @@ func (s *Store) EnsureVaultAuth(ctx context.Context, vault, token string) error 
 		default:
 			return fmt.Errorf("%w: vault authority already set", ErrConflict)
 		}
+	})
+}
+
+func (s *Store) deviceLiveTx(ctx context.Context, tx *sql.Tx, device, vault string) bool {
+	var n int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM devices WHERE id=? AND vault_id=? AND revoked_at IS NULL AND recovery=0`, device, vault).Scan(&n); err != nil {
+		return false
+	}
+	return n == 1
+}
+
+// SetVaultAuth installs or replaces the authority hash unconditionally. For
+// the administrator: migrating a vault created before §5.8 existed (the
+// token is shown in the plugin's settings on any device holding the keys),
+// or resetting after a mishap.
+func (s *Store) SetVaultAuth(ctx context.Context, vault, token string) error {
+	if !validAuthToken(token) {
+		return fmt.Errorf("%w: bad vault auth token", ErrBadRequest)
+	}
+	return s.writeTx(ctx, func(tx *sql.Tx) error {
+		res, err := tx.ExecContext(ctx, `UPDATE vaults SET auth_hash=? WHERE id=?`, HashToken(token), vault)
+		if err != nil {
+			return err
+		}
+		if n, _ := res.RowsAffected(); n == 0 {
+			return ErrNotFound
+		}
+		return nil
 	})
 }
 
@@ -745,13 +788,16 @@ func (s *Store) GetBlob(ctx context.Context, vault, id string) (*BlobInfo, error
 // UpsertBlob records a blob. Returns (stored=true) when the caller's bytes
 // should be kept, or (false) when an equal-or-newer epoch already exists and
 // the upload is a no-op.
-func (s *Store) UpsertBlob(ctx context.Context, vault, id string, epoch, ctSize int64) (stored bool, err error) {
+//
+// `replace` lets a key holder overwrite an existing record at the same epoch
+// (repairing a blob whose stored bytes turned out to be undecryptable).
+func (s *Store) UpsertBlob(ctx context.Context, vault, id string, epoch, ctSize int64, replace bool) (stored bool, err error) {
 	err = s.writeTx(ctx, func(tx *sql.Tx) error {
 		var cur sql.NullInt64
 		if err := tx.QueryRowContext(ctx, `SELECT epoch FROM blobs WHERE vault_id=? AND blob_id=?`, vault, id).Scan(&cur); err != nil && !errors.Is(err, sql.ErrNoRows) {
 			return err
 		}
-		if cur.Valid && cur.Int64 >= epoch {
+		if cur.Valid && (cur.Int64 > epoch || (cur.Int64 == epoch && !replace)) {
 			stored = false
 			return nil
 		}

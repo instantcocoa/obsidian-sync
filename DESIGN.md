@@ -585,7 +585,7 @@ not need to know it is happening. History does not carry over except through
 | Adversary | Gets | Cannot | Mitigation / residual |
 | --- | --- | --- | --- |
 | Reads server disk or backups | ciphertext, path and blob IDs, op timing, ciphertext sizes, device IDs, roster public keys | content, paths, names, mtimes, which human owns which device | padding flag for sizes; timing is inherent |
-| Steals a device token (proxy log, copied `data.json` with sealed keys) | read ciphertext, append ops as that device (undecryptable garbage, or deletes, both kept in history) | decrypt; forge decryptable ops; alter or replace existing ciphertext or metadata; rotate, revoke, or lock anyone out; replace recovery; mint invites; add itself to the next rotation | vault authority (§5.8) gates every destructive or key-granting route; revoke device → rotate; AEAD detects tampering; restore-to-time undoes garbage ops |
+| Steals a device token (proxy log, copied `data.json` with sealed keys) | read ciphertext and the op log; see which device is online | write anything: no ops, no blobs, no rotation, revocation, recovery, invites or keybox rows for others | vault authority (§5.8) gates every write; revoke device → rotate |
 | Steals an unused invite link, or holds any member's keys | joins as a device with full read/write, **which means code execution on every device**: a synced `.obsidian/plugins/*/main.js` is reloaded, and `community-plugins.json` enables plugins, automatically (§7.3) | write outside the vault, or under a path other than the one an op is keyed by (§6.5 validation) | 24 h TTL, one-time; unexpected or unnamed device is flagged in the roster; remove + rotate; turn "sync config folder" off if vault members are not fully trusted |
 | Takes a device (phone with Obsidian) | everything that device has, including `K_id` and current keys | anything after rotation; anything at all after re-encryption, given the token is revoked | OS disk encryption; per-device key protection (§5.5a); remove + rotate from another device |
 | Guesses the recovery passphrase | one online attempt per request, rate-limited | an offline attack: the server hands out only the KDF salt; the wrapped key is released only against the derived auth token | PBKDF2-600k plus the limiter; someone with the server's disk can still attack offline, so pick a long passphrase |
@@ -609,23 +609,31 @@ Every device holds the current epoch key `K_e`. From it, each derives
 
     A_e = "va_" ‖ b64url(HKDF-SHA-256(K_e, salt = "", info = "obsync/auth/v1"))
 
-and the server stores `SHA-256(A_e)` on the vault (`POST /auth` on first
-enrolment; `auth_next` in every rotation installs the hash for the new epoch
-atomically with the epoch bump). Routes that can destroy data or hand out
-keys require `X-Obsync-Vault-Auth: A_e` in addition to the device token:
-rotation, replacing a stored blob with a higher-epoch version, replacing an
-op's metadata, installing or replacing the recovery identity, and minting
-invites.
+and the server stores `SHA-256(A_e)` on the vault (`POST /auth` by the first
+device at enrolment, accepted only while it is the vault's sole device;
+`auth_next` in every rotation installs the hash for the new epoch atomically
+with the epoch bump). Every write requires `X-Obsync-Vault-Auth: A_e` in
+addition to the device token: blob uploads, ops, restore, rotation,
+metadata re-encryption, keybox rows for a recovery identity, installing or
+replacing the recovery identity, and minting invites. A device token alone
+is read-only.
 
 What this buys: a device *token* and the device *keys* are different
 secrets, and only the token ever travels or sits in a log. A token-only
 attacker (proxy access log, a copied `data.json` whose keys are sealed under
-a PIN or the OS keychain) can read ciphertext and append ops as that device,
-both of which are already in the threat model and both of which history
-survives. It cannot revoke the owner, replace the recovery passphrase, enrol
-a device of its own to be wrapped at the next rotation, or overwrite the
-only copy of any ciphertext. HKDF is one-way, so the server learns nothing
+a PIN or the OS keychain) can fetch ciphertext, which it cannot read, and
+nothing else: it cannot post ops, upload a blob under an id the vault will
+later use (blob-id poisoning), revoke the owner, replace the recovery
+passphrase, enrol a device of its own to be wrapped at the next rotation, or
+overwrite any ciphertext. HKDF is one-way, so the server learns nothing
 about `K_e` from `A_e`, and a revoked device's old `A_e` dies with its epoch.
+
+Vaults from before this existed have no hash. They accept no writes until
+the administrator installs one with `obsync vault auth` using the token
+shown in a key-holding device's settings; a member may not claim it, since
+on such a vault a token thief would be just as eligible. A key holder can
+also overwrite a stored blob at the same epoch (`X-Blob-Replace`), which is
+the repair for a blob whose bytes turn out to be undecryptable.
 
 - **No passphrase-derived identifiers, ever.** LiveSync derived chunk IDs
   from the E2EE passphrase; with a zero-byte file present, the ID of the
@@ -812,6 +820,13 @@ is no base to merge against. Without the exception the generic rule produces
 
 Never a modal. A "Show conflicts" command lists files matching the conflict
 pattern.
+
+Failure isolation: one op that cannot be applied (its blob does not decrypt
+because a key holder uploaded garbage under a real id, its name is refused
+by the local file system, its parent vanished) is logged, reported through a
+notice, and skipped; the cursor moves on and the next op for that path heals
+it. Only transport failures abort a batch, because those are retried as a
+whole. Without this, a single bad op would stall every device forever.
 
 ### 6.7 Mobile
 

@@ -69,7 +69,7 @@ func TestRevokedAndBogusTokens(t *testing.T) {
 	e.do("POST", base+"/ops", b.token, []opIn{put("x", nil, 0)}, nil).expect(t, 401)
 	e.do("POST", base+"/keybox", b.token, map[string]any{"keybox": rows}, nil).expect(t, 401)
 	// A revoked device cannot be a keybox recipient any more.
-	e.do("POST", base+"/keybox", a.token, map[string]any{"keybox": []store.KeyboxRow{{Epoch: 2, RecipientID: b.id, Wrapped: randBytes(100)}}}, nil).expect(t, 400)
+	e.do("POST", base+"/keybox", a.token, map[string]any{"keybox": []store.KeyboxRow{{Epoch: 2, RecipientID: b.id, Wrapped: randBytes(100)}}}, authHdr(vault)).expect(t, 400)
 	// Garbage and empty tokens.
 	for _, tok := range []string{"", "Bearer", "dv_", "dv_" + strings.Repeat("A", 43), adminTok + "x", "in_whatever", "rc_whatever"} {
 		e.do("GET", base, tok, nil, nil).expect(t, 401)
@@ -107,10 +107,30 @@ func TestTokenOnlyAttackerCannotDestroyOrEscalate(t *testing.T) {
 	next := newAuthTok()
 	e.do("POST", base+"/rotate", a.token, map[string]any{"epoch": 2, "revoke": nil, "keybox": []store.KeyboxRow{{Epoch: 2, RecipientID: a.id, Wrapped: randBytes(100)}, {Epoch: 2, RecipientID: b.id, Wrapped: randBytes(100)}, {Epoch: 2, RecipientID: rec.DeviceID, Wrapped: randBytes(100)}}, "auth_next": next}, authHdr(vault)).expect(t, 200)
 	authTok[vault] = next
-	e.upload(vault, b, bid, blob(2, "garbage")).expect(t, 401)
+	noAuth := map[string]string{"Content-Type": "application/octet-stream"}
+	e.do("PUT", base+"/blobs/"+bid, b.token, blob(2, "garbage"), noAuth).expect(t, 401)
 	r := e.do("GET", base+"/blobs/"+bid, a.token, nil, nil).expect(t, 200)
 	if !bytes.Contains(r.body, []byte("victim-bytes")) || r.hdr.Get("X-Blob-Epoch") != "1" {
 		t.Fatalf("blob was replaced by a token-only caller: epoch=%s", r.hdr.Get("X-Blob-Epoch"))
+	}
+	// A device token alone is read-only: no new blobs, no ops, no restore
+	// (so no blob-id poisoning and no mass deletes without the keys).
+	e.do("PUT", base+"/blobs/"+hexID("fresh"), b.token, blob(2, "fresh"), noAuth).expect(t, 401)
+	e.do("POST", base+"/ops", b.token, []opIn{put("x.md", nil, 0)}, nil).expect(t, 401)
+	e.do("POST", base+"/restore", b.token, map[string]any{"at": 1}, nil).expect(t, 401)
+	// Reading still works.
+	e.do("GET", base+"/blobs/"+bid, b.token, nil, nil).expect(t, 200)
+	e.do("GET", base+"/changes?since=0", b.token, nil, nil).expect(t, 200)
+	// Keybox rows for the recovery identity need authority too (no pre-emption window).
+	e.do("POST", base+"/keybox", b.token, map[string]any{"keybox": []store.KeyboxRow{{Epoch: 2, RecipientID: rec.DeviceID, Wrapped: randBytes(100)}}}, nil).expect(t, 401)
+	e.do("POST", base+"/keybox", a.token, map[string]any{"keybox": []store.KeyboxRow{{Epoch: 2, RecipientID: rec.DeviceID, Wrapped: randBytes(100)}}}, authHdr(vault)).expect(t, 409) // rotation already wrote it; insert-only
+	// A key holder can repair a blob in place at the same epoch; a plain re-upload is a no-op.
+	e.do("PUT", base+"/blobs/"+bid, a.token, blob(2, "repaired"), map[string]string{"Content-Type": "application/octet-stream", "X-Obsync-Vault-Auth": authTok[vault]}).expect(t, 201)
+	e.do("PUT", base+"/blobs/"+bid, a.token, blob(2, "ignored"), map[string]string{"Content-Type": "application/octet-stream", "X-Obsync-Vault-Auth": authTok[vault]}).expect(t, 200)
+	e.do("PUT", base+"/blobs/"+bid, a.token, blob(2, "repaired-again"), map[string]string{"Content-Type": "application/octet-stream", "X-Obsync-Vault-Auth": authTok[vault], "X-Blob-Replace": "1"}).expect(t, 201)
+	r = e.do("GET", base+"/blobs/"+bid, a.token, nil, nil).expect(t, 200)
+	if !bytes.Contains(r.body, []byte("repaired-again")) {
+		t.Fatalf("same-epoch replace by a key holder failed")
 	}
 	// Everyone is still enrolled and recovery is intact.
 	e.do("GET", base, a.token, nil, nil).expect(t, 200)
@@ -122,6 +142,55 @@ func TestTokenOnlyAttackerCannotDestroyOrEscalate(t *testing.T) {
 	if len(kb.Keybox) != 2 {
 		t.Fatalf("A's keybox altered: %+v", kb.Keybox)
 	}
+}
+
+// Vault authority can be claimed only by the first device. A multi-device
+// vault without one (created before §5.8) gets it from the admin, never
+// from a member that merely holds a token.
+func TestAuthorityClaimRules(t *testing.T) {
+	e := newEnv(t)
+	var v store.Vault
+	e.do("POST", "/v1/vaults", adminTok, nil, nil).expect(t, 201).json(t, &v)
+	enrol := func() device {
+		var inv store.Invite
+		e.do("POST", "/v1/vaults/"+v.ID+"/invites", adminTok, map[string]any{"keybox_enc": randBytes(64)}, nil).expect(t, 201).json(t, &inv)
+		var red store.Redeemed
+		e.do("POST", "/v1/invites/"+inv.Token, "", map[string]any{"pub_kex": randBytes(65)}, nil).expect(t, 201).json(t, &red)
+		return device{red.DeviceID, red.DeviceToken}
+	}
+	a := enrol()
+	b := enrol()
+	base := "/v1/vaults/" + v.ID
+	var info store.Vault
+	e.do("GET", base, a.token, nil, nil).expect(t, 200).json(t, &info)
+	if info.HasAuth {
+		t.Fatal("fresh vault should report has_auth=false")
+	}
+	// Two live devices and no authority: neither device may claim it.
+	e.do("POST", base+"/auth", b.token, map[string]any{"auth": newAuthTok()}, nil).expect(t, 401)
+	e.do("POST", base+"/auth", a.token, map[string]any{"auth": newAuthTok()}, nil).expect(t, 401)
+	// And nothing can be written meanwhile (no authority exists to present).
+	e.do("POST", base+"/ops", a.token, []opIn{put("x.md", nil, 0)}, map[string]string{"X-Obsync-Vault-Auth": newAuthTok()}).expect(t, 401)
+	// The admin installs it (token obtained from a key-holding device's settings).
+	tok := newAuthTok()
+	e.do("POST", base+"/auth", adminTok, map[string]any{"auth": tok}, nil).expect(t, 204)
+	e.do("GET", base, a.token, nil, nil).expect(t, 200).json(t, &info)
+	if !info.HasAuth {
+		t.Fatal("has_auth should be true after admin install")
+	}
+	e.do("POST", base+"/ops", a.token, []opIn{put("x.md", nil, 0)}, map[string]string{"X-Obsync-Vault-Auth": tok}).expect(t, 200)
+	// A member cannot replace it; the admin can.
+	e.do("POST", base+"/auth", b.token, map[string]any{"auth": newAuthTok()}, nil).expect(t, 409)
+	e.do("POST", base+"/auth", adminTok, map[string]any{"auth": newAuthTok()}, nil).expect(t, 204)
+	e.do("POST", base+"/ops", a.token, []opIn{put("y.md", nil, 0)}, map[string]string{"X-Obsync-Vault-Auth": tok}).expect(t, 401)
+	// A single-device vault: the first device claims it itself.
+	var v2 store.Vault
+	e.do("POST", "/v1/vaults", adminTok, nil, nil).expect(t, 201).json(t, &v2)
+	var inv store.Invite
+	e.do("POST", "/v1/vaults/"+v2.ID+"/invites", adminTok, map[string]any{"keybox_enc": randBytes(64)}, nil).expect(t, 201).json(t, &inv)
+	var red store.Redeemed
+	e.do("POST", "/v1/invites/"+inv.Token, "", map[string]any{"pub_kex": randBytes(65)}, nil).expect(t, 201).json(t, &red)
+	e.do("POST", "/v1/vaults/"+v2.ID+"/auth", red.DeviceToken, map[string]any{"auth": newAuthTok()}, nil).expect(t, 204)
 }
 
 // A device revoked while its long-poll is open gets nothing from it, and an
@@ -220,7 +289,7 @@ func TestInputValidation(t *testing.T) {
 	// Path-like ids are stopped either by the router (404/301) or by id validation (400); never served.
 	for _, id := range []string{"../../etc/passwd", strings.Repeat("a", 63), strings.Repeat("A", 64), strings.Repeat("g", 64), "%2e%2e", "%2e%2e%2f%2e%2e"} {
 		for _, m := range []string{"PUT", "GET"} {
-			r := e.do(m, base+"/blobs/"+id, a.token, blob(1, "x"), map[string]string{"Content-Type": "application/octet-stream"})
+			r := e.do(m, base+"/blobs/"+id, a.token, blob(1, "x"), map[string]string{"Content-Type": "application/octet-stream", "X-Obsync-Vault-Auth": authTok[vault]})
 			if r.code != 400 && r.code != 404 && r.code != 301 {
 				t.Errorf("%s blob id %q: got %d", m, id, r.code)
 			}
@@ -248,14 +317,14 @@ func TestInputValidation(t *testing.T) {
 		t.Fatalf("valid op in a batch with bad ones should commit: %+v", out.Results[7])
 	}
 	// Unknown JSON fields and non-array bodies are rejected.
-	e.do("POST", base+"/ops", a.token, []byte(`[{"op_id":"z","evil":1}]`), map[string]string{"Content-Type": "application/json"}).expect(t, 400)
-	e.do("POST", base+"/ops", a.token, []byte(`{"op_id":"z"}`), map[string]string{"Content-Type": "application/json"}).expect(t, 400)
-	e.do("POST", base+"/ops", a.token, []opIn{}, nil).expect(t, 400)
+	e.do("POST", base+"/ops", a.token, []byte(`[{"op_id":"z","evil":1}]`), map[string]string{"Content-Type": "application/json", "X-Obsync-Vault-Auth": authTok[vault]}).expect(t, 400)
+	e.do("POST", base+"/ops", a.token, []byte(`{"op_id":"z"}`), map[string]string{"Content-Type": "application/json", "X-Obsync-Vault-Auth": authTok[vault]}).expect(t, 400)
+	e.do("POST", base+"/ops", a.token, []opIn{}, authHdr(vault)).expect(t, 400)
 	// Keybox rows for a future epoch or an unknown recipient.
 	e.do("POST", base+"/keybox", a.token, map[string]any{"keybox": []store.KeyboxRow{{Epoch: 5, RecipientID: a.id, Wrapped: randBytes(9)}}}, nil).expect(t, 400)
-	e.do("POST", base+"/keybox", a.token, map[string]any{"keybox": []store.KeyboxRow{{Epoch: 1, RecipientID: "nobody", Wrapped: randBytes(9)}}}, nil).expect(t, 400)
+	e.do("POST", base+"/keybox", a.token, map[string]any{"keybox": []store.KeyboxRow{{Epoch: 1, RecipientID: "nobody", Wrapped: randBytes(9)}}}, authHdr(vault)).expect(t, 400)
 	// Restore needs a positive time; patch needs a real seq.
-	e.do("POST", base+"/restore", a.token, map[string]any{"at": 0}, nil).expect(t, 400)
+	e.do("POST", base+"/restore", a.token, map[string]any{"at": 0}, authHdr(vault)).expect(t, 400)
 	e.do("PATCH", base+"/ops/999/meta", a.token, map[string]any{"meta_enc": randBytes(4), "meta_epoch": 1}, authHdr(vault)).expect(t, 404)
 	e.do("PATCH", base+"/ops/abc/meta", a.token, map[string]any{"meta_enc": randBytes(4), "meta_epoch": 1}, authHdr(vault)).expect(t, 400)
 }

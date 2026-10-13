@@ -211,12 +211,12 @@ func (e *env) setup() (vault string, a, b device) {
 }
 
 func (e *env) upload(vault string, d device, id string, data []byte) resp {
-	return e.do("PUT", "/v1/vaults/"+vault+"/blobs/"+id, d.token, data, map[string]string{"Content-Type": "application/octet-stream"})
+	return e.do("PUT", "/v1/vaults/"+vault+"/blobs/"+id, d.token, data, map[string]string{"Content-Type": "application/octet-stream", "X-Obsync-Vault-Auth": authTok[vault]})
 }
 
 func (e *env) ops(vault string, d device, ops ...opIn) opsOut {
 	var out opsOut
-	e.do("POST", "/v1/vaults/"+vault+"/ops", d.token, ops, nil).expect(e.t, 200).json(e.t, &out)
+	e.do("POST", "/v1/vaults/"+vault+"/ops", d.token, ops, authHdr(vault)).expect(e.t, 200).json(e.t, &out)
 	return out
 }
 
@@ -507,7 +507,8 @@ func TestRotateReencryptAndRecovery(t *testing.T) {
 	recSalt := randBytes(16)
 	e.do("PUT", base+"/recovery", a.token, map[string]any{"pub_kex": randBytes(65), "recovery_enc": randBytes(80), "salt": recSalt, "auth": recAuth}, nil).expect(t, 401) // authority required
 	e.do("PUT", base+"/recovery", a.token, map[string]any{"pub_kex": randBytes(65), "recovery_enc": randBytes(80), "salt": recSalt, "auth": recAuth}, authHdr(vault)).expect(t, 201).json(t, &rec)
-	e.do("POST", base+"/keybox", a.token, map[string]any{"keybox": []store.KeyboxRow{{Epoch: 1, RecipientID: rec.DeviceID, Wrapped: randBytes(100)}}}, nil).expect(t, 204)
+	e.do("POST", base+"/keybox", a.token, map[string]any{"keybox": []store.KeyboxRow{{Epoch: 1, RecipientID: rec.DeviceID, Wrapped: randBytes(100)}}}, nil).expect(t, 401) // rows for another identity need authority
+	e.do("POST", base+"/keybox", a.token, map[string]any{"keybox": []store.KeyboxRow{{Epoch: 1, RecipientID: rec.DeviceID, Wrapped: randBytes(100)}}}, authHdr(vault)).expect(t, 204)
 
 	// Rotation validation: wrong epoch, self-revoke, missing recipient.
 	nextAuth := newAuthTok()
@@ -553,9 +554,10 @@ func TestRotateReencryptAndRecovery(t *testing.T) {
 	if len(work.BlobIDs) != 1 || work.BlobIDs[0] != bid {
 		t.Fatalf("worklist: %+v", work)
 	}
-	// Re-upload under epoch 2 replaces (key holders only); then lower epoch is a no-op.
-	e.upload(vault, a, bid, blob(2, "doc-reenc")).expect(t, 401)
-	e.do("PUT", base+"/blobs/"+bid, a.token, blob(2, "doc-reenc"), map[string]string{"Content-Type": "application/octet-stream", "X-Obsync-Vault-Auth": authTok[vault]}).expect(t, 201)
+	// Re-upload under epoch 2 replaces; then lower epoch is a no-op. Without
+	// authority nothing is ever uploaded.
+	e.do("PUT", base+"/blobs/"+bid, a.token, blob(2, "doc-reenc"), map[string]string{"Content-Type": "application/octet-stream"}).expect(t, 401)
+	e.upload(vault, a, bid, blob(2, "doc-reenc")).expect(t, 201)
 	e.upload(vault, a, bid, blob(1, "stale")).expect(t, 200)
 	r := e.do("GET", base+"/blobs/"+bid, a.token, nil, nil).expect(t, 200)
 	if r.hdr.Get("X-Blob-Epoch") != "2" || !bytes.Contains(r.body, []byte("doc-reenc")) {
@@ -641,7 +643,7 @@ func TestGCAndRestore(t *testing.T) {
 		Skipped []string `json:"skipped_path_ids"`
 		Cursor  int64    `json:"cursor"`
 	}
-	e.do("POST", base+"/restore", a.token, map[string]any{"at": tBetween}, nil).expect(t, 200).json(t, &rs)
+	e.do("POST", base+"/restore", a.token, map[string]any{"at": tBetween}, authHdr(vault)).expect(t, 200).json(t, &rs)
 	if rs.Emitted != 1 || len(rs.Skipped) != 0 || rs.Cursor != 4 {
 		t.Fatalf("restore: %+v", rs)
 	}
@@ -681,7 +683,7 @@ func TestGCAndRestore(t *testing.T) {
 	var hist struct{ Ops []store.Op }
 	e.do("GET", base+"/history?path_id="+hexID("n.md"), a.token, nil, nil).expect(t, 200).json(t, &hist)
 	tAfterSeq2 := hist.Ops[1].CreatedAt
-	e.do("POST", base+"/restore", a.token, map[string]any{"at": tAfterSeq2}, nil).expect(t, 200).json(t, &rs)
+	e.do("POST", base+"/restore", a.token, map[string]any{"at": tAfterSeq2}, authHdr(vault)).expect(t, 200).json(t, &rs)
 	if rs.Emitted != 0 || len(rs.Skipped) != 1 || rs.Skipped[0] != hexID("n.md") {
 		t.Fatalf("restore with collected blob: %+v", rs)
 	}

@@ -62,6 +62,7 @@ usage:
   obsync serve        --data DIR [--listen :8080] [--admin-token T] [--acme-domain D] [--max-blob-mb N] [--retention 2160h]
   obsync vault create --data DIR
   obsync vault list   --data DIR
+  obsync vault auth   --data DIR VAULT_ID va_TOKEN   (migrate a pre-authority vault)
   obsync gc           --data DIR [--retention 2160h]`))
 }
 
@@ -183,7 +184,7 @@ func serve(args []string) error {
 
 func vault(args []string) error {
 	if len(args) < 1 {
-		return errors.New("vault create|list")
+		return errors.New("vault create|list|auth")
 	}
 	fs := flag.NewFlagSet("vault", flag.ExitOnError)
 	data := fs.String("data", "", "data directory")
@@ -208,8 +209,21 @@ func vault(args []string) error {
 		for _, v := range vs {
 			fmt.Printf("%s\tepoch=%d\tseq=%d\tcreated=%s\n", v.ID, v.Epoch, v.Seq, time.UnixMilli(v.CreatedAt).Format(time.RFC3339))
 		}
+	case "auth":
+		// obsync vault auth --data DIR VAULT_ID va_TOKEN
+		// Installs the vault authority token for a vault created before the
+		// server required one (DESIGN.md §5.8). The token is shown under
+		// Settings → obsync → Advanced on any device that holds the keys.
+		rest := fs.Args()
+		if len(rest) != 2 {
+			return errors.New("vault auth --data DIR VAULT_ID va_TOKEN")
+		}
+		if err := st.SetVaultAuth(context.Background(), rest[0], rest[1]); err != nil {
+			return err
+		}
+		fmt.Println("vault authority set")
 	default:
-		return errors.New("vault create|list")
+		return errors.New("vault create|list|auth")
 	}
 	return nil
 }

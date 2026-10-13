@@ -52,7 +52,8 @@ export class ObsidianInstance {
       mkdirSync(join(base, d), { recursive: true });
     }
     for (const f of ["main.js", "manifest.json", "styles.css"]) copyFileSync(join(ROOT, f), join(o.vault, ".obsidian/plugins/obsync", f));
-    writeFileSync(join(o.vault, ".obsidian/app.json"), JSON.stringify({ legacyEditor: false, safeMode: false }));
+    // autoUpdate:false keeps Obsidian from downloading a newer release mid-test.
+    writeFileSync(join(o.vault, ".obsidian/app.json"), JSON.stringify({ legacyEditor: false, safeMode: false, autoUpdate: false }));
     writeFileSync(join(o.vault, ".obsidian/community-plugins.json"), JSON.stringify(["obsync"]));
     const record = { path: o.vault, ts: Date.now(), open: true, name: `vault-${name}` };
     const registry = JSON.stringify({ cli: true, vaults: { [o.id]: record } });
@@ -182,6 +183,21 @@ export class ObsidianInstance {
   async diagnostics(): Promise<string> {
     const st = await this.eval((plugin) => ({ status: plugin.engine?.getStatus(), ws: plugin.engine?.ws?.readyState, cursor: plugin.engine?.state.cursor, dirty: plugin.engine?.state.dirty })).catch((e) => String(e));
     return JSON.stringify(st) + "\n--- console tail ---\n" + this.log.split("\n").filter((l) => l.includes("obsync")).slice(-25).join("\n");
+  }
+
+  /**
+   * Watch notices for up to `timeoutMs` and resolve with the first one that
+   * matches. Notices expire after ~5 s, so a single late query can miss one.
+   */
+  async waitForNotice(re: RegExp, timeoutMs = 20_000): Promise<string | null> {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      const texts = (await this.page.evaluate(`[...document.querySelectorAll(".notice")].map((n) => n.textContent)`).catch(() => [])) as string[];
+      const hit = texts.find((t) => re.test(t));
+      if (hit) return hit;
+      await new Promise((r) => setTimeout(r, 150));
+    }
+    return null;
   }
 
   /** Wait until a file exists on this instance's disk with the given content (or at all). */

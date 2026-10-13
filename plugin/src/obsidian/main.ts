@@ -8,6 +8,7 @@
  */
 import { Notice, Plugin, Platform } from "obsidian";
 import { Engine, type EngineConfig, type Status } from "../core/engine";
+import type { VaultInfo } from "../core/transport";
 import { DEFAULT_EXCLUSIONS, CONFIG_TOKEN } from "../core/paths";
 import {
   createInviteLink,
@@ -110,6 +111,7 @@ export default class ObsyncPlugin extends Plugin {
     this.addCommand({ id: "restore", name: "Restore vault to a point in time", callback: () => this.cmdRestore() });
     this.addCommand({ id: "history", name: "Show history for current file", callback: () => this.cmdHistory() });
     this.addCommand({ id: "rebuild", name: "Rebuild local sync state", callback: () => this.engine?.rebuildState() });
+    this.addCommand({ id: "reupload", name: "Re-upload current file to the server", callback: () => this.cmdReupload() });
     this.addCommand({ id: "apply-held-deletes", name: "Apply held deletions", callback: () => this.engine?.applyHeldDeletes() });
     this.addCommand({ id: "unlock", name: "Unlock vault keys", callback: () => void this.unlock() });
 
@@ -280,6 +282,7 @@ export default class ObsyncPlugin extends Plugin {
         onStatus: (s) => this.renderStatus(s),
         afterApply: (p, k) => this.hooks.afterApply(p, k),
         onConflict: (p, sib) => new Notice(`obsync: conflict on ${p}. Your version was saved as ${sib}.`, 10000),
+        onSkipped: (p, why) => new Notice(`obsync: could not apply the latest version of ${p} (${why}). Sync continues; the next change to that file will fix it.`, 12000),
         confirmMassDelete: (paths) =>
           ConfirmModal.ask(
             this.app,
@@ -299,6 +302,7 @@ export default class ObsyncPlugin extends Plugin {
       },
     );
     await this.engine.start();
+    void this.checkVaultAuthority();
   }
 
   async restartEngine(): Promise<void> {
@@ -341,6 +345,39 @@ export default class ObsyncPlugin extends Plugin {
 
   async createVault(server: string, adminToken: string): Promise<void> {
     await this.adopt(await createVault(server, adminToken, this.settings.deviceName), "vault created and connected");
+  }
+
+  /**
+   * A vault from before vault authority existed (DESIGN.md §5.8) accepts no
+   * writes until the admin installs the token. Say so, once, with the exact
+   * command; the token itself is under Settings → Advanced.
+   */
+  private authorityNoticed = false;
+  /** Server-reported vault authority state as of engine start; undefined until known. */
+  vaultHasAuth: boolean | undefined;
+  private async checkVaultAuthority(): Promise<void> {
+    const s = this.session;
+    if (!s) return;
+    try {
+      const v = await s.client.vault(s.identity.vaultId);
+      this.vaultHasAuth = v.has_auth !== false;
+      if (v.has_auth !== false || this.authorityNoticed) return;
+      this.authorityNoticed = true;
+      new Notice("obsync: this vault was created by an older server version and cannot accept changes until its administrator runs the command shown under Settings → obsync → Advanced → Vault authority.", 20000);
+    } catch {
+      /* offline; the sync loop reports that */
+    }
+  }
+
+  /** Server-side vault state (epoch, has_auth, …). */
+  async vaultInfo(): Promise<VaultInfo> {
+    const s = this.need();
+    return s.client.vault(s.identity.vaultId);
+  }
+
+  /** The vault authority token for the current epoch (for `obsync vault auth`). */
+  async vaultAuthorityToken(): Promise<string> {
+    return this.need().vc.authToken();
   }
 
   /** Rename this device everywhere: the roster (encrypted) and conflict file names. */
@@ -446,6 +483,17 @@ export default class ObsyncPlugin extends Plugin {
                   },
           })),
       ).open();
+    });
+  }
+
+  /** Repair for a file other devices report they cannot apply. */
+  cmdReupload(): Promise<void> {
+    return this.guard(async () => {
+      const f = this.app.workspace.getActiveFile();
+      if (!f) throw new Error("open the file to re-upload first");
+      if (!this.engine) throw new Error("not connected");
+      await this.engine.reupload(f.path);
+      new Notice(`obsync: re-uploaded ${f.path}.`);
     });
   }
 

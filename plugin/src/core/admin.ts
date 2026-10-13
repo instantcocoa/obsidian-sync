@@ -92,7 +92,10 @@ async function finishEnrol(server: string, vaultId: string, deviceName: string, 
   try {
     await s.client.registerAuth(vaultId, await s.vc.authToken(Math.max(...keyring.epochs.keys())));
   } catch (e) {
-    if (!(e instanceof HttpError && e.status === 409)) throw e;
+    // 409: already set (every device after the first). 401: this vault has
+    // more than one device and no authority yet (pre-§5.8 database); the
+    // admin installs it, see `obsync vault auth`. Either way enrolment is done.
+    if (!(e instanceof HttpError && (e.status === 409 || e.status === 401))) throw e;
   }
   await s.client.setDeviceName(vaultId, await s.vc.encryptName(deviceName));
   return s;
@@ -221,7 +224,7 @@ export async function setRecoveryPassphrase(s: Session, passphrase: string): Pro
   const { device_id } = await s.client.setRecovery(v, rec.pub, rec.recoveryEnc, rec.salt, rec.authToken);
   const rows = [];
   for (const [epoch, key] of s.vc.keyring.epochs) rows.push({ epoch, recipient_id: device_id, wrapped: await wrapEpochKey(rec.pub, v, epoch, device_id, key, s.vc.keyring.kId) });
-  await s.client.putKeybox(v, rows);
+  await s.client.putKeybox(v, rows, { authority: true });
 }
 
 /** Join with only the server URL, vault id, and recovery passphrase. */

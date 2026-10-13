@@ -145,7 +145,9 @@ not allowed to use public-key credentials, as verified in the test suite.
 Sync now · Show conflicts · Generate invite link for another device ·
 Manage devices · Set recovery passphrase · Rotate vault keys · Restore vault
 to a point in time · Show history for current file · Rebuild local sync
-state · Apply held deletions · Unlock vault keys.
+state · Apply held deletions · Unlock vault keys · Re-upload current file
+to the server (the repair when another device reports it "could not apply
+the latest version" of a file).
 
 ## Status bar
 

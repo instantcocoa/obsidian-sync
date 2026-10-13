@@ -125,7 +125,7 @@ func (s *Server) routes() {
 	m.HandleFunc("PATCH /v1/vaults/{v}/devices/me", s.device(s.setDeviceName))
 	m.HandleFunc("GET /v1/vaults/{v}/keybox", s.device(s.getKeybox))
 	m.HandleFunc("POST /v1/vaults/{v}/keybox", s.device(s.putKeybox))
-	m.HandleFunc("POST /v1/vaults/{v}/auth", s.device(s.registerAuth))
+	m.HandleFunc("POST /v1/vaults/{v}/auth", s.deviceOrAdmin(s.registerAuth))
 	m.HandleFunc("POST /v1/vaults/{v}/rotate", s.authority(s.rotate))
 
 	m.HandleFunc("PUT /v1/vaults/{v}/recovery", s.authority(s.setRecovery))
@@ -138,14 +138,14 @@ func (s *Server) routes() {
 
 	m.HandleFunc("POST /v1/vaults/{v}/blobs/missing", s.device(s.blobsMissing))
 	m.HandleFunc("GET /v1/vaults/{v}/blobs", s.device(s.blobsBelowEpoch))
-	m.HandleFunc("PUT /v1/vaults/{v}/blobs/{id}", s.device(s.putBlob))
+	m.HandleFunc("PUT /v1/vaults/{v}/blobs/{id}", s.authority(s.putBlob))
 	m.HandleFunc("GET /v1/vaults/{v}/blobs/{id}", s.device(s.getBlob))
 
-	m.HandleFunc("POST /v1/vaults/{v}/ops", s.device(s.postOps))
+	m.HandleFunc("POST /v1/vaults/{v}/ops", s.authority(s.postOps))
 	m.HandleFunc("GET /v1/vaults/{v}/ops", s.device(s.opsQuery))
 	m.HandleFunc("PATCH /v1/vaults/{v}/ops/{seq}/meta", s.authority(s.patchMeta))
 	m.HandleFunc("GET /v1/vaults/{v}/history", s.device(s.history))
-	m.HandleFunc("POST /v1/vaults/{v}/restore", s.device(s.restore))
+	m.HandleFunc("POST /v1/vaults/{v}/restore", s.authority(s.restore))
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -154,7 +154,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// cookie, so a wildcard origin is safe.
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
-	w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, Range, X-Blob-Epoch, X-Obsync-Vault-Auth")
+	w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, Range, X-Blob-Epoch, X-Blob-Replace, X-Obsync-Vault-Auth")
 	w.Header().Set("Access-Control-Expose-Headers", "Content-Length, Content-Range, Accept-Ranges, X-Blob-Epoch")
 	w.Header().Set("Access-Control-Max-Age", "86400")
 	if r.Method == http.MethodOptions {
@@ -274,6 +274,16 @@ func (s *Server) authority(next http.HandlerFunc) http.HandlerFunc {
 		}
 		next(w, r)
 	})
+}
+
+func (s *Server) deviceOrAdmin(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if s.isAdmin(bearer(r)) {
+			next(w, r)
+			return
+		}
+		s.device(next)(w, r)
+	}
 }
 
 func (s *Server) authorityOrAdmin(next http.HandlerFunc) http.HandlerFunc {
@@ -467,6 +477,23 @@ func (s *Server) putKeybox(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "keybox rows required")
 		return
 	}
+	// Rows for anyone but the caller (a recovery identity the caller just
+	// installed) need vault authority, so a token-only member cannot
+	// pre-empt the owner's rows in the window after PUT /recovery.
+	for _, row := range body.Keybox {
+		if row.RecipientID != dev(r).ID {
+			ok, err := s.st.CheckVaultAuth(r.Context(), r.PathValue("v"), vaultAuth(r))
+			if err != nil {
+				s.fail(w, err)
+				return
+			}
+			if !ok {
+				s.failAuth(w, r, "vault authority token required for keybox rows addressed to another identity")
+				return
+			}
+			break
+		}
+	}
 	if err := s.st.PutKeybox(r.Context(), r.PathValue("v"), dev(r).ID, body.Keybox); err != nil {
 		s.fail(w, err)
 		return
@@ -474,8 +501,9 @@ func (s *Server) putKeybox(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// registerAuth installs the vault authority hash on first enrolment (or on a
-// vault that predates the field). Idempotent for the matching token.
+// registerAuth installs the vault authority hash: by the first device at
+// enrolment (idempotent for the matching token, refused once the vault has
+// more than one device), or by the admin for a vault that predates §5.8.
 func (s *Server) registerAuth(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Auth string `json:"auth"`
@@ -484,7 +512,13 @@ func (s *Server) registerAuth(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "bad body")
 		return
 	}
-	if err := s.st.EnsureVaultAuth(r.Context(), r.PathValue("v"), body.Auth); err != nil {
+	var err error
+	if d := dev(r); d != nil {
+		err = s.st.EnsureVaultAuth(r.Context(), r.PathValue("v"), d.ID, body.Auth)
+	} else {
+		err = s.st.SetVaultAuth(r.Context(), r.PathValue("v"), body.Auth)
+	}
+	if err != nil {
 		s.fail(w, err)
 		return
 	}
@@ -795,25 +829,15 @@ func (s *Server) putBlob(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, fmt.Sprintf("blob epoch %d outside [1,%d]", epoch, vault.Epoch))
 		return
 	}
-	// Short-circuit: already have an equal-or-newer epoch. Drain and ack.
-	if cur, err := s.st.GetBlob(r.Context(), v, id); err == nil {
-		if cur.Epoch >= epoch {
-			io.Copy(io.Discard, body)
-			w.Header().Set("X-Blob-Epoch", strconv.FormatInt(cur.Epoch, 10))
-			w.WriteHeader(http.StatusOK)
-			return
-		}
-		// Replacing stored ciphertext (re-encryption after a rotation) is
-		// destructive: a wrong body loses the only copy. Key holders only.
-		ok, err := s.st.CheckVaultAuth(r.Context(), v, vaultAuth(r))
-		if err != nil {
-			s.fail(w, err)
-			return
-		}
-		if !ok {
-			s.failAuth(w, r, "vault authority token required to replace a blob")
-			return
-		}
+	// Every upload comes from a key holder (route requires vault authority).
+	// Short-circuit when an equal-or-newer epoch is stored, unless the caller
+	// asks to replace at the same epoch (repair of an undecryptable blob).
+	replace := r.Header.Get("X-Blob-Replace") == "1"
+	if cur, err := s.st.GetBlob(r.Context(), v, id); err == nil && (cur.Epoch > epoch || (cur.Epoch == epoch && !replace)) {
+		io.Copy(io.Discard, body)
+		w.Header().Set("X-Blob-Epoch", strconv.FormatInt(cur.Epoch, 10))
+		w.WriteHeader(http.StatusOK)
+		return
 	}
 	// Write to a staging name first; only after the index accepts it do we
 	// move it into place, so a concurrent higher-epoch upload can't be
@@ -838,7 +862,7 @@ func (s *Server) putBlob(w http.ResponseWriter, r *http.Request) {
 	lk := s.blobLock(id)
 	lk.Lock()
 	defer lk.Unlock()
-	stored, err := s.st.UpsertBlob(r.Context(), v, id, epoch, n)
+	stored, err := s.st.UpsertBlob(r.Context(), v, id, epoch, n, replace)
 	if err != nil {
 		s.blobs.Delete(v, stage)
 		s.fail(w, err)

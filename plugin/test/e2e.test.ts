@@ -328,6 +328,41 @@ describe("two devices", () => {
     await b.cleanup();
   });
 
+  it("one undecryptable blob or unusable name is skipped and reported; sync continues", async () => {
+    const [a, b] = await pair();
+    await a.write("good.md", "good\n");
+    await a.sync();
+    await b.sync();
+    // A key holder overwrote a blob's bytes with garbage (the only party who
+    // can upload at all). B must not stall on it.
+    const { vc, client, identity } = a.session;
+    const victim = utf8("victim\n");
+    const vid = await vc.blobId(victim);
+    await client.putBlob(identity.vaultId, vid, await vc.encryptBlob(vid, victim));
+    const garbage = await vc.encryptBlob(vid, utf8("not the victim bytes"));
+    await client.putBlob(identity.vaultId, vid, garbage, { replace: true });
+    const pid = await vc.pathId("victim.md");
+    const r = await client.postOps(identity.vaultId, [{ op_id: "f".repeat(24), path_id: pid, blob_id: vid, meta_enc: await vc.encryptMeta(pid, { path: "victim.md", mtime: Date.now(), size: 7 }), meta_epoch: vc.keyring.current, base_seq: 0 }]);
+    expect(r.results[0].seq).toBeGreaterThan(0);
+    // A later, healthy op must still arrive.
+    await a.write("after.md", "after\n");
+    await a.sync();
+    const skipped: string[] = [];
+    b.engine["hooks"].onSkipped = (p: string) => skipped.push(p);
+    await b.sync();
+    expect(await b.read("after.md")).toBe("after\n");
+    expect(skipped).toEqual(["victim.md"]);
+    expect((await b.files()).includes("victim.md")).toBe(false);
+    // Re-saving on the author would upload nothing (the id is "present"), so
+    // the repair is an explicit re-upload: replace the bytes, post a new op.
+    await a.write("victim.md", "victim\n");
+    await a.engine.reupload("victim.md");
+    await b.sync();
+    expect(await b.read("victim.md").catch(() => "missing")).toBe("victim\n");
+    await a.cleanup();
+    await b.cleanup();
+  });
+
   it("a real folder literally named $CONFIG is left alone", async () => {
     const [a, b] = await pair();
     await a.write("$CONFIG/app.json", "{\"not\":\"config\"}");

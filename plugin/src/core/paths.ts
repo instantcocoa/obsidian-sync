@@ -53,13 +53,32 @@ export function isSafeLogicalPath(p: string): boolean {
   if (!p || p.length > 4096 || p.startsWith("/") || p.endsWith("/")) return false;
   // eslint-disable-next-line no-control-regex
   if (/[\\\x00-\x1f\x7f]/.test(p)) return false;
+  const enc = new TextEncoder();
   const segs = p.split("/");
   for (let i = 0; i < segs.length; i++) {
     const seg = segs[i];
     if (seg === "" || seg === "." || seg === "..") return false;
     if (seg === CONFIG_TOKEN && i !== 0) return false;
+    // Windows strips trailing dots and spaces ("x." == "x"), has 8.3 aliases
+    // ("OBSIDI~1" == ".obsidian") and reserved device names; a component over
+    // 255 bytes fails on Linux and Android. None of these is a name a human
+    // gives a note, and each could alias a path the rules above protect.
+    if (seg.endsWith(".") || seg.endsWith(" ")) return false;
+    if (/^[^.]{1,8}~\d+(\..*)?$/i.test(seg)) return false;
+    if (/^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\..*)?$/i.test(seg)) return false;
+    if (enc.encode(seg).length > 255) return false;
   }
   return true;
+}
+
+/**
+ * Does this device path alias the config dir without being it? Case-only
+ * variants (".Obsidian") are the same directory on macOS and Windows and
+ * would slip past the $CONFIG mapping and its exclusions.
+ */
+export function aliasesConfigDir(devPath: string, configDir: string): boolean {
+  const first = devPath.split("/")[0];
+  return first !== configDir && first.toLowerCase() === configDir.toLowerCase();
 }
 
 /** Same rules for a device path (no $CONFIG token allowed at all). */

@@ -59,8 +59,18 @@ All device routes take `Authorization: Bearer dv_…`; the WebSocket carries
 it as the second subprotocol (`Sec-WebSocket-Protocol: obsync-bearer, dv_…`).
 Tokens are never accepted in the URL. Routes marked **authority** also need
 `X-Obsync-Vault-Auth: va_…`, a token only holders of the current epoch key
-can derive (DESIGN.md §5.8), so a leaked device token cannot destroy data or
-add devices. Admin routes take the admin token. Bodies are JSON unless noted;
+can derive (DESIGN.md §5.8). Every write is such a route, so a leaked device
+token on its own is read-only: it can fetch ciphertext and nothing else.
+Admin routes take the admin token.
+
+A vault created by a server from before this existed has no authority token
+and refuses writes until you install one. On any device that holds the
+keys, Settings → obsync → Advanced → Vault authority → **Copy command**
+gives you the exact line:
+
+```sh
+./obsync vault auth --data /var/lib/obsync <vault-id> va_…
+``` Bodies are JSON unless noted;
 binary fields are base64 in JSON. IDs (`path_id`, `blob_id`) are 64 lowercase
 hex chars.
 
@@ -70,12 +80,12 @@ hex chars.
 | `GET` | `/v1/vaults` | admin |
 | `POST` | `/v1/vaults/{v}/invites` | **authority** or admin. `{keybox_enc, ttl_seconds?}` → `{token, expires_at}` |
 | `POST` | `/v1/invites/{t}` | no auth. `{pub_kex, name_enc}` → `{device_id, device_token, vault_id, epoch, keybox_enc}`. One-time. |
-| `GET` | `/v1/vaults/{v}` | `{epoch, min_epoch, seq}` |
+| `GET` | `/v1/vaults/{v}` | `{epoch, min_epoch, seq, has_auth}` |
 | `GET` | `/v1/vaults/{v}/devices` | roster |
 | `PATCH` | `/v1/vaults/{v}/devices/me` | `{name_enc}` rename the calling device |
 | `GET` | `/v1/vaults/{v}/keybox` | rows addressed to the caller, epochs ≥ `min_epoch` |
-| `POST` | `/v1/vaults/{v}/keybox` | `{keybox:[{epoch, recipient_id, wrapped}]}` for epochs ≤ current; recipient must be the caller or a recovery identity (insert-only) |
-| `POST` | `/v1/vaults/{v}/auth` | `{auth:"va_…"}` register the vault authority hash; 204 if unset or equal, 409 if different |
+| `POST` | `/v1/vaults/{v}/keybox` | `{keybox:[{epoch, recipient_id, wrapped}]}` for epochs ≤ current; recipient must be the caller, or a recovery identity (insert-only, **authority**) |
+| `POST` | `/v1/vaults/{v}/auth` | `{auth:"va_…"}`. Device: installs the hash only on first enrolment (the caller is the vault's sole device); 204 when equal, 409 when different, 401 otherwise. Admin: installs or replaces it unconditionally (migration, reset). |
 | `POST` | `/v1/vaults/{v}/rotate` | **authority**. `{epoch: cur+1, revoke:[ids], keybox:[rows], auth_next:"va_…"}`; atomic; must cover every remaining device |
 | `PUT` | `/v1/vaults/{v}/recovery` | **authority**. `{pub_kex, recovery_enc, salt, auth:"rc_…"}` |
 | `GET` | `/v1/vaults/{v}/recovery` | no auth → `{device_id, pub_kex, salt}` (salt only; nothing to attack offline) |
@@ -84,15 +94,15 @@ hex chars.
 | `GET` | `/v1/vaults/{v}/changes?since=N&wait=S&limit=L` | long-poll up to 60 s; `more` flag; a device revoked while waiting gets 401 |
 | `GET` | `/v1/vaults/{v}/live` | WebSocket (token in the subprotocol list), pushes `{seq, epoch}` hints on every change and as a 25 s heartbeat; closed when the device is revoked |
 | `POST` | `/v1/vaults/{v}/blobs/missing` | `[ids]` → `{missing:[ids]}` |
-| `PUT` | `/v1/vaults/{v}/blobs/{id}` | raw body; `0x01‖epoch u32LE‖salt16‖nonce12‖ct`; 201 new, 200 no-op; replacing with a higher epoch needs **authority** |
+| `PUT` | `/v1/vaults/{v}/blobs/{id}` | **authority**. raw body; `0x01‖epoch u32LE‖salt16‖nonce12‖ct`; 201 new or higher epoch, 200 no-op; `X-Blob-Replace: 1` overwrites at the same epoch (repair) |
 | `GET` | `/v1/vaults/{v}/blobs/{id}` | raw; supports `Range`; `X-Blob-Epoch` header |
 | `GET` | `/v1/vaults/{v}/blobs?epoch_lt=E` | re-encryption worklist |
-| `POST` | `/v1/vaults/{v}/ops` | `[{op_id, path_id, blob_id|null, meta_enc, meta_epoch, base_seq}]` → per-op `{seq}` / `{conflict: headOp}` / `{error}` |
+| `POST` | `/v1/vaults/{v}/ops` | **authority**. `[{op_id, path_id, blob_id|null, meta_enc, meta_epoch, base_seq}]` → per-op `{seq}` / `{conflict: headOp}` / `{error}` |
 | `PATCH` | `/v1/vaults/{v}/ops/{seq}/meta` | **authority**. `{meta_enc, meta_epoch}`; higher epoch only |
 | `GET` | `/v1/vaults/{v}/ops?meta_epoch_lt=E` | `{seqs}` re-encryption worklist |
 | `GET` | `/v1/vaults/{v}/ops?from=ms&to=ms` | op log by time |
 | `GET` | `/v1/vaults/{v}/history?path_id=…` | ops for a path (first 5000) |
-| `POST` | `/v1/vaults/{v}/restore` | `{at: ms}` → re-emits older heads; `{emitted, skipped_path_ids}` |
+| `POST` | `/v1/vaults/{v}/restore` | **authority**. `{at: ms}` → re-emits older heads; `{emitted, skipped_path_ids}` |
 
 Invariants enforced server-side: a `put` needs its blob uploaded first;
 `base_seq` must equal the path's current head (0 for a new path); ops are

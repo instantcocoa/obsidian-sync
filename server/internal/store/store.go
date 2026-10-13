@@ -10,6 +10,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/subtle"
 	"database/sql"
 	"encoding/base64"
 	"encoding/hex"
@@ -55,7 +56,8 @@ CREATE TABLE IF NOT EXISTS vaults (
   id TEXT PRIMARY KEY,
   epoch INTEGER NOT NULL DEFAULT 1,
   seq INTEGER NOT NULL DEFAULT 0,
-  created_at INTEGER NOT NULL
+  created_at INTEGER NOT NULL,
+  auth_hash BLOB
 );
 CREATE TABLE IF NOT EXISTS devices (
   id TEXT PRIMARY KEY,
@@ -65,6 +67,7 @@ CREATE TABLE IF NOT EXISTS devices (
   token_hash BLOB UNIQUE,
   recovery INTEGER NOT NULL DEFAULT 0,
   recovery_enc BLOB,
+  recovery_salt BLOB,
   created_at INTEGER NOT NULL,
   last_seen INTEGER,
   revoked_at INTEGER
@@ -122,8 +125,26 @@ CREATE INDEX IF NOT EXISTS blobs_epoch ON blobs(vault_id, epoch);
 `
 
 func (s *Store) migrate() error {
-	_, err := s.db.Exec(schema)
-	return err
+	if _, err := s.db.Exec(schema); err != nil {
+		return err
+	}
+	// Columns added after the first release. SQLite has no ADD COLUMN IF NOT
+	// EXISTS, so probe each one.
+	for _, m := range []struct{ table, col, ddl string }{
+		{"vaults", "auth_hash", "ALTER TABLE vaults ADD COLUMN auth_hash BLOB"},
+		{"devices", "recovery_salt", "ALTER TABLE devices ADD COLUMN recovery_salt BLOB"},
+	} {
+		var n int
+		if err := s.db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info(?) WHERE name=?`, m.table, m.col).Scan(&n); err != nil {
+			return err
+		}
+		if n == 0 {
+			if _, err := s.db.Exec(m.ddl); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 // ---------- helpers ----------
@@ -216,6 +237,85 @@ func (s *Store) GetVault(ctx context.Context, id string) (*Vault, error) {
 
 type queryer interface {
 	QueryRowContext(ctx context.Context, q string, args ...any) *sql.Row
+}
+
+// ---------- vault authority ----------
+//
+// The vault authority token is derived by key holders from the current epoch
+// key (HKDF, DESIGN.md §5.8) and presented on routes that can destroy or
+// hand out data: rotation, ciphertext replacement, metadata replacement,
+// recovery (re)installation and invites. The server stores only its hash, so
+// a stolen device token alone (proxy logs, a copied data.json without keys)
+// cannot lock the owner out or overwrite history. Rotation installs the hash
+// for the next epoch at the same time, so a revoked device's old token stops
+// working together with its old keys.
+
+// EnsureVaultAuth installs the authority hash when the vault has none yet
+// (first enrolment, or a database from before this field existed), accepts a
+// matching token, and refuses a different one.
+func (s *Store) EnsureVaultAuth(ctx context.Context, vault, token string) error {
+	if !validAuthToken(token) {
+		return fmt.Errorf("%w: bad vault auth token", ErrBadRequest)
+	}
+	return s.writeTx(ctx, func(tx *sql.Tx) error {
+		var cur []byte
+		if err := tx.QueryRowContext(ctx, `SELECT auth_hash FROM vaults WHERE id=?`, vault).Scan(&cur); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return ErrNotFound
+			}
+			return err
+		}
+		h := HashToken(token)
+		switch {
+		case len(cur) == 0:
+			_, err := tx.ExecContext(ctx, `UPDATE vaults SET auth_hash=? WHERE id=?`, h, vault)
+			return err
+		case subtle.ConstantTimeCompare(cur, h) == 1:
+			return nil
+		default:
+			return fmt.Errorf("%w: vault authority already set", ErrConflict)
+		}
+	})
+}
+
+// CheckVaultAuth reports whether token is the vault's current authority
+// token. A vault with no authority yet (legacy) accepts nothing: the first
+// device to call EnsureVaultAuth sets it.
+func (s *Store) CheckVaultAuth(ctx context.Context, vault, token string) (bool, error) {
+	if !validAuthToken(token) {
+		return false, nil
+	}
+	var cur []byte
+	err := s.db.QueryRowContext(ctx, `SELECT auth_hash FROM vaults WHERE id=?`, vault).Scan(&cur)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, ErrNotFound
+	}
+	if err != nil {
+		return false, err
+	}
+	return len(cur) > 0 && subtle.ConstantTimeCompare(cur, HashToken(token)) == 1, nil
+}
+
+// validAuthToken accepts "va_" plus 32..128 base64url/hex characters.
+func validAuthToken(t string) bool {
+	if !strings.HasPrefix(t, "va_") || len(t) < 35 || len(t) > 131 {
+		return false
+	}
+	for _, c := range t[3:] {
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '-' || c == '_') {
+			return false
+		}
+	}
+	return true
+}
+
+// DeviceLive reports whether a device id still has a valid, unrevoked token.
+func (s *Store) DeviceLive(ctx context.Context, id string) bool {
+	var n int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM devices WHERE id=? AND revoked_at IS NULL AND token_hash IS NOT NULL`, id).Scan(&n); err != nil {
+		return false
+	}
+	return n == 1
 }
 
 // minEpoch is the lowest epoch any stored ciphertext still uses. Once it
@@ -422,7 +522,10 @@ func (s *Store) GetKeybox(ctx context.Context, vault, recipient string) ([]Keybo
 }
 
 // PutKeybox lets an enrolled device write rows for epochs up to the current
-// one (self-enrolment after an invite, or wrapping to a new recovery identity).
+// one, addressed to itself (self-enrolment after an invite) or to a recovery
+// identity (wrapping keys to a new passphrase). Rows for any other device
+// are refused and rows for a recovery identity are insert-only, so no
+// member can blank out another device's or the recovery identity's keys.
 func (s *Store) PutKeybox(ctx context.Context, vault, author string, rows []KeyboxRow) error {
 	return s.writeTx(ctx, func(tx *sql.Tx) error {
 		var cur int64
@@ -433,18 +536,33 @@ func (s *Store) PutKeybox(ctx context.Context, vault, author string, rows []Keyb
 			if r.Epoch < 1 || r.Epoch > cur || len(r.Wrapped) == 0 {
 				return fmt.Errorf("%w: bad keybox row", ErrBadRequest)
 			}
-			var n int
-			if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM devices WHERE id=? AND vault_id=? AND revoked_at IS NULL`, r.RecipientID, vault).Scan(&n); err != nil {
+			var n, rec int
+			if err := tx.QueryRowContext(ctx, `SELECT COUNT(*), COALESCE(MAX(recovery),0) FROM devices WHERE id=? AND vault_id=? AND revoked_at IS NULL`, r.RecipientID, vault).Scan(&n, &rec); err != nil {
 				return err
 			}
 			if n == 0 {
 				return fmt.Errorf("%w: unknown recipient %s", ErrBadRequest, r.RecipientID)
 			}
-			if _, err := tx.ExecContext(ctx,
-				`INSERT INTO keybox(vault_id, epoch, recipient_id, wrapped, author_id) VALUES(?,?,?,?,?)
-				 ON CONFLICT(vault_id, epoch, recipient_id) DO UPDATE SET wrapped=excluded.wrapped, author_id=excluded.author_id`,
-				vault, r.Epoch, r.RecipientID, r.Wrapped, author); err != nil {
-				return err
+			switch {
+			case r.RecipientID == author:
+				if _, err := tx.ExecContext(ctx,
+					`INSERT INTO keybox(vault_id, epoch, recipient_id, wrapped, author_id) VALUES(?,?,?,?,?)
+					 ON CONFLICT(vault_id, epoch, recipient_id) DO UPDATE SET wrapped=excluded.wrapped, author_id=excluded.author_id`,
+					vault, r.Epoch, r.RecipientID, r.Wrapped, author); err != nil {
+					return err
+				}
+			case rec == 1:
+				res, err := tx.ExecContext(ctx,
+					`INSERT INTO keybox(vault_id, epoch, recipient_id, wrapped, author_id) VALUES(?,?,?,?,?) ON CONFLICT DO NOTHING`,
+					vault, r.Epoch, r.RecipientID, r.Wrapped, author)
+				if err != nil {
+					return err
+				}
+				if k, _ := res.RowsAffected(); k == 0 {
+					return fmt.Errorf("%w: keybox row for recovery identity epoch %d already exists", ErrConflict, r.Epoch)
+				}
+			default:
+				return fmt.Errorf("%w: a device may only write keybox rows for itself or a recovery identity", ErrForbidden)
 			}
 		}
 		return nil
@@ -454,7 +572,10 @@ func (s *Store) PutKeybox(ctx context.Context, vault, author string, rows []Keyb
 // Rotate advances the vault to epoch, revokes the listed devices, and stores
 // the new epoch's keybox rows. The keybox must cover every device that will
 // remain live (including a recovery identity), so nobody is locked out.
-func (s *Store) Rotate(ctx context.Context, vault, author string, epoch int64, revoke []string, rows []KeyboxRow) error {
+func (s *Store) Rotate(ctx context.Context, vault, author string, epoch int64, revoke []string, rows []KeyboxRow, authNext string) error {
+	if !validAuthToken(authNext) {
+		return fmt.Errorf("%w: auth_next (vault authority token for the new epoch) required", ErrBadRequest)
+	}
 	return s.writeTx(ctx, func(tx *sql.Tx) error {
 		var cur int64
 		if err := tx.QueryRowContext(ctx, `SELECT epoch FROM vaults WHERE id=?`, vault).Scan(&cur); err != nil {
@@ -518,25 +639,29 @@ func (s *Store) Rotate(ctx context.Context, vault, author string, epoch int64, r
 				return err
 			}
 		}
-		_, err = tx.ExecContext(ctx, `UPDATE vaults SET epoch=? WHERE id=?`, epoch, vault)
+		_, err = tx.ExecContext(ctx, `UPDATE vaults SET epoch=?, auth_hash=? WHERE id=?`, epoch, HashToken(authNext), vault)
 		return err
 	})
 }
 
 // ---------- recovery ----------
 
+// RecoveryInfo is what an unauthenticated joiner may learn: enough to run
+// the passphrase KDF, nothing to attack offline. The wrapped private key
+// itself is released only on presentation of the derived auth token
+// (RecoveryJoin), so every passphrase guess costs an online request.
 type RecoveryInfo struct {
-	DeviceID    string `json:"device_id"`
-	PubKex      []byte `json:"pub_kex"`
-	RecoveryEnc []byte `json:"recovery_enc"`
+	DeviceID string `json:"device_id"`
+	PubKex   []byte `json:"pub_kex"`
+	Salt     []byte `json:"salt"`
 }
 
 // SetRecovery installs (or replaces) the recovery identity: a pseudo-device
 // whose private key is stored passphrase-wrapped, plus an auth token derived
 // client-side from the same passphrase.
-func (s *Store) SetRecovery(ctx context.Context, vault string, pubKex, recoveryEnc []byte, authToken string) (string, error) {
-	if len(pubKex) == 0 || len(recoveryEnc) == 0 || !strings.HasPrefix(authToken, "rc_") {
-		return "", fmt.Errorf("%w: pub_kex, recovery_enc and rc_ auth required", ErrBadRequest)
+func (s *Store) SetRecovery(ctx context.Context, vault string, pubKex, recoveryEnc, salt []byte, authToken string) (string, error) {
+	if len(pubKex) == 0 || len(recoveryEnc) == 0 || len(salt) < 8 || len(salt) > 64 || !strings.HasPrefix(authToken, "rc_") {
+		return "", fmt.Errorf("%w: pub_kex, recovery_enc, salt and rc_ auth required", ErrBadRequest)
 	}
 	id := randomHex(16)
 	err := s.writeTx(ctx, func(tx *sql.Tx) error {
@@ -546,8 +671,8 @@ func (s *Store) SetRecovery(ctx context.Context, vault string, pubKex, recoveryE
 		if _, err := tx.ExecContext(ctx, `DELETE FROM keybox WHERE vault_id=? AND recipient_id IN (SELECT id FROM devices WHERE vault_id=? AND recovery=1 AND revoked_at IS NOT NULL)`, vault, vault); err != nil {
 			return err
 		}
-		_, err := tx.ExecContext(ctx, `INSERT INTO devices(id, vault_id, pub_kex, token_hash, recovery, recovery_enc, created_at) VALUES(?,?,?,?,1,?,?)`,
-			id, vault, pubKex, HashToken(authToken), recoveryEnc, now())
+		_, err := tx.ExecContext(ctx, `INSERT INTO devices(id, vault_id, pub_kex, token_hash, recovery, recovery_enc, recovery_salt, created_at) VALUES(?,?,?,?,1,?,?,?)`,
+			id, vault, pubKex, HashToken(authToken), recoveryEnc, salt, now())
 		return err
 	})
 	return id, err
@@ -555,8 +680,8 @@ func (s *Store) SetRecovery(ctx context.Context, vault string, pubKex, recoveryE
 
 func (s *Store) GetRecovery(ctx context.Context, vault string) (*RecoveryInfo, error) {
 	r := &RecoveryInfo{}
-	err := s.db.QueryRowContext(ctx, `SELECT id, pub_kex, recovery_enc FROM devices WHERE vault_id=? AND recovery=1 AND revoked_at IS NULL`, vault).
-		Scan(&r.DeviceID, &r.PubKex, &r.RecoveryEnc)
+	err := s.db.QueryRowContext(ctx, `SELECT id, pub_kex, recovery_salt FROM devices WHERE vault_id=? AND recovery=1 AND revoked_at IS NULL`, vault).
+		Scan(&r.DeviceID, &r.PubKex, &r.Salt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -566,14 +691,15 @@ func (s *Store) GetRecovery(ctx context.Context, vault string) (*RecoveryInfo, e
 // RecoveryJoin enrols a new device after it proved knowledge of the recovery
 // passphrase (by presenting the derived auth token). It returns the keybox
 // rows addressed to the recovery identity so the joiner can unwrap them.
-func (s *Store) RecoveryJoin(ctx context.Context, vault, authToken string, pubKex, nameEnc []byte) (*Redeemed, []KeyboxRow, error) {
+func (s *Store) RecoveryJoin(ctx context.Context, vault, authToken string, pubKex, nameEnc []byte) (*Redeemed, []KeyboxRow, []byte, error) {
 	if len(pubKex) == 0 {
-		return nil, nil, fmt.Errorf("%w: pub_kex required", ErrBadRequest)
+		return nil, nil, nil, fmt.Errorf("%w: pub_kex required", ErrBadRequest)
 	}
 	out := &Redeemed{VaultID: vault}
 	var recID string
+	var recoveryEnc []byte
 	err := s.writeTx(ctx, func(tx *sql.Tx) error {
-		err := tx.QueryRowContext(ctx, `SELECT id FROM devices WHERE vault_id=? AND recovery=1 AND revoked_at IS NULL AND token_hash=?`, vault, HashToken(authToken)).Scan(&recID)
+		err := tx.QueryRowContext(ctx, `SELECT id, recovery_enc FROM devices WHERE vault_id=? AND recovery=1 AND revoked_at IS NULL AND token_hash=?`, vault, HashToken(authToken)).Scan(&recID, &recoveryEnc)
 		if errors.Is(err, sql.ErrNoRows) {
 			return ErrForbidden
 		}
@@ -591,10 +717,10 @@ func (s *Store) RecoveryJoin(ctx context.Context, vault, authToken string, pubKe
 		return err
 	})
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	rows, err := s.GetKeybox(ctx, vault, recID)
-	return out, rows, err
+	return out, rows, recoveryEnc, err
 }
 
 // ---------- blobs ----------
@@ -844,8 +970,8 @@ func (s *Store) Snapshot(ctx context.Context, vault string) ([]Op, error) {
 	return s.queryOps(ctx, `SELECT `+opCols+` FROM ops WHERE vault_id=? AND seq IN (SELECT seq FROM heads WHERE vault_id=?) ORDER BY seq`, vault, vault)
 }
 
-func (s *Store) History(ctx context.Context, vault, pathID string) ([]Op, error) {
-	return s.queryOps(ctx, `SELECT `+opCols+` FROM ops WHERE vault_id=? AND path_id=? ORDER BY seq`, vault, pathID)
+func (s *Store) History(ctx context.Context, vault, pathID string, limit int) ([]Op, error) {
+	return s.queryOps(ctx, `SELECT `+opCols+` FROM ops WHERE vault_id=? AND path_id=? ORDER BY seq LIMIT ?`, vault, pathID, limit)
 }
 
 func (s *Store) OpsByTime(ctx context.Context, vault string, from, to int64, limit int) ([]Op, error) {
@@ -990,11 +1116,27 @@ func (s *Store) DeadBlobs(ctx context.Context, vault string, cutoff int64) ([]st
 	return out, rows.Err()
 }
 
-func (s *Store) DeleteBlobRecord(ctx context.Context, vault, id string) error {
-	return s.writeTx(ctx, func(tx *sql.Tx) error {
-		_, err := tx.ExecContext(ctx, `DELETE FROM blobs WHERE vault_id=? AND blob_id=?`, vault, id)
-		return err
+// DeleteDeadBlob removes the blob record only if it is still unreferenced at
+// the moment of deletion (the DeadBlobs listing was computed outside this
+// transaction, and an op may have referenced the blob since). Returns
+// whether the record was removed.
+func (s *Store) DeleteDeadBlob(ctx context.Context, vault, id string, cutoff int64) (bool, error) {
+	var deleted bool
+	err := s.writeTx(ctx, func(tx *sql.Tx) error {
+		res, err := tx.ExecContext(ctx,
+			`DELETE FROM blobs WHERE vault_id=? AND blob_id=?
+			   AND NOT EXISTS (SELECT 1 FROM ops o JOIN heads h ON h.vault_id=o.vault_id AND h.seq=o.seq
+			                   WHERE o.vault_id=blobs.vault_id AND o.blob_id=blobs.blob_id)
+			   AND NOT EXISTS (SELECT 1 FROM ops o WHERE o.vault_id=blobs.vault_id AND o.blob_id=blobs.blob_id AND o.created_at>?)`,
+			vault, id, cutoff)
+		if err != nil {
+			return err
+		}
+		n, _ := res.RowsAffected()
+		deleted = n == 1
+		return nil
 	})
+	return deleted, err
 }
 
 func (s *Store) PruneKeybox(ctx context.Context, vault string) error {

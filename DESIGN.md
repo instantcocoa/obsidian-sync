@@ -245,26 +245,35 @@ blobs    (vault_id, blob_id, epoch, ct_size, created_at, last_ref_at)
 | Method | Path | Purpose |
 | --- | --- | --- |
 | `POST` | `/v1/vaults` | Create a vault (admin token). |
-| `POST` | `/v1/vaults/{v}/invites` | Mint a one-time invite. Body carries the invite keybox (§5.3). |
+| `POST` | `/v1/vaults/{v}/invites` | Mint a one-time invite. Body carries the invite keybox (§5.3). Needs vault authority (§5.8) or the admin token. |
 | `POST` | `/v1/invites/{t}` | Redeem: body has the new device's `pub_kex` and `name_enc` → device token + invite keybox. |
 | `GET` | `/v1/vaults/{v}/devices` | Roster: `id, name_enc, pub_kex, revoked_at`. |
 | `PATCH` | `/v1/vaults/{v}/devices/me` | Set the calling device's `name_enc` (after enrolment, once it holds the keys). |
 | `GET` | `/v1/vaults/{v}/keybox` | All keybox rows addressed to the calling device. |
-| `POST` | `/v1/vaults/{v}/rotate` | Atomically: store keybox rows for epoch+1, bump `vault.epoch`, revoke listed devices (§5.4). |
+| `POST` | `/v1/vaults/{v}/keybox` | Rows addressed to the caller itself, or (insert-only) to a recovery identity. Never to another device. |
+| `POST` | `/v1/vaults/{v}/auth` | Register the vault authority hash (§5.8) on first enrolment. Idempotent for the same token, 409 for a different one. |
+| `POST` | `/v1/vaults/{v}/rotate` | Atomically: store keybox rows for epoch+1, bump `vault.epoch`, revoke listed devices, install `auth_next` (§5.4, §5.8). Vault authority required. |
+| `PUT` | `/v1/vaults/{v}/recovery` | Install or replace the recovery identity (§5.5). Vault authority required. |
+| `GET` | `/v1/vaults/{v}/recovery` | No auth: `{device_id, pub_kex, salt}`. Only the KDF salt, nothing attackable offline. |
+| `POST` | `/v1/vaults/{v}/recovery/join` | Bearer `rc_…` (derived from the passphrase): enrols a device and returns the keybox rows plus `recovery_enc`. Every wrong passphrase is an online, rate-limited request. |
 | `GET` | `/v1/vaults/{v}/snapshot` | Current head op for every path + `cursor`. Used for bootstrap or when far behind. |
 | `GET` | `/v1/vaults/{v}/changes?since=N&wait=30` | Ops with `seq > N` in order. Long-poll up to `wait` seconds. |
-| `GET` | `/v1/vaults/{v}/live` | WebSocket; server pushes `{seq}` hints, client then calls `changes`. |
+| `GET` | `/v1/vaults/{v}/live` | WebSocket; server pushes `{seq, epoch}` hints, client then calls `changes`. The token travels as the second entry of the `Sec-WebSocket-Protocol` list (`["obsync-bearer", token]`), never in the URL. A revoked device's socket is closed at the next hint. |
 | `POST` | `/v1/vaults/{v}/blobs/missing` | Body: `[blob_id…]` → the subset the server does not have. |
-| `PUT` | `/v1/vaults/{v}/blobs/{id}` | Upload ciphertext. Idempotent. A re-upload is accepted only if its header epoch is higher than the stored one. |
+| `PUT` | `/v1/vaults/{v}/blobs/{id}` | Upload ciphertext. Idempotent. A re-upload is accepted only if its header epoch is higher than the stored one, and then only with vault authority (it replaces the only copy). |
 | `GET` | `/v1/vaults/{v}/blobs/{id}` | Download ciphertext. Supports `Range`. |
 | `GET` | `/v1/vaults/{v}/blobs?epoch_lt=E` | Blob IDs still encrypted under an old epoch (re-encryption worklist). |
 | `POST` | `/v1/vaults/{v}/ops` | Body: `[op…]`. Each op is CAS-checked and either `{seq}` or `{conflict: headOp}`. Applied atomically per op, not per batch. |
-| `PATCH` | `/v1/vaults/{v}/ops/{seq}/meta` | Replace `meta_enc` with a higher `meta_epoch` (re-encryption). Nothing else about an op can change. |
+| `PATCH` | `/v1/vaults/{v}/ops/{seq}/meta` | Replace `meta_enc` with a higher `meta_epoch` (re-encryption). Nothing else about an op can change. Vault authority required. |
 | `GET` | `/v1/vaults/{v}/history?path_id=…` | All ops for a path (versions UI, restore). |
 | `GET` | `/v1/vaults/{v}/ops?from=T` | Op log by time, for "restore vault to T" tooling. |
 
-All requests carry `Authorization: Bearer <device token>`. Everything is JSON
-except blob bodies. The API is small enough that a second implementation on
+All requests carry `Authorization: Bearer <device token>`, never a token in
+the query string. List routes clamp `limit` to 5000 and `blobs/missing`
+accepts at most 5000 ids, so no member can make the server materialise an
+unbounded result. A long-poll re-checks that the caller is still enrolled
+before answering, so a device revoked while waiting gets nothing. Everything
+is JSON except blob bodies. The API is small enough that a second implementation on
 Cloudflare Workers + D1 + R2 would be a weekend project if ever wanted.
 
 ### 4.4 Invariants the server enforces
@@ -303,6 +312,13 @@ with 2× free disk.
   is out of scope; we assume you run it or trust whoever does.
 - Device tokens are random 256-bit, stored hashed. A revoked device's token is
   rejected and its keybox rows are deleted.
+- A device token alone proves only "this device is enrolled". Anything that
+  can destroy data or hand out keys (rotation, replacing ciphertext or
+  metadata, installing recovery, minting invites) additionally needs the
+  vault authority token (§5.8), which only a holder of the current epoch key
+  can derive. So a token leaked through a proxy log or a copied `data.json`
+  with sealed keys can read ciphertext and append ops as that device, and
+  nothing more.
 - Invite tokens are one-time with a short TTL (default 24 h). The invite link
   the user pastes is `obsync://join#<server>,<invite>,<I>`; `I` is the invite
   key (§5.3). Everything after `#` is a fragment and never reaches the server
@@ -556,9 +572,10 @@ not need to know it is happening. History does not carry over except through
 | Adversary | Gets | Cannot | Mitigation / residual |
 | --- | --- | --- | --- |
 | Reads server disk or backups | ciphertext, path and blob IDs, op timing, ciphertext sizes, device IDs, roster public keys | content, paths, names, mtimes, which human owns which device | padding flag for sizes; timing is inherent |
-| Steals a device token | read ciphertext, append ops as that device | decrypt, forge decryptable ops, alter existing ops | revoke device → rotate; AEAD detects tampering |
-| Steals an unused invite link | joins as a device with full read/write | nothing beyond that | 24 h TTL, one-time; unexpected device is visible in roster; remove + rotate |
-| Takes a device (phone with Obsidian) | everything that device has, including `K_id` and current keys | anything after rotation; anything at all after re-encryption, given the token is revoked | OS disk encryption; remove + rotate from another device |
+| Steals a device token (proxy log, copied `data.json` with sealed keys) | read ciphertext, append ops as that device (undecryptable garbage, or deletes, both kept in history) | decrypt; forge decryptable ops; alter or replace existing ciphertext or metadata; rotate, revoke, or lock anyone out; replace recovery; mint invites; add itself to the next rotation | vault authority (§5.8) gates every destructive or key-granting route; revoke device → rotate; AEAD detects tampering; restore-to-time undoes garbage ops |
+| Steals an unused invite link, or holds any member's keys | joins as a device with full read/write, **which means code execution on every device**: a synced `.obsidian/plugins/*/main.js` is reloaded, and `community-plugins.json` enables plugins, automatically (§7.3) | write outside the vault, or under a path other than the one an op is keyed by (§6.5 validation) | 24 h TTL, one-time; unexpected or unnamed device is flagged in the roster; remove + rotate; turn "sync config folder" off if vault members are not fully trusted |
+| Takes a device (phone with Obsidian) | everything that device has, including `K_id` and current keys | anything after rotation; anything at all after re-encryption, given the token is revoked | OS disk encryption; per-device key protection (§5.5a); remove + rotate from another device |
+| Guesses the recovery passphrase | one online attempt per request, rate-limited | an offline attack: the server hands out only the KDF salt; the wrapped key is released only against the derived auth token | PBKDF2-600k plus the limiter; someone with the server's disk can still attack offline, so pick a long passphrase |
 | Server operator (honest but curious) | the "reads server disk" row, live, plus which device is online when | content, paths, names, mtimes; cannot substitute one ciphertext for another without AEAD failing | by assumption (§4.6) they do not tamper; curiosity gains nothing beyond metadata |
 | Passive network | nothing beyond TLS metadata | | TLS |
 
@@ -566,11 +583,36 @@ Accepted residual exposure:
 
 1. **Op timing** and the put-vs-delete bit per op are visible. Hiding them
    needs cover traffic or batching delays; not worth it for this threat model.
-2. **No per-device unlock.** Keys sit in plugin data protected only by the
-   OS. A PIN-wrapped local key store is a possible later addition.
+2. **Vault write access is code execution** on every device that syncs the
+   config folder (§7.3). That is the point of syncing plugins; the roster is
+   the trust boundary, and the plugin announces every plugin it enables.
 3. **An actively malicious server is out of scope.** If that ever changes,
    the fix is a per-device running hash over the op log exchanged through
    the keybox channel; the formats here do not preclude it.
+
+### 5.8 Vault authority token
+
+Every device holds the current epoch key `K_e`. From it, each derives
+
+    A_e = "va_" ‖ b64url(HKDF-SHA-256(K_e, salt = "", info = "obsync/auth/v1"))
+
+and the server stores `SHA-256(A_e)` on the vault (`POST /auth` on first
+enrolment; `auth_next` in every rotation installs the hash for the new epoch
+atomically with the epoch bump). Routes that can destroy data or hand out
+keys require `X-Obsync-Vault-Auth: A_e` in addition to the device token:
+rotation, replacing a stored blob with a higher-epoch version, replacing an
+op's metadata, installing or replacing the recovery identity, and minting
+invites.
+
+What this buys: a device *token* and the device *keys* are different
+secrets, and only the token ever travels or sits in a log. A token-only
+attacker (proxy access log, a copied `data.json` whose keys are sealed under
+a PIN or the OS keychain) can read ciphertext and append ops as that device,
+both of which are already in the threat model and both of which history
+survives. It cannot revoke the owner, replace the recovery passphrase, enrol
+a device of its own to be wrapped at the next rotation, or overwrite the
+only copy of any ciphertext. HKDF is one-way, so the server learns nothing
+about `K_e` from `A_e`, and a revoked device's old `A_e` dies with its epoch.
 
 - **No passphrase-derived identifiers, ever.** LiveSync derived chunk IDs
   from the E2EE passphrase; with a zero-byte file present, the ID of the

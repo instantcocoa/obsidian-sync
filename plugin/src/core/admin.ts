@@ -20,7 +20,9 @@ import {
   keyringFromJSON,
   keyringToJSON,
   newKeyring,
-  openRecovery,
+  authTokenFor,
+  deriveRecovery,
+  openRecoveryWith,
   parseInviteLink,
   buildInviteLink,
   unwrapEpochKey,
@@ -30,7 +32,7 @@ import {
   type KeyringJSON,
 } from "./crypto";
 import { b64, fromB64, randomBytes } from "./encoding";
-import { Client, type WireDevice } from "./transport";
+import { Client, HttpError, type WireDevice } from "./transport";
 
 /** Everything a device persists to come back as itself. Stored in plugin data. */
 export interface Identity {
@@ -52,7 +54,8 @@ export interface Session {
 }
 
 export function openSession(identity: Identity, fetchImpl?: typeof fetch): Session {
-  return { identity, client: new Client(identity.server, identity.deviceToken, { fetchImpl }), vc: new VaultCrypto(keyringFromJSON(identity.keyring)) };
+  const vc = new VaultCrypto(keyringFromJSON(identity.keyring));
+  return { identity, client: new Client(identity.server, identity.deviceToken, { fetchImpl, vaultAuth: () => vc.authToken() }), vc };
 }
 
 /** Keep the stored keyring in step with the in-memory one after rotations. */
@@ -83,6 +86,14 @@ async function finishEnrol(server: string, vaultId: string, deviceName: string, 
     rows.push({ epoch, recipient_id: red.device_id, wrapped: await wrapEpochKey(kp.pub, vaultId, epoch, red.device_id, key, keyring.kId) });
   }
   await s.client.putKeybox(vaultId, rows);
+  // Register the vault authority hash. Only the first device actually sets
+  // it; every later device derives the same token and gets a no-op, or a
+  // 409 if its keyring is behind the server's epoch (refreshKeys catches up).
+  try {
+    await s.client.registerAuth(vaultId, await s.vc.authToken(Math.max(...keyring.epochs.keys())));
+  } catch (e) {
+    if (!(e instanceof HttpError && e.status === 409)) throw e;
+  }
   await s.client.setDeviceName(vaultId, await s.vc.encryptName(deviceName));
   return s;
 }
@@ -144,7 +155,7 @@ export async function rotate(s: Session, revoke: string[] = []): Promise<number>
     if (d.revoked_at || revoke.includes(d.id) || !d.pub_kex) continue;
     rows.push({ epoch, recipient_id: d.id, wrapped: await wrapEpochKey(fromB64(d.pub_kex), v, epoch, d.id, key, s.vc.keyring.kId) });
   }
-  await s.client.rotate(v, epoch, revoke, rows);
+  await s.client.rotate(v, epoch, revoke, rows, await authTokenFor(key));
   s.vc.addEpoch(epoch, key);
   syncIdentityKeys(s);
   return epoch;
@@ -167,7 +178,7 @@ export async function reencrypt(s: Session, onProgress?: (done: number, remainin
     if (ids.length === 0) break;
     for (const id of ids) {
       const pt = await s.vc.decryptBlob(id, await s.client.getBlob(v, id));
-      await s.client.putBlob(v, id, await s.vc.encryptBlob(id, pt, { epoch: target }));
+      await s.client.putBlob(v, id, await s.vc.encryptBlob(id, pt, { epoch: target }), { replace: true });
       onProgress?.(++blobs, ids.length);
     }
   }
@@ -207,7 +218,7 @@ export async function removeDevice(s: Session, deviceId: string, onProgress?: (d
 export async function setRecoveryPassphrase(s: Session, passphrase: string): Promise<void> {
   const v = s.identity.vaultId;
   const rec = await createRecovery(passphrase);
-  const { device_id } = await s.client.setRecovery(v, rec.pub, rec.recoveryEnc, rec.authToken);
+  const { device_id } = await s.client.setRecovery(v, rec.pub, rec.recoveryEnc, rec.salt, rec.authToken);
   const rows = [];
   for (const [epoch, key] of s.vc.keyring.epochs) rows.push({ epoch, recipient_id: device_id, wrapped: await wrapEpochKey(rec.pub, v, epoch, device_id, key, s.vc.keyring.kId) });
   await s.client.putKeybox(v, rows);
@@ -216,10 +227,19 @@ export async function setRecoveryPassphrase(s: Session, passphrase: string): Pro
 /** Join with only the server URL, vault id, and recovery passphrase. */
 export async function joinWithPassphrase(server: string, vaultId: string, passphrase: string, deviceName: string, fetchImpl?: typeof fetch): Promise<Session> {
   server = server.replace(/\/+$/, "");
+  // The server hands out only the KDF salt; the wrapped key comes back from
+  // the join itself, after the derived auth token proved the passphrase.
   const info = await Client.getRecovery(server, vaultId, fetchImpl);
-  const { privJwk, authToken } = await openRecovery(passphrase, fromB64(info.recovery_enc));
+  const { wrapKey, authToken } = await deriveRecovery(passphrase, fromB64(info.salt));
   const kp = await generateKeypair();
-  const joined = await Client.recoveryJoin(server, vaultId, authToken, kp.pub, new Uint8Array(0), fetchImpl);
+  let joined;
+  try {
+    joined = await Client.recoveryJoin(server, vaultId, authToken, kp.pub, new Uint8Array(0), fetchImpl);
+  } catch (e) {
+    if (e instanceof HttpError && e.status === 401) throw new Error("wrong recovery passphrase");
+    throw e;
+  }
+  const privJwk = await openRecoveryWith(wrapKey, fromB64(joined.recovery_enc));
   const epochs = new Map<number, Uint8Array>();
   let kId: Uint8Array | null = null;
   for (const r of joined.keybox) {

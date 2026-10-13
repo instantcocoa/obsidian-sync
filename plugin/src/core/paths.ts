@@ -41,6 +41,32 @@ export const DEFAULT_EXCLUSIONS = [
   "*.obsync-conflict-tmp",
 ];
 
+/**
+ * Is this a path the engine may act on? Paths arrive from other devices'
+ * encrypted metadata, so a compromised member (or a stolen invite link)
+ * could send anything. Rejects empty, absolute, "." and ".." segments,
+ * backslashes and control characters, and the $CONFIG token anywhere but
+ * as the first segment. The engine additionally checks that the path hashes
+ * to the op's path_id.
+ */
+export function isSafeLogicalPath(p: string): boolean {
+  if (!p || p.length > 4096 || p.startsWith("/") || p.endsWith("/")) return false;
+  // eslint-disable-next-line no-control-regex
+  if (/[\\\x00-\x1f\x7f]/.test(p)) return false;
+  const segs = p.split("/");
+  for (let i = 0; i < segs.length; i++) {
+    const seg = segs[i];
+    if (seg === "" || seg === "." || seg === "..") return false;
+    if (seg === CONFIG_TOKEN && i !== 0) return false;
+  }
+  return true;
+}
+
+/** Same rules for a device path (no $CONFIG token allowed at all). */
+export function isSafeDevicePath(p: string): boolean {
+  return isSafeLogicalPath(p) && p.split("/").every((s) => s !== CONFIG_TOKEN);
+}
+
 export function compileExclusions(patterns: string[]): (logicalPath: string) => boolean {
   const res: RegExp[] = [];
   for (let raw of patterns) {

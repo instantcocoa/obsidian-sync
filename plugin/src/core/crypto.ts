@@ -64,6 +64,7 @@ const INFO_PATHID = utf8("obsync/path-id/v1");
 const INFO_META = utf8("obsync/meta/v1");
 const INFO_BLOB = utf8("obsync/blob/v1");
 const INFO_WRAP = utf8("obsync/wrap/v1");
+const INFO_AUTH = utf8("obsync/auth/v1");
 
 /** Source of randomness; tests inject a deterministic one to pin vectors. */
 export type Rng = (n: number) => Uint8Array;
@@ -180,6 +181,17 @@ export class VaultCrypto {
 
   // ----- identifiers -----
 
+  /**
+   * Vault authority token for an epoch (DESIGN.md §5.8): "va_" + b64url of
+   * HKDF(K_e, "obsync/auth/v1"). Presented on destructive routes so that a
+   * device token alone (without keys) cannot rotate, replace ciphertext,
+   * reinstall recovery or mint invites. One-way: the server learns nothing
+   * about K_e from it.
+   */
+  async authToken(epoch = this.keyring.current): Promise<string> {
+    return authTokenFor(this.epochKey(epoch));
+  }
+
   async blobId(plaintext: Uint8Array): Promise<string> {
     this.blobIdKey ??= hkdf(this.keyring.kId, new Uint8Array(0), INFO_BLOBID).then(hmacKey);
     return hex(await hmac(await this.blobIdKey, plaintext));
@@ -276,6 +288,10 @@ export class VaultCrypto {
     const pt = await gcmDecrypt(await this.metaKey(epoch), nonce, aad, metaEnc.subarray(16));
     const m = JSON.parse(fromUtf8(pt)) as FileMeta;
     if (typeof m.path !== "string") throw new CryptoError("bad meta json");
+    // Numbers come from another device; a garbage mtime must not make
+    // every device's write throw forever (member DoS). 0 means "now".
+    if (typeof m.mtime !== "number" || !Number.isFinite(m.mtime) || m.mtime < 0 || m.mtime > 4_102_444_800_000) m.mtime = 0;
+    if (typeof m.size !== "number" || !Number.isFinite(m.size) || m.size < 0) m.size = 0;
     return m;
   }
 
@@ -401,11 +417,18 @@ export function parseInviteLink(link: string): { server: string; token: string; 
   return { server: decodeURIComponent(m[1]).replace(/\/+$/, ""), token: m[2], inviteKey: fromB64url(m[3]) };
 }
 
+/** See VaultCrypto.authToken. */
+export async function authTokenFor(epochKey: Uint8Array): Promise<string> {
+  return "va_" + b64url(await hkdf(epochKey, new Uint8Array(0), INFO_AUTH));
+}
+
 // ---------- recovery passphrase ----------
 
 export interface RecoveryMaterial {
   /** Goes to the server as recovery_enc. */
   recoveryEnc: Uint8Array;
+  /** The PBKDF2 salt, also stored by the server and handed to joiners before any proof. */
+  salt: Uint8Array;
   /** Goes to the server as pub_kex of the recovery identity. */
   pub: Uint8Array;
   /** Bearer for the recovery join route; the server stores only its hash. */
@@ -431,15 +454,25 @@ export async function createRecovery(passphrase: string, rng: Rng = defaultRng):
   const { wrapKey, auth } = await pbkdf2(passphrase, salt);
   const nonce = rng(12);
   const ct = await gcmEncrypt(await aesKey(wrapKey), nonce, utf8("recovery"), pkcs8);
-  return { recoveryEnc: concat(new Uint8Array([1]), salt, nonce, ct), pub: kp.pub, authToken: recoveryAuthToken(auth) };
+  return { recoveryEnc: concat(new Uint8Array([1]), salt, nonce, ct), salt, pub: kp.pub, authToken: recoveryAuthToken(auth) };
 }
 
-/** Open a recovery blob with the passphrase: returns the private key (JWK) and the auth token. */
-export async function openRecovery(passphrase: string, recoveryEnc: Uint8Array): Promise<{ privJwk: JsonWebKey; authToken: string }> {
-  if (recoveryEnc.length < 1 + 16 + 12 + 16 || recoveryEnc[0] !== 1) throw new CryptoError("bad recovery blob");
-  const salt = recoveryEnc.subarray(1, 17);
-  const nonce = recoveryEnc.subarray(17, 29);
+/**
+ * Step one of a recovery join: from the passphrase and the salt the server
+ * hands out freely, derive the wrap key and the auth token. The server
+ * releases the wrapped private key only against the auth token, so a wrong
+ * passphrase costs an online, rate-limited request and nothing is available
+ * to guess at offline.
+ */
+export async function deriveRecovery(passphrase: string, salt: Uint8Array): Promise<{ wrapKey: Uint8Array; authToken: string }> {
   const { wrapKey, auth } = await pbkdf2(passphrase, salt);
+  return { wrapKey, authToken: recoveryAuthToken(auth) };
+}
+
+/** Step two: open the wrapped private key with the derived wrap key. */
+export async function openRecoveryWith(wrapKey: Uint8Array, recoveryEnc: Uint8Array): Promise<JsonWebKey> {
+  if (recoveryEnc.length < 1 + 16 + 12 + 16 || recoveryEnc[0] !== 1) throw new CryptoError("bad recovery blob");
+  const nonce = recoveryEnc.subarray(17, 29);
   let pkcs8: Uint8Array;
   try {
     pkcs8 = await gcmDecrypt(await aesKey(wrapKey), nonce, utf8("recovery"), recoveryEnc.subarray(29));
@@ -447,7 +480,14 @@ export async function openRecovery(passphrase: string, recoveryEnc: Uint8Array):
     throw new CryptoError("wrong passphrase");
   }
   const priv = await subtle.importKey("pkcs8", B(pkcs8), { name: "ECDH", namedCurve: "P-256" }, true, ["deriveBits"]);
-  return { privJwk: await subtle.exportKey("jwk", priv), authToken: recoveryAuthToken(auth) };
+  return subtle.exportKey("jwk", priv);
+}
+
+/** Both steps at once, for callers that already hold the blob (tests, vectors). */
+export async function openRecovery(passphrase: string, recoveryEnc: Uint8Array): Promise<{ privJwk: JsonWebKey; authToken: string }> {
+  if (recoveryEnc.length < 1 + 16 + 12 + 16 || recoveryEnc[0] !== 1) throw new CryptoError("bad recovery blob");
+  const { wrapKey, authToken } = await deriveRecovery(passphrase, recoveryEnc.subarray(1, 17));
+  return { privJwk: await openRecoveryWith(wrapKey, recoveryEnc), authToken };
 }
 
 // ---------- compression (optional, feature-detected) ----------

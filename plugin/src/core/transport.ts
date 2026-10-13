@@ -98,6 +98,11 @@ export interface ClientOptions {
   onRetry?: (err: unknown, attempt: number) => void;
   maxRetries?: number;
   fetchImpl?: typeof fetch;
+  /**
+   * Supplies the vault authority token (VaultCrypto.authToken) for routes
+   * that need it. Absent for admin-only or pre-enrolment clients.
+   */
+  vaultAuth?: () => Promise<string>;
 }
 
 export class Client {
@@ -119,11 +124,15 @@ export class Client {
     method: string,
     path: string,
     body?: unknown,
-    init: { raw?: boolean; headers?: Record<string, string>; retry?: boolean; signal?: AbortSignal; token?: string } = {},
+    init: { raw?: boolean; headers?: Record<string, string>; retry?: boolean; signal?: AbortSignal; token?: string; authority?: boolean } = {},
   ): Promise<Response> {
     const headers: Record<string, string> = { ...(init.headers ?? {}) };
     const tok = init.token ?? this.token;
     if (tok) headers["Authorization"] = `Bearer ${tok}`;
+    if (init.authority) {
+      if (!this.opts.vaultAuth) throw new Error("this operation needs the vault keys");
+      headers["X-Obsync-Vault-Auth"] = await this.opts.vaultAuth();
+    }
     let payload: BodyInit | undefined;
     if (body instanceof Uint8Array) {
       headers["Content-Type"] = "application/octet-stream";
@@ -166,7 +175,13 @@ export class Client {
   }
 
   async createInvite(vaultId: string, keyboxEnc: Uint8Array, ttlSeconds?: number): Promise<{ token: string; expires_at: number }> {
-    return this.json("POST", `/v1/vaults/${vaultId}/invites`, { keybox_enc: b64(keyboxEnc), ttl_seconds: ttlSeconds ?? 0 });
+    // The admin token may mint the very first invite; devices need vault authority.
+    return this.json("POST", `/v1/vaults/${vaultId}/invites`, { keybox_enc: b64(keyboxEnc), ttl_seconds: ttlSeconds ?? 0 }, { authority: Boolean(this.opts.vaultAuth) });
+  }
+
+  /** Register the vault authority hash (first enrolment); a 409 means it is already set. */
+  async registerAuth(vaultId: string, auth: string): Promise<void> {
+    await this.json("POST", `/v1/vaults/${vaultId}/auth`, { auth });
   }
 
   static async redeemInvite(server: string, token: string, pubKex: Uint8Array, nameEnc: Uint8Array, fetchImpl?: typeof fetch): Promise<Redeemed> {
@@ -194,15 +209,15 @@ export class Client {
     await this.json("POST", `/v1/vaults/${vaultId}/keybox`, { keybox: rows.map((r) => ({ ...r, wrapped: b64(r.wrapped) })) });
   }
 
-  async rotate(vaultId: string, epoch: number, revoke: string[], rows: { epoch: number; recipient_id: string; wrapped: Uint8Array }[]): Promise<VaultInfo> {
-    return this.json("POST", `/v1/vaults/${vaultId}/rotate`, { epoch, revoke, keybox: rows.map((r) => ({ ...r, wrapped: b64(r.wrapped) })) }, { retry: false });
+  async rotate(vaultId: string, epoch: number, revoke: string[], rows: { epoch: number; recipient_id: string; wrapped: Uint8Array }[], authNext: string): Promise<VaultInfo> {
+    return this.json("POST", `/v1/vaults/${vaultId}/rotate`, { epoch, revoke, keybox: rows.map((r) => ({ ...r, wrapped: b64(r.wrapped) })), auth_next: authNext }, { retry: false, authority: true });
   }
 
-  async setRecovery(vaultId: string, pubKex: Uint8Array, recoveryEnc: Uint8Array, auth: string): Promise<{ device_id: string }> {
-    return this.json("PUT", `/v1/vaults/${vaultId}/recovery`, { pub_kex: b64(pubKex), recovery_enc: b64(recoveryEnc), auth });
+  async setRecovery(vaultId: string, pubKex: Uint8Array, recoveryEnc: Uint8Array, salt: Uint8Array, auth: string): Promise<{ device_id: string }> {
+    return this.json("PUT", `/v1/vaults/${vaultId}/recovery`, { pub_kex: b64(pubKex), recovery_enc: b64(recoveryEnc), salt: b64(salt), auth }, { authority: true });
   }
 
-  static async getRecovery(server: string, vaultId: string, fetchImpl?: typeof fetch): Promise<{ device_id: string; pub_kex: string; recovery_enc: string }> {
+  static async getRecovery(server: string, vaultId: string, fetchImpl?: typeof fetch): Promise<{ device_id: string; pub_kex: string; salt: string }> {
     const c = new Client(server, "", { fetchImpl });
     return c.json("GET", `/v1/vaults/${vaultId}/recovery`);
   }
@@ -214,7 +229,7 @@ export class Client {
     pubKex: Uint8Array,
     nameEnc: Uint8Array,
     fetchImpl?: typeof fetch,
-  ): Promise<{ device_id: string; device_token: string; vault_id: string; epoch: number; keybox: KeyboxRow[] }> {
+  ): Promise<{ device_id: string; device_token: string; vault_id: string; epoch: number; keybox: KeyboxRow[]; recovery_enc: string }> {
     const c = new Client(server, authToken, { fetchImpl });
     return c.json("POST", `/v1/vaults/${vaultId}/recovery/join`, { pub_kex: b64(pubKex), name_enc: b64(nameEnc) }, { retry: false });
   }
@@ -232,8 +247,18 @@ export class Client {
     return this.json("GET", `/v1/vaults/${vaultId}/changes?${q}`, undefined, { signal: opts.signal });
   }
 
+  /**
+   * WebSocket endpoint and the subprotocol list that carries the token
+   * (`new WebSocket(url, protocols)`). The token travels in the
+   * Sec-WebSocket-Protocol header, never in the URL, so it stays out of
+   * proxy and devtools logs.
+   */
   liveUrl(vaultId: string): string {
-    return `${this.base.replace(/^http/, "ws")}/v1/vaults/${vaultId}/live?token=${encodeURIComponent(this.token)}`;
+    return `${this.base.replace(/^http/, "ws")}/v1/vaults/${vaultId}/live`;
+  }
+
+  liveProtocols(): string[] {
+    return ["obsync-bearer", this.token];
   }
 
   // ---------- blobs ----------
@@ -243,8 +268,9 @@ export class Client {
     return (await this.json<{ missing: string[] }>("POST", `/v1/vaults/${vaultId}/blobs/missing`, ids)).missing ?? [];
   }
 
-  async putBlob(vaultId: string, id: string, data: Uint8Array): Promise<void> {
-    await this.request("PUT", `/v1/vaults/${vaultId}/blobs/${id}`, data);
+  /** `replace` is for re-encryption: replacing stored ciphertext needs vault authority. */
+  async putBlob(vaultId: string, id: string, data: Uint8Array, opts: { replace?: boolean } = {}): Promise<void> {
+    await this.request("PUT", `/v1/vaults/${vaultId}/blobs/${id}`, data, { authority: Boolean(opts.replace) });
   }
 
   async getBlob(vaultId: string, id: string, signal?: AbortSignal): Promise<Uint8Array> {
@@ -274,7 +300,7 @@ export class Client {
   }
 
   async patchMeta(vaultId: string, seq: number, metaEnc: Uint8Array, metaEpoch: number): Promise<void> {
-    await this.json("PATCH", `/v1/vaults/${vaultId}/ops/${seq}/meta`, { meta_enc: b64(metaEnc), meta_epoch: metaEpoch });
+    await this.json("PATCH", `/v1/vaults/${vaultId}/ops/${seq}/meta`, { meta_enc: b64(metaEnc), meta_epoch: metaEpoch }, { authority: true });
   }
 
   async history(vaultId: string, pathId: string): Promise<WireOp[]> {

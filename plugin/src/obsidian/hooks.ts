@@ -96,7 +96,12 @@ export class ConfigHooks {
       const raw = await this.app.vault.adapter.read(this.app.vault.configDir + "/community-plugins.json");
       const want = new Set<string>(JSON.parse(raw));
       await p.loadManifests?.();
-      for (const id of want) if (!p.enabledPlugins.has(id) && id !== this.selfId && p.manifests[id]) await p.enablePlugin(id);
+      for (const id of want) {
+        if (p.enabledPlugins.has(id) || id === this.selfId || !p.manifests[id]) continue;
+        await p.enablePlugin(id);
+        // Code from another device just started running here. Say so.
+        new Notice(`obsync: enabled plugin "${id}" because it is enabled in the vault`);
+      }
       for (const id of [...p.enabledPlugins]) if (!want.has(id) && id !== this.selfId) await p.disablePlugin(id);
     } catch (e) {
       console.warn("obsync: community-plugins reconcile failed", e);

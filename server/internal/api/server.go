@@ -111,7 +111,7 @@ func (s *Server) routes() {
 
 	m.HandleFunc("POST /v1/vaults", s.admin(s.createVault))
 	m.HandleFunc("GET /v1/vaults", s.admin(s.listVaults))
-	m.HandleFunc("POST /v1/vaults/{v}/invites", s.deviceOrAdmin(s.createInvite))
+	m.HandleFunc("POST /v1/vaults/{v}/invites", s.authorityOrAdmin(s.createInvite))
 	m.HandleFunc("POST /v1/invites/{t}", s.limited(s.redeemInvite))
 
 	m.HandleFunc("GET /v1/vaults/{v}", s.device(s.getVault))
@@ -119,10 +119,11 @@ func (s *Server) routes() {
 	m.HandleFunc("PATCH /v1/vaults/{v}/devices/me", s.device(s.setDeviceName))
 	m.HandleFunc("GET /v1/vaults/{v}/keybox", s.device(s.getKeybox))
 	m.HandleFunc("POST /v1/vaults/{v}/keybox", s.device(s.putKeybox))
-	m.HandleFunc("POST /v1/vaults/{v}/rotate", s.device(s.rotate))
+	m.HandleFunc("POST /v1/vaults/{v}/auth", s.device(s.registerAuth))
+	m.HandleFunc("POST /v1/vaults/{v}/rotate", s.authority(s.rotate))
 
-	m.HandleFunc("PUT /v1/vaults/{v}/recovery", s.device(s.setRecovery))
-	m.HandleFunc("GET /v1/vaults/{v}/recovery", s.limited(s.getRecovery))
+	m.HandleFunc("PUT /v1/vaults/{v}/recovery", s.authority(s.setRecovery))
+	m.HandleFunc("GET /v1/vaults/{v}/recovery", s.getRecovery) // salt only; unthrottled so a throttled join can retry
 	m.HandleFunc("POST /v1/vaults/{v}/recovery/join", s.limited(s.recoveryJoin))
 
 	m.HandleFunc("GET /v1/vaults/{v}/snapshot", s.device(s.snapshot))
@@ -136,7 +137,7 @@ func (s *Server) routes() {
 
 	m.HandleFunc("POST /v1/vaults/{v}/ops", s.device(s.postOps))
 	m.HandleFunc("GET /v1/vaults/{v}/ops", s.device(s.opsQuery))
-	m.HandleFunc("PATCH /v1/vaults/{v}/ops/{seq}/meta", s.device(s.patchMeta))
+	m.HandleFunc("PATCH /v1/vaults/{v}/ops/{seq}/meta", s.authority(s.patchMeta))
 	m.HandleFunc("GET /v1/vaults/{v}/history", s.device(s.history))
 	m.HandleFunc("POST /v1/vaults/{v}/restore", s.device(s.restore))
 }
@@ -147,7 +148,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// cookie, so a wildcard origin is safe.
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
-	w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, Range, X-Blob-Epoch")
+	w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, Range, X-Blob-Epoch, X-Obsync-Vault-Auth")
 	w.Header().Set("Access-Control-Expose-Headers", "Content-Length, Content-Range, Accept-Ranges, X-Blob-Epoch")
 	w.Header().Set("Access-Control-Max-Age", "86400")
 	if r.Method == http.MethodOptions {
@@ -164,9 +165,7 @@ type ctxKey int
 const deviceKey ctxKey = 1
 
 // bearer reads the Authorization header. Tokens are never accepted in the
-// query string here: URLs end up in proxy and browser logs. The one
-// exception is the WebSocket route (see wsBearer), because browser
-// WebSocket clients cannot set headers.
+// query string: URLs end up in proxy and browser logs.
 func bearer(r *http.Request) string {
 	h := r.Header.Get("Authorization")
 	if strings.HasPrefix(h, "Bearer ") {
@@ -175,11 +174,29 @@ func bearer(r *http.Request) string {
 	return ""
 }
 
+// wsSubprotocol is the subprotocol name a WebSocket client offers alongside
+// its token: `new WebSocket(url, ["obsync-bearer", "dv_…"])`. Browser
+// WebSocket clients cannot set headers, and the Sec-WebSocket-Protocol
+// header, unlike the URL, is not logged by proxies.
+const wsSubprotocol = "obsync-bearer"
+
 func wsBearer(r *http.Request) string {
 	if t := bearer(r); t != "" {
 		return t
 	}
-	return r.URL.Query().Get("token")
+	for _, h := range r.Header.Values("Sec-WebSocket-Protocol") {
+		for _, p := range strings.Split(h, ",") {
+			if p = strings.TrimSpace(p); strings.HasPrefix(p, "dv_") {
+				return p
+			}
+		}
+	}
+	return ""
+}
+
+// vaultAuth reads the vault authority token (DESIGN.md §5.8).
+func vaultAuth(r *http.Request) string {
+	return strings.TrimSpace(r.Header.Get("X-Obsync-Vault-Auth"))
 }
 
 func (s *Server) isAdmin(tok string) bool {
@@ -235,13 +252,31 @@ func (s *Server) deviceWith(tok func(*http.Request) string, next http.HandlerFun
 	}
 }
 
-func (s *Server) deviceOrAdmin(next http.HandlerFunc) http.HandlerFunc {
+// authority requires a device token AND the vault authority token, which
+// only key holders can derive. Guards everything that can destroy data or
+// hand keys to a new party.
+func (s *Server) authority(next http.HandlerFunc) http.HandlerFunc {
+	return s.device(func(w http.ResponseWriter, r *http.Request) {
+		ok, err := s.st.CheckVaultAuth(r.Context(), r.PathValue("v"), vaultAuth(r))
+		if err != nil {
+			s.fail(w, err)
+			return
+		}
+		if !ok {
+			s.failAuth(w, r, "vault authority token required (X-Obsync-Vault-Auth)")
+			return
+		}
+		next(w, r)
+	})
+}
+
+func (s *Server) authorityOrAdmin(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if s.isAdmin(bearer(r)) {
 			next(w, r)
 			return
 		}
-		s.device(next)(w, r)
+		s.authority(next)(w, r)
 	}
 }
 
@@ -289,6 +324,18 @@ func readJSON(r *http.Request, v any, limit int64) error {
 	dec := json.NewDecoder(io.LimitReader(r.Body, limit))
 	dec.DisallowUnknownFields()
 	return dec.Decode(v)
+}
+
+// maxListLimit bounds every list-style response so one member cannot make
+// the server materialise an unbounded result (negative LIMIT is unlimited
+// in SQLite).
+const maxListLimit = 5000
+
+func clampLimit(n int64) int {
+	if n <= 0 || n > maxListLimit {
+		return maxListLimit
+	}
+	return int(n)
 }
 
 func qInt(r *http.Request, key string, def int64) int64 {
@@ -421,18 +468,36 @@ func (s *Server) putKeybox(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// registerAuth installs the vault authority hash on first enrolment (or on a
+// vault that predates the field). Idempotent for the matching token.
+func (s *Server) registerAuth(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Auth string `json:"auth"`
+	}
+	if err := readJSON(r, &body, 1<<12); err != nil {
+		writeErr(w, http.StatusBadRequest, "bad body")
+		return
+	}
+	if err := s.st.EnsureVaultAuth(r.Context(), r.PathValue("v"), body.Auth); err != nil {
+		s.fail(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
 func (s *Server) rotate(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		Epoch  int64             `json:"epoch"`
-		Revoke []string          `json:"revoke"`
-		Keybox []store.KeyboxRow `json:"keybox"`
+		Epoch    int64             `json:"epoch"`
+		Revoke   []string          `json:"revoke"`
+		Keybox   []store.KeyboxRow `json:"keybox"`
+		AuthNext string            `json:"auth_next"`
 	}
 	if err := readJSON(r, &body, 4<<20); err != nil {
 		writeErr(w, http.StatusBadRequest, "bad body")
 		return
 	}
 	v := r.PathValue("v")
-	if err := s.st.Rotate(r.Context(), v, dev(r).ID, body.Epoch, body.Revoke, body.Keybox); err != nil {
+	if err := s.st.Rotate(r.Context(), v, dev(r).ID, body.Epoch, body.Revoke, body.Keybox, body.AuthNext); err != nil {
 		s.fail(w, err)
 		return
 	}
@@ -449,13 +514,14 @@ func (s *Server) setRecovery(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		PubKex      []byte `json:"pub_kex"`
 		RecoveryEnc []byte `json:"recovery_enc"`
+		Salt        []byte `json:"salt"`
 		Auth        string `json:"auth"`
 	}
 	if err := readJSON(r, &body, 1<<20); err != nil {
 		writeErr(w, http.StatusBadRequest, "bad body")
 		return
 	}
-	id, err := s.st.SetRecovery(r.Context(), r.PathValue("v"), body.PubKex, body.RecoveryEnc, body.Auth)
+	id, err := s.st.SetRecovery(r.Context(), r.PathValue("v"), body.PubKex, body.RecoveryEnc, body.Salt, body.Auth)
 	if err != nil {
 		s.fail(w, err)
 		return
@@ -465,8 +531,13 @@ func (s *Server) setRecovery(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) getRecovery(w http.ResponseWriter, r *http.Request) {
 	// Unauthenticated by design: the joiner has nothing but the URL and the
-	// passphrase. The vault ID is a random 128-bit value and the payload is
-	// PBKDF2-wrapped. Rate-limit this at the proxy if exposed publicly.
+	// passphrase. Only the KDF salt and the public key are returned; the
+	// wrapped private key is released by recovery/join once the derived auth
+	// token is presented, so guessing is online and rate-limited there. This
+	// read is deliberately not throttled: if it shared the join's bucket, a
+	// client retrying after a 429 would spend each refilled token here and
+	// never reach the join. The vault id is random 128-bit, so existence is
+	// not enumerable.
 	info, err := s.st.GetRecovery(r.Context(), r.PathValue("v"))
 	if err != nil {
 		s.fail(w, err)
@@ -484,13 +555,14 @@ func (s *Server) recoveryJoin(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "bad body")
 		return
 	}
-	out, rows, err := s.st.RecoveryJoin(r.Context(), r.PathValue("v"), bearer(r), body.PubKex, body.NameEnc)
+	out, rows, recoveryEnc, err := s.st.RecoveryJoin(r.Context(), r.PathValue("v"), bearer(r), body.PubKex, body.NameEnc)
 	if err != nil {
 		s.fail(w, err)
 		return
 	}
 	writeJSON(w, http.StatusCreated, map[string]any{
 		"device_id": out.DeviceID, "device_token": out.DeviceToken, "vault_id": out.VaultID, "epoch": out.Epoch, "keybox": rows,
+		"recovery_enc": recoveryEnc,
 	})
 }
 
@@ -531,6 +603,7 @@ func (s *Server) changes(w http.ResponseWriter, r *http.Request) {
 		wait = s.cfg.MaxWait
 	}
 	deadline := time.Now().Add(wait)
+	waited := false
 	for {
 		// Subscribe before querying so a publish between query and wait is not lost.
 		ch, unsub := s.hub.Subscribe(v)
@@ -549,6 +622,11 @@ func (s *Server) changes(w http.ResponseWriter, r *http.Request) {
 		remaining := time.Until(deadline)
 		if len(ops) > 0 || remaining <= 0 {
 			unsub()
+			if waited && !s.st.DeviceLive(r.Context(), dev(r).ID) {
+				// Revoked while this long-poll was open: deliver nothing.
+				writeErr(w, http.StatusUnauthorized, "device revoked")
+				return
+			}
 			more := len(ops) > limit
 			if more {
 				ops = ops[:limit]
@@ -571,17 +649,19 @@ func (s *Server) changes(w http.ResponseWriter, r *http.Request) {
 		}
 		t.Stop()
 		unsub()
+		waited = true
 	}
 }
 
 func (s *Server) live(w http.ResponseWriter, r *http.Request) {
 	v := r.PathValue("v")
-	c, err := websocket.Accept(w, r, &websocket.AcceptOptions{OriginPatterns: []string{"*"}})
+	c, err := websocket.Accept(w, r, &websocket.AcceptOptions{OriginPatterns: []string{"*"}, Subprotocols: []string{wsSubprotocol}})
 	if err != nil {
 		return
 	}
 	defer c.CloseNow()
 	ctx := r.Context()
+	self := dev(r).ID
 	ch, unsub := s.hub.Subscribe(v)
 	defer unsub()
 	// Initial hint so the client knows where the server is.
@@ -608,10 +688,19 @@ func (s *Server) live(w http.ResponseWriter, r *http.Request) {
 			c.Close(websocket.StatusNormalClosure, "bye")
 			return
 		case <-ch:
+			if !s.st.DeviceLive(ctx, self) {
+				// Revoked (a rotation publishes a hint): stop streaming.
+				c.Close(websocket.StatusPolicyViolation, "device revoked")
+				return
+			}
 			if err := wsjson.Write(ctx, c, s.hub.Current(v)); err != nil {
 				return
 			}
 		case <-ping.C:
+			if !s.st.DeviceLive(ctx, self) {
+				c.Close(websocket.StatusPolicyViolation, "device revoked")
+				return
+			}
 			// A JSON heartbeat rather than a bare ping frame: browser WebSocket
 			// clients cannot observe pings, so this lets them detect a dead
 			// channel and reconnect.
@@ -629,8 +718,12 @@ func (s *Server) live(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) blobsMissing(w http.ResponseWriter, r *http.Request) {
 	var ids []string
-	if err := readJSON(r, &ids, 8<<20); err != nil {
+	if err := readJSON(r, &ids, 1<<20); err != nil {
 		writeErr(w, http.StatusBadRequest, "expected JSON array of blob ids")
+		return
+	}
+	if len(ids) > maxListLimit {
+		writeErr(w, http.StatusBadRequest, fmt.Sprintf("at most %d blob ids per request", maxListLimit))
 		return
 	}
 	for _, id := range ids {
@@ -653,7 +746,7 @@ func (s *Server) blobsBelowEpoch(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "epoch_lt required")
 		return
 	}
-	limit := int(qInt(r, "limit", 500))
+	limit := clampLimit(qInt(r, "limit", 500))
 	ids, err := s.st.BlobsBelowEpoch(r.Context(), r.PathValue("v"), epoch, limit)
 	if err != nil {
 		s.fail(w, err)
@@ -697,11 +790,24 @@ func (s *Server) putBlob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Short-circuit: already have an equal-or-newer epoch. Drain and ack.
-	if cur, err := s.st.GetBlob(r.Context(), v, id); err == nil && cur.Epoch >= epoch {
-		io.Copy(io.Discard, body)
-		w.Header().Set("X-Blob-Epoch", strconv.FormatInt(cur.Epoch, 10))
-		w.WriteHeader(http.StatusOK)
-		return
+	if cur, err := s.st.GetBlob(r.Context(), v, id); err == nil {
+		if cur.Epoch >= epoch {
+			io.Copy(io.Discard, body)
+			w.Header().Set("X-Blob-Epoch", strconv.FormatInt(cur.Epoch, 10))
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		// Replacing stored ciphertext (re-encryption after a rotation) is
+		// destructive: a wrong body loses the only copy. Key holders only.
+		ok, err := s.st.CheckVaultAuth(r.Context(), v, vaultAuth(r))
+		if err != nil {
+			s.fail(w, err)
+			return
+		}
+		if !ok {
+			s.failAuth(w, r, "vault authority token required to replace a blob")
+			return
+		}
 	}
 	// Write to a staging name first; only after the index accepts it do we
 	// move it into place, so a concurrent higher-epoch upload can't be
@@ -805,7 +911,7 @@ func (s *Server) postOps(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) opsQuery(w http.ResponseWriter, r *http.Request) {
 	v := r.PathValue("v")
-	limit := int(qInt(r, "limit", 1000))
+	limit := clampLimit(qInt(r, "limit", 1000))
 	if e := qInt(r, "meta_epoch_lt", 0); e > 0 {
 		seqs, err := s.st.OpsBelowMetaEpoch(r.Context(), v, e, limit)
 		if err != nil {
@@ -852,7 +958,7 @@ func (s *Server) history(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "path_id required")
 		return
 	}
-	ops, err := s.st.History(r.Context(), r.PathValue("v"), pid)
+	ops, err := s.st.History(r.Context(), r.PathValue("v"), pid, maxListLimit)
 	if err != nil {
 		s.fail(w, err)
 		return
@@ -905,8 +1011,12 @@ func (s *Server) GC(ctx context.Context, retention time.Duration) (int, error) {
 			return removed, err
 		}
 		for _, id := range dead {
-			if err := s.st.DeleteBlobRecord(ctx, v.ID, id); err != nil {
+			gone, err := s.st.DeleteDeadBlob(ctx, v.ID, id, cutoff)
+			if err != nil {
 				return removed, err
+			}
+			if !gone {
+				continue // referenced again since the listing
 			}
 			if err := s.blobs.Delete(v.ID, id); err != nil {
 				s.log.Warn("gc: delete blob file", "vault", v.ID, "blob", id, "err", err)

@@ -33,6 +33,15 @@ import (
 
 const adminTok = "ad_test-admin-token"
 
+// vault authority tokens per vault (what key holders derive from K_e).
+var authTok = map[string]string{}
+
+func authHdr(vault string) map[string]string {
+	return map[string]string{"X-Obsync-Vault-Auth": authTok[vault]}
+}
+
+func newAuthTok() string { return "va_" + hex.EncodeToString(randBytes(16)) }
+
 type env struct {
 	t   *testing.T
 	ts  *httptest.Server
@@ -181,11 +190,17 @@ func (e *env) setup() (vault string, a, b device) {
 	var red store.Redeemed
 	e.do("POST", "/v1/invites/"+inv.Token, "", map[string]any{"pub_kex": randBytes(65), "name_enc": randBytes(20)}, nil).expect(t, 201).json(t, &red)
 	a = device{red.DeviceID, red.DeviceToken}
-	// Self-enrol keybox row for epoch 1.
+	// Self-enrol keybox row for epoch 1, and register the vault authority
+	// token (derived from the epoch key; a token-only attacker cannot).
 	e.do("POST", "/v1/vaults/"+vault+"/keybox", a.token, map[string]any{"keybox": []store.KeyboxRow{{Epoch: 1, RecipientID: a.id, Wrapped: randBytes(100)}}}, nil).expect(t, 204)
+	authTok[vault] = newAuthTok()
+	e.do("POST", "/v1/vaults/"+vault+"/auth", a.token, map[string]any{"auth": authTok[vault]}, nil).expect(t, 204)
+	e.do("POST", "/v1/vaults/"+vault+"/auth", a.token, map[string]any{"auth": authTok[vault]}, nil).expect(t, 204) // idempotent
+	e.do("POST", "/v1/vaults/"+vault+"/auth", a.token, map[string]any{"auth": newAuthTok()}, nil).expect(t, 409)   // cannot be replaced
 
-	// Device A invites B.
-	e.do("POST", "/v1/vaults/"+vault+"/invites", a.token, map[string]any{"keybox_enc": randBytes(64)}, nil).expect(t, 201).json(t, &inv)
+	// Device A invites B (needs authority: a stolen token alone cannot add devices).
+	e.do("POST", "/v1/vaults/"+vault+"/invites", a.token, map[string]any{"keybox_enc": randBytes(64)}, nil).expect(t, 401)
+	e.do("POST", "/v1/vaults/"+vault+"/invites", a.token, map[string]any{"keybox_enc": randBytes(64)}, authHdr(vault)).expect(t, 201).json(t, &inv)
 	e.do("POST", "/v1/invites/"+inv.Token, "", map[string]any{"pub_kex": randBytes(65), "name_enc": randBytes(20)}, nil).expect(t, 201).json(t, &red)
 	b = device{red.DeviceID, red.DeviceToken}
 	e.do("POST", "/v1/vaults/"+vault+"/keybox", b.token, map[string]any{"keybox": []store.KeyboxRow{{Epoch: 1, RecipientID: b.id, Wrapped: randBytes(100)}}}, nil).expect(t, 204)
@@ -373,8 +388,12 @@ func TestLongPollAndWebSocket(t *testing.T) {
 	// WebSocket hint.
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	wsURL := "ws" + strings.TrimPrefix(e.ts.URL, "http") + "/v1/vaults/" + vault + "/live?token=" + b.token
-	c, _, err := websocket.Dial(ctx, wsURL, nil)
+	wsURL := "ws" + strings.TrimPrefix(e.ts.URL, "http") + "/v1/vaults/" + vault + "/live"
+	dial := func(tok string) (*websocket.Conn, error) {
+		c, _, err := websocket.Dial(ctx, wsURL, &websocket.DialOptions{Subprotocols: []string{"obsync-bearer", tok}})
+		return c, err
+	}
+	c, err := dial(b.token)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -390,8 +409,12 @@ func TestLongPollAndWebSocket(t *testing.T) {
 		t.Fatalf("push hint: %+v %v", h, err)
 	}
 	// Bad token on WS is rejected before upgrade.
-	if _, _, err := websocket.Dial(ctx, strings.Replace(wsURL, b.token, "dv_nope", 1), nil); err == nil {
+	if _, err := dial("dv_nope"); err == nil {
 		t.Fatal("ws with bad token should fail")
+	}
+	// The token is never accepted in the URL.
+	if _, _, err := websocket.Dial(ctx, wsURL+"?token="+b.token, nil); err == nil {
+		t.Fatal("ws token in query string should be refused")
 	}
 }
 
@@ -481,17 +504,22 @@ func TestRotateReencryptAndRecovery(t *testing.T) {
 	var rec struct {
 		DeviceID string `json:"device_id"`
 	}
-	e.do("PUT", base+"/recovery", a.token, map[string]any{"pub_kex": randBytes(65), "recovery_enc": randBytes(80), "auth": recAuth}, nil).expect(t, 201).json(t, &rec)
+	recSalt := randBytes(16)
+	e.do("PUT", base+"/recovery", a.token, map[string]any{"pub_kex": randBytes(65), "recovery_enc": randBytes(80), "salt": recSalt, "auth": recAuth}, nil).expect(t, 401) // authority required
+	e.do("PUT", base+"/recovery", a.token, map[string]any{"pub_kex": randBytes(65), "recovery_enc": randBytes(80), "salt": recSalt, "auth": recAuth}, authHdr(vault)).expect(t, 201).json(t, &rec)
 	e.do("POST", base+"/keybox", a.token, map[string]any{"keybox": []store.KeyboxRow{{Epoch: 1, RecipientID: rec.DeviceID, Wrapped: randBytes(100)}}}, nil).expect(t, 204)
 
 	// Rotation validation: wrong epoch, self-revoke, missing recipient.
+	nextAuth := newAuthTok()
 	rot := func(epoch int64, revoke []string, recips ...string) resp {
 		var rows []store.KeyboxRow
 		for _, r := range recips {
 			rows = append(rows, store.KeyboxRow{Epoch: epoch, RecipientID: r, Wrapped: randBytes(100)})
 		}
-		return e.do("POST", base+"/rotate", a.token, map[string]any{"epoch": epoch, "revoke": revoke, "keybox": rows}, nil)
+		return e.do("POST", base+"/rotate", a.token, map[string]any{"epoch": epoch, "revoke": revoke, "keybox": rows, "auth_next": nextAuth}, authHdr(vault))
 	}
+	// Without the authority token nothing rotates, whatever the body.
+	e.do("POST", base+"/rotate", a.token, map[string]any{"epoch": 2, "revoke": []string{b.id}, "keybox": []store.KeyboxRow{{Epoch: 2, RecipientID: a.id, Wrapped: randBytes(100)}, {Epoch: 2, RecipientID: rec.DeviceID, Wrapped: randBytes(100)}}, "auth_next": nextAuth}, nil).expect(t, 401)
 	rot(3, nil, a.id, b.id, rec.DeviceID).expect(t, 409)
 	rot(2, []string{a.id}, b.id, rec.DeviceID).expect(t, 400)
 	rot(2, []string{b.id}, a.id).expect(t, 400)                     // recovery not covered
@@ -500,6 +528,9 @@ func TestRotateReencryptAndRecovery(t *testing.T) {
 	// Remove B.
 	rot(2, []string{b.id}, a.id, rec.DeviceID).expect(t, 200)
 	e.do("GET", base, b.token, nil, nil).expect(t, 401)
+	// The old authority token died with epoch 1; the new one is live.
+	e.do("PATCH", base+"/ops/1/meta", a.token, map[string]any{"meta_enc": randBytes(40), "meta_epoch": 2}, authHdr(vault)).expect(t, 401)
+	authTok[vault] = nextAuth
 	var v store.Vault
 	e.do("GET", base, a.token, nil, nil).expect(t, 200).json(t, &v)
 	if v.Epoch != 2 || v.MinEpoch != 1 {
@@ -522,8 +553,9 @@ func TestRotateReencryptAndRecovery(t *testing.T) {
 	if len(work.BlobIDs) != 1 || work.BlobIDs[0] != bid {
 		t.Fatalf("worklist: %+v", work)
 	}
-	// Re-upload under epoch 2 replaces; then lower epoch is a no-op.
-	e.upload(vault, a, bid, blob(2, "doc-reenc")).expect(t, 201)
+	// Re-upload under epoch 2 replaces (key holders only); then lower epoch is a no-op.
+	e.upload(vault, a, bid, blob(2, "doc-reenc")).expect(t, 401)
+	e.do("PUT", base+"/blobs/"+bid, a.token, blob(2, "doc-reenc"), map[string]string{"Content-Type": "application/octet-stream", "X-Obsync-Vault-Auth": authTok[vault]}).expect(t, 201)
 	e.upload(vault, a, bid, blob(1, "stale")).expect(t, 200)
 	r := e.do("GET", base+"/blobs/"+bid, a.token, nil, nil).expect(t, 200)
 	if r.hdr.Get("X-Blob-Epoch") != "2" || !bytes.Contains(r.body, []byte("doc-reenc")) {
@@ -541,9 +573,10 @@ func TestRotateReencryptAndRecovery(t *testing.T) {
 	if len(seqs.Seqs) != 1 {
 		t.Fatalf("meta worklist: %+v", seqs)
 	}
-	e.do("PATCH", base+"/ops/1/meta", a.token, map[string]any{"meta_enc": randBytes(40), "meta_epoch": 1}, nil).expect(t, 409)
-	e.do("PATCH", base+"/ops/1/meta", a.token, map[string]any{"meta_enc": randBytes(40), "meta_epoch": 2}, nil).expect(t, 204)
-	e.do("PATCH", base+"/ops/1/meta", a.token, map[string]any{"meta_enc": randBytes(40), "meta_epoch": 2}, nil).expect(t, 409)
+	e.do("PATCH", base+"/ops/1/meta", a.token, map[string]any{"meta_enc": randBytes(40), "meta_epoch": 2}, nil).expect(t, 401)
+	e.do("PATCH", base+"/ops/1/meta", a.token, map[string]any{"meta_enc": randBytes(40), "meta_epoch": 1}, authHdr(vault)).expect(t, 409)
+	e.do("PATCH", base+"/ops/1/meta", a.token, map[string]any{"meta_enc": randBytes(40), "meta_epoch": 2}, authHdr(vault)).expect(t, 204)
+	e.do("PATCH", base+"/ops/1/meta", a.token, map[string]any{"meta_enc": randBytes(40), "meta_epoch": 2}, authHdr(vault)).expect(t, 409)
 	e.do("GET", base, a.token, nil, nil).expect(t, 200).json(t, &v)
 	if v.MinEpoch != 2 {
 		t.Fatalf("min_epoch should advance to 2: %+v", v)
@@ -563,20 +596,23 @@ func TestRotateReencryptAndRecovery(t *testing.T) {
 		t.Fatal("meta_epoch 3 should be rejected")
 	}
 
-	// Recovery join: unauthenticated info fetch, then join with the auth token.
+	// Recovery join: unauthenticated info fetch (salt only, nothing to attack
+	// offline), then join with the auth token, which releases the wrapped key.
 	var info store.RecoveryInfo
-	e.do("GET", base+"/recovery", "", nil, nil).expect(t, 200).json(t, &info)
-	if info.DeviceID != rec.DeviceID || len(info.RecoveryEnc) == 0 {
-		t.Fatalf("recovery info: %+v", info)
+	r = e.do("GET", base+"/recovery", "", nil, nil).expect(t, 200)
+	r.json(t, &info)
+	if info.DeviceID != rec.DeviceID || !bytes.Equal(info.Salt, recSalt) || bytes.Contains(r.body, []byte("recovery_enc")) {
+		t.Fatalf("recovery info: %+v %s", info, r.body)
 	}
 	e.do("POST", base+"/recovery/join", "rc_wrong", map[string]any{"pub_kex": randBytes(65)}, nil).expect(t, 401)
 	var joined struct {
 		DeviceToken string            `json:"device_token"`
 		Epoch       int64             `json:"epoch"`
 		Keybox      []store.KeyboxRow `json:"keybox"`
+		RecoveryEnc []byte            `json:"recovery_enc"`
 	}
 	e.do("POST", base+"/recovery/join", recAuth, map[string]any{"pub_kex": randBytes(65), "name_enc": randBytes(10)}, nil).expect(t, 201).json(t, &joined)
-	if joined.Epoch != 2 || len(joined.Keybox) != 1 || joined.Keybox[0].Epoch != 2 || joined.Keybox[0].RecipientID != rec.DeviceID {
+	if joined.Epoch != 2 || len(joined.Keybox) != 1 || joined.Keybox[0].Epoch != 2 || joined.Keybox[0].RecipientID != rec.DeviceID || len(joined.RecoveryEnc) != 80 {
 		t.Fatalf("recovery join: %+v", joined)
 	}
 	e.do("GET", base, joined.DeviceToken, nil, nil).expect(t, 200)

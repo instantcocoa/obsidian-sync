@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { mergeJson, mergeText } from "../src/core/merge";
 import { utf8, fromUtf8 } from "../src/core/encoding";
-import { compileExclusions, DEFAULT_EXCLUSIONS, conflictPath, CONFLICT_RE, toLogical, fromLogical, isTextPath } from "../src/core/paths";
+import { compileExclusions, DEFAULT_EXCLUSIONS, conflictPath, CONFLICT_RE, toLogical, fromLogical, isTextPath, isSafeLogicalPath, isSafeDevicePath } from "../src/core/paths";
 
 const t = (s: string) => utf8(s);
 
@@ -92,5 +92,22 @@ describe("paths", () => {
   it("text detection", () => {
     expect(isTextPath("a.md")).toBe(true);
     expect(isTextPath("a.PNG")).toBe(false);
+  });
+});
+
+describe("path safety (what another device may make us write)", () => {
+  it("accepts ordinary vault paths, including $CONFIG as the first segment", () => {
+    for (const p of ["a.md", "notes/a b/ç.md", "$CONFIG/app.json", "$CONFIG/plugins/x/main.js", ".trash/x.md", "a/.hidden"]) {
+      expect(isSafeLogicalPath(p), p).toBe(true);
+    }
+  });
+  it("rejects traversal, absolute, empty segments, backslashes, control chars and a misplaced $CONFIG", () => {
+    for (const p of ["", "../x", "a/../x", "a/..", "/etc/passwd", "a//b", "a/./b", "a\\b", "a\u0000b", "a\nb", "notes/$CONFIG/app.json", "a/", "."]) {
+      expect(isSafeLogicalPath(p), JSON.stringify(p)).toBe(false);
+    }
+  });
+  it("a device path may never contain the $CONFIG token (a real folder with that name is not synced)", () => {
+    expect(isSafeDevicePath("$CONFIG/app.json")).toBe(false);
+    expect(isSafeDevicePath(".obsidian/app.json")).toBe(true);
   });
 });

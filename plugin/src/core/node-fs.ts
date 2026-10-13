@@ -19,7 +19,12 @@ export class NodeFS implements VaultFS {
   }
 
   private abs(p: string): string {
-    return nodePath.join(this.root, ...p.split("/"));
+    // Defence in depth: the engine validates paths, but the file layer must
+    // never step outside the vault root whatever it is handed.
+    const abs = nodePath.resolve(this.root, ...p.split("/"));
+    const root = nodePath.resolve(this.root);
+    if (abs !== root && !abs.startsWith(root + nodePath.sep)) throw new Error(`path escapes vault: ${p}`);
+    return abs;
   }
 
   async list(): Promise<FileStat[]> {

@@ -88,9 +88,9 @@ export class Device {
     // Count network writes so tests can assert "rename uploads nothing".
     const client = this.session.client;
     const origPut = client.putBlob.bind(client);
-    client.putBlob = async (v, id, d) => {
+    client.putBlob = async (v, id, d, o) => {
       this.uploads++;
-      return origPut(v, id, d);
+      return origPut(v, id, d, o);
     };
     const origPost = client.postOps.bind(client);
     client.postOps = async (v, ops) => {

@@ -174,9 +174,14 @@ describe.skipIf(!OBSIDIAN_BIN)("real Obsidian, settings UI onboarding, rate limi
     }
     expect(codes.some((m) => /429|rate limited|too many/i.test(m))).toBe(true);
     expect(codes.filter((m) => /passphrase/.test(m)).length).toBeGreaterThan(0);
-    // Legitimate join still works once the bucket refills a little (60 s window; wait for one token).
-    await new Promise((r) => setTimeout(r, 7000));
-    const ok = await b.eval((plugin, _app, url, v) => plugin.joinWithPassphrase(url, v, "correct horse battery staple").then(() => "ok", (e: Error) => e.message), srv.url, vaultId);
+    // Legitimate join still works once the bucket refills: a join costs two
+    // throttled requests (salt fetch, then the proof), so at 10/min that is
+    // up to ~12 s of refill after a burst. Retry until it goes through.
+    let ok = "";
+    for (let i = 0; i < 20 && ok !== "ok"; i++) {
+      await new Promise((r) => setTimeout(r, 4000));
+      ok = await b.eval((plugin, _app, url, v) => plugin.joinWithPassphrase(url, v, "correct horse battery staple").then(() => "ok", (e: Error) => e.message), srv.url, vaultId);
+    }
     expect(ok).toBe("ok");
     expect(await b.waitForFile("UI.md", "joined through the UI\n")).not.toBeNull();
   }, 120_000);

@@ -64,6 +64,13 @@ const DEFAULT_SETTINGS: Settings = {
   debounceMs: 1500,
 };
 
+/**
+ * A copied data.json can be attacked offline at GPU speed, so a 4-digit PIN
+ * would fall in seconds despite the 600k-iteration KDF. Six characters is the
+ * floor; the settings text says to use more.
+ */
+export const MIN_PIN_LENGTH = 6;
+
 export default class ObsyncPlugin extends Plugin {
   override settings: Settings = { ...DEFAULT_SETTINGS };
   engine: Engine | null = null;
@@ -164,7 +171,7 @@ export default class ObsyncPlugin extends Plugin {
     if (!this.settings.identity) throw new Error("not connected");
     const p: Protection = { method, touchId: false };
     if (method === "pin") {
-      if (!opts.pin || opts.pin.length < 4) throw new Error("PIN must be at least 4 characters");
+      if (!opts.pin || opts.pin.length < MIN_PIN_LENGTH) throw new Error(`PIN must be at least ${MIN_PIN_LENGTH} characters`);
       this.pinSalt = randomBytes(16);
       this.wrapKey = await deriveWrapKeyFromPin(opts.pin, this.pinSalt);
     } else if (method === "safe") {
@@ -387,8 +394,10 @@ export default class ObsyncPlugin extends Plugin {
         devs
           .filter((d) => !d.revoked_at)
           .map((d) => ({
-            label: d.name + (d.isSelf ? " (this device)" : ""),
-            detail: `${d.recovery ? "recovery identity" : "added " + new Date(d.created_at).toLocaleDateString()}${d.last_seen ? ", seen " + new Date(d.last_seen).toLocaleString() : ""}`,
+            label: d.name + (d.isSelf ? " (this device)" : "") + (d.name === "(unnamed)" ? " ⚠" : ""),
+            detail:
+              `${d.recovery ? "recovery identity" : "added " + new Date(d.created_at).toLocaleDateString()}${d.last_seen ? ", seen " + new Date(d.last_seen).toLocaleString() : ""}` +
+              (d.name === "(unnamed)" ? ". Never finished joining or has no keys: remove it if you do not recognise it, or it will be given keys at the next rotation." : ""),
             action:
               d.isSelf || d.recovery
                 ? undefined

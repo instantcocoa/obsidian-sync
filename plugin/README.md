@@ -81,6 +81,22 @@ Keys, the device token and the local state live in
 one device means re-joining with an invite link or the recovery passphrase;
 your files are unaffected.
 
+Two things worth knowing about trust:
+
+- **Everyone in the vault can run code on every device** that syncs the
+  config folder, because synced plugins are reloaded and enabled
+  automatically. That is the feature. Only invite devices you control, and
+  turn off "Sync config folder" in a shared vault you do not fully trust.
+  The plugin shows a notice whenever sync enables a plugin.
+- **A device token on its own cannot hurt you.** Rotating keys, replacing
+  data, changing the recovery passphrase or inviting devices all need the
+  vault keys as well, so a token that leaks through a proxy log or a copied
+  `data.json` with sealed keys can at most read ciphertext. A device listed
+  as "(unnamed)" never finished joining or has no keys: remove it if you do
+  not recognise it.
+- **Use https.** With a plain `http://` server URL the plugin asks first:
+  your notes stay encrypted, but the device token would travel in the clear.
+
 ## Keys on this device
 
 Settings → "Protect keys" chooses how the vault keys and device token are
@@ -89,9 +105,10 @@ stored on this device:
 - **None**: in the plugin's `data.json`, protected only by disk encryption.
   The default on mobile.
 - **PIN at launch**: the key store is sealed under a PIN-derived key
-  (PBKDF2, 600k iterations). Works on every platform. Resists anyone who
-  gets the file but not the PIN. Obsidian prompts at startup; "Unlock vault
-  keys" prompts again.
+  (PBKDF2, 600k iterations). Works on every platform. Someone who gets the
+  file can try PINs offline at GPU speed, so the minimum is 6 characters
+  and a long one (a short phrase) is what actually stops them. Obsidian
+  prompts at startup; "Unlock vault keys" prompts again.
 - **OS keychain** (desktop): a random wrapping key is stored in the macOS
   Keychain, Windows DPAPI, or Linux libsecret via Electron's `safeStorage`.
   No prompt. Resists anyone who gets the file but not your login session.

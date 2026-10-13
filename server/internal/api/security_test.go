@@ -6,6 +6,7 @@ package api_test
 
 import (
 	"bytes"
+	"context"
 	"encoding/hex"
 	"fmt"
 	"net/http"
@@ -17,6 +18,9 @@ import (
 	"obsync/internal/api"
 	"obsync/internal/blobstore"
 	"obsync/internal/store"
+
+	"github.com/coder/websocket"
+	"github.com/coder/websocket/wsjson"
 )
 
 func TestCrossVaultIsolation(t *testing.T) {
@@ -56,7 +60,9 @@ func TestRevokedAndBogusTokens(t *testing.T) {
 	base := "/v1/vaults/" + vault
 	// Revoke B via rotation.
 	rows := []store.KeyboxRow{{Epoch: 2, RecipientID: a.id, Wrapped: randBytes(100)}}
-	e.do("POST", base+"/rotate", a.token, map[string]any{"epoch": 2, "revoke": []string{b.id}, "keybox": rows}, nil).expect(t, 200)
+	next := newAuthTok()
+	e.do("POST", base+"/rotate", a.token, map[string]any{"epoch": 2, "revoke": []string{b.id}, "keybox": rows, "auth_next": next}, authHdr(vault)).expect(t, 200)
+	authTok[vault] = next
 	for _, p := range []string{"", "/snapshot", "/keybox"} {
 		e.do("GET", base+p, b.token, nil, nil).expect(t, 401)
 	}
@@ -68,8 +74,117 @@ func TestRevokedAndBogusTokens(t *testing.T) {
 	for _, tok := range []string{"", "Bearer", "dv_", "dv_" + strings.Repeat("A", 43), adminTok + "x", "in_whatever", "rc_whatever"} {
 		e.do("GET", base, tok, nil, nil).expect(t, 401)
 	}
-	// Token in query is only honoured for the WebSocket route; here it is just absent.
+	// Tokens in the query string are never honoured.
 	e.do("GET", base+"?token="+a.token, "", nil, nil).expect(t, 401)
+}
+
+// A stolen device token without the vault keys (proxy log, copied
+// data.json with sealed keys) must not be able to destroy data, lock the
+// owner out, add devices, or hand itself keys at the next rotation.
+func TestTokenOnlyAttackerCannotDestroyOrEscalate(t *testing.T) {
+	e := newEnv(t)
+	vault, a, b := e.setup()
+	base := "/v1/vaults/" + vault
+	bid := hexID("victim")
+	e.upload(vault, a, bid, blob(1, "victim-bytes")).expect(t, 201)
+	e.ops(vault, a, put("victim.md", str(bid), 0))
+	recAuth := "rc_" + hex.EncodeToString(randBytes(16))
+	var rec struct {
+		DeviceID string `json:"device_id"`
+	}
+	e.do("PUT", base+"/recovery", a.token, map[string]any{"pub_kex": randBytes(65), "recovery_enc": randBytes(80), "salt": randBytes(16), "auth": recAuth}, authHdr(vault)).expect(t, 201).json(t, &rec)
+
+	// b's token is the attacker's. Everything destructive is refused.
+	rows := []store.KeyboxRow{{Epoch: 2, RecipientID: b.id, Wrapped: randBytes(100)}}
+	e.do("POST", base+"/rotate", b.token, map[string]any{"epoch": 2, "revoke": []string{a.id}, "keybox": rows, "auth_next": newAuthTok()}, nil).expect(t, 401)
+	e.do("POST", base+"/rotate", b.token, map[string]any{"epoch": 2, "revoke": []string{a.id}, "keybox": rows, "auth_next": newAuthTok()}, map[string]string{"X-Obsync-Vault-Auth": newAuthTok()}).expect(t, 401)
+	e.do("PUT", base+"/recovery", b.token, map[string]any{"pub_kex": randBytes(65), "recovery_enc": randBytes(80), "salt": randBytes(16), "auth": "rc_mine"}, nil).expect(t, 401)
+	e.do("PATCH", base+"/ops/1/meta", b.token, map[string]any{"meta_enc": randBytes(40), "meta_epoch": 1}, nil).expect(t, 401)
+	e.do("POST", base+"/invites", b.token, map[string]any{"keybox_enc": randBytes(8)}, nil).expect(t, 401)
+	e.do("POST", base+"/auth", b.token, map[string]any{"auth": newAuthTok()}, nil).expect(t, 409)
+	// Ciphertext cannot be replaced in place without the keys, even with a higher epoch header.
+	// (First rotate legitimately so epoch 2 exists.)
+	next := newAuthTok()
+	e.do("POST", base+"/rotate", a.token, map[string]any{"epoch": 2, "revoke": nil, "keybox": []store.KeyboxRow{{Epoch: 2, RecipientID: a.id, Wrapped: randBytes(100)}, {Epoch: 2, RecipientID: b.id, Wrapped: randBytes(100)}, {Epoch: 2, RecipientID: rec.DeviceID, Wrapped: randBytes(100)}}, "auth_next": next}, authHdr(vault)).expect(t, 200)
+	authTok[vault] = next
+	e.upload(vault, b, bid, blob(2, "garbage")).expect(t, 401)
+	r := e.do("GET", base+"/blobs/"+bid, a.token, nil, nil).expect(t, 200)
+	if !bytes.Contains(r.body, []byte("victim-bytes")) || r.hdr.Get("X-Blob-Epoch") != "1" {
+		t.Fatalf("blob was replaced by a token-only caller: epoch=%s", r.hdr.Get("X-Blob-Epoch"))
+	}
+	// Everyone is still enrolled and recovery is intact.
+	e.do("GET", base, a.token, nil, nil).expect(t, 200)
+	e.do("GET", base+"/recovery", "", nil, nil).expect(t, 200)
+	// Keybox: a member may not touch another device's rows.
+	e.do("POST", base+"/keybox", b.token, map[string]any{"keybox": []store.KeyboxRow{{Epoch: 2, RecipientID: a.id, Wrapped: randBytes(100)}}}, nil).expect(t, 401)
+	var kb struct{ Keybox []store.KeyboxRow }
+	e.do("GET", base+"/keybox", a.token, nil, nil).expect(t, 200).json(t, &kb)
+	if len(kb.Keybox) != 2 {
+		t.Fatalf("A's keybox altered: %+v", kb.Keybox)
+	}
+}
+
+// A device revoked while its long-poll is open gets nothing from it, and an
+// open WebSocket is closed.
+func TestRevocationCutsOpenStreams(t *testing.T) {
+	e := newEnv(t)
+	vault, a, b := e.setup()
+	base := "/v1/vaults/" + vault
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	wsURL := "ws" + strings.TrimPrefix(e.ts.URL, "http") + base + "/live"
+	c, _, err := websocket.Dial(ctx, wsURL, &websocket.DialOptions{Subprotocols: []string{"obsync-bearer", b.token}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.CloseNow()
+	var h api.Hint
+	if err := wsjson.Read(ctx, c, &h); err != nil {
+		t.Fatal(err)
+	}
+	type pollRes struct {
+		code int
+		body string
+	}
+	polled := make(chan pollRes, 1)
+	go func() {
+		r := e.do("GET", base+"/changes?since=0&wait=5", b.token, nil, nil)
+		polled <- pollRes{r.code, string(r.body)}
+	}()
+	time.Sleep(200 * time.Millisecond)
+	next := newAuthTok()
+	e.do("POST", base+"/rotate", a.token, map[string]any{"epoch": 2, "revoke": []string{b.id}, "keybox": []store.KeyboxRow{{Epoch: 2, RecipientID: a.id, Wrapped: randBytes(100)}}, "auth_next": next}, authHdr(vault)).expect(t, 200)
+	authTok[vault] = next
+	bid := hexID("after")
+	e.upload(vault, a, bid, blob(2, "after")).expect(t, 201)
+	e.ops(vault, a, put("after.md", str(bid), 0))
+	res := <-polled
+	if res.code != 401 || strings.Contains(res.body, bid) {
+		t.Fatalf("revoked long-poll delivered data: %d %s", res.code, res.body)
+	}
+	if err := wsjson.Read(ctx, c, &h); err == nil {
+		t.Fatal("revoked websocket still streaming")
+	}
+}
+
+// List routes are bounded whatever the caller asks for.
+func TestListLimitsAreClamped(t *testing.T) {
+	e := newEnv(t)
+	vault, a, _ := e.setup()
+	base := "/v1/vaults/" + vault
+	for _, q := range []string{"?limit=-1", "?limit=0", "?limit=999999999", "?meta_epoch_lt=9&limit=-1", "?epoch_lt=9&limit=-1"} {
+		for _, p := range []string{"/ops", "/blobs"} {
+			if r := e.do("GET", base+p+q, a.token, nil, nil); r.code != 200 && r.code != 400 {
+				t.Fatalf("%s%s: %d %s", p, q, r.code, r.body)
+			}
+		}
+	}
+	big := make([]string, 5001)
+	for i := range big {
+		big[i] = hexID(fmt.Sprint(i))
+	}
+	e.do("POST", base+"/blobs/missing", a.token, big, nil).expect(t, 400)
+	e.do("POST", base+"/blobs/missing", a.token, big[:5000], nil).expect(t, 200)
 }
 
 func TestInviteLifecycle(t *testing.T) {
@@ -77,17 +192,17 @@ func TestInviteLifecycle(t *testing.T) {
 	vault, a, _ := e.setup()
 	var inv store.Invite
 	// TTL is capped by the server's InviteTTL and a short one is honoured.
-	e.do("POST", "/v1/vaults/"+vault+"/invites", a.token, map[string]any{"keybox_enc": randBytes(8), "ttl_seconds": 1}, nil).expect(t, 201).json(t, &inv)
+	e.do("POST", "/v1/vaults/"+vault+"/invites", a.token, map[string]any{"keybox_enc": randBytes(8), "ttl_seconds": 1}, authHdr(vault)).expect(t, 201).json(t, &inv)
 	time.Sleep(1100 * time.Millisecond)
 	e.do("POST", "/v1/invites/"+inv.Token, "", map[string]any{"pub_kex": randBytes(65)}, nil).expect(t, 401)
 	// Unknown token, missing pub_kex, empty keybox.
 	e.do("POST", "/v1/invites/in_nope", "", map[string]any{"pub_kex": randBytes(65)}, nil).expect(t, 401)
-	e.do("POST", "/v1/vaults/"+vault+"/invites", a.token, map[string]any{"keybox_enc": randBytes(8)}, nil).expect(t, 201).json(t, &inv)
+	e.do("POST", "/v1/vaults/"+vault+"/invites", a.token, map[string]any{"keybox_enc": randBytes(8)}, authHdr(vault)).expect(t, 201).json(t, &inv)
 	e.do("POST", "/v1/invites/"+inv.Token, "", map[string]any{"pub_kex": []byte{}}, nil).expect(t, 400)
-	e.do("POST", "/v1/vaults/"+vault+"/invites", a.token, map[string]any{"keybox_enc": []byte{}}, nil).expect(t, 400)
+	e.do("POST", "/v1/vaults/"+vault+"/invites", a.token, map[string]any{"keybox_enc": []byte{}}, authHdr(vault)).expect(t, 400)
 	// A device cannot mint an invite for a vault it is not in (403 via device()).
 	v2, _, _ := e.setup()
-	e.do("POST", "/v1/vaults/"+v2+"/invites", a.token, map[string]any{"keybox_enc": randBytes(8)}, nil).expect(t, 403)
+	e.do("POST", "/v1/vaults/"+v2+"/invites", a.token, map[string]any{"keybox_enc": randBytes(8)}, authHdr(v2)).expect(t, 403)
 	// The invite keybox is wiped after redemption even if the row lingers.
 	var red store.Redeemed
 	e.do("POST", "/v1/invites/"+inv.Token, "", map[string]any{"pub_kex": randBytes(65)}, nil).expect(t, 201).json(t, &red)
@@ -141,8 +256,8 @@ func TestInputValidation(t *testing.T) {
 	e.do("POST", base+"/keybox", a.token, map[string]any{"keybox": []store.KeyboxRow{{Epoch: 1, RecipientID: "nobody", Wrapped: randBytes(9)}}}, nil).expect(t, 400)
 	// Restore needs a positive time; patch needs a real seq.
 	e.do("POST", base+"/restore", a.token, map[string]any{"at": 0}, nil).expect(t, 400)
-	e.do("PATCH", base+"/ops/999/meta", a.token, map[string]any{"meta_enc": randBytes(4), "meta_epoch": 1}, nil).expect(t, 404)
-	e.do("PATCH", base+"/ops/abc/meta", a.token, map[string]any{"meta_enc": randBytes(4), "meta_epoch": 1}, nil).expect(t, 400)
+	e.do("PATCH", base+"/ops/999/meta", a.token, map[string]any{"meta_enc": randBytes(4), "meta_epoch": 1}, authHdr(vault)).expect(t, 404)
+	e.do("PATCH", base+"/ops/abc/meta", a.token, map[string]any{"meta_enc": randBytes(4), "meta_epoch": 1}, authHdr(vault)).expect(t, 400)
 }
 
 func TestBlobSizeLimit(t *testing.T) {
@@ -183,9 +298,14 @@ func TestRateLimiting(t *testing.T) {
 	if codes[len(codes)-1] != 429 {
 		t.Fatalf("invite guessing not throttled: %v", codes)
 	}
-	// Recovery lookups share the unauthenticated bucket.
-	if e.do("GET", "/v1/vaults/"+vault+"/recovery", "", nil, nil).code != 429 {
-		t.Fatal("recovery lookup should be throttled with the same bucket")
+	// The recovery salt lookup is deliberately not throttled (a throttled
+	// joiner must be able to retry without spending the refilled token on
+	// the salt), but the join that releases the wrapped key is.
+	if c := e.do("GET", "/v1/vaults/"+vault+"/recovery", "", nil, nil).code; c == 429 {
+		t.Fatal("recovery salt lookup should not share the throttle bucket")
+	}
+	if e.do("POST", "/v1/vaults/"+vault+"/recovery/join", "rc_guess", map[string]any{"pub_kex": randBytes(65)}, nil).code != 429 {
+		t.Fatal("recovery join should be throttled with the same bucket")
 	}
 	// Failed device-token guessing is throttled; a valid token still works
 	// (the failure bucket is only charged on failure).
@@ -215,7 +335,7 @@ func TestWebSocketAuthAndIsolation(t *testing.T) {
 	v1, _, _ := e.setup()
 	_, a2, _ := e.setup()
 	// A vault-2 device cannot subscribe to vault 1's live feed.
-	r := e.do("GET", "/v1/vaults/"+v1+"/live?token="+a2.token, "", nil, map[string]string{"Connection": "Upgrade", "Upgrade": "websocket", "Sec-WebSocket-Version": "13", "Sec-WebSocket-Key": "dGhlIHNhbXBsZSBub25jZQ=="})
+	r := e.do("GET", "/v1/vaults/"+v1+"/live", "", nil, map[string]string{"Connection": "Upgrade", "Upgrade": "websocket", "Sec-WebSocket-Version": "13", "Sec-WebSocket-Key": "dGhlIHNhbXBsZSBub25jZQ==", "Sec-WebSocket-Protocol": "obsync-bearer, " + a2.token})
 	if r.code != 403 {
 		t.Fatalf("live feed cross-vault: %d", r.code)
 	}

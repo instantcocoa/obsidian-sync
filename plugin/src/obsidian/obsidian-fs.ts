@@ -12,6 +12,7 @@
  * Obsidian notices.
  */
 import { App, TFile, TFolder, normalizePath } from "obsidian";
+import { isSafeDevicePath } from "../core/paths";
 import type { FileStat, VaultFS, StateStore } from "../core/fs";
 
 type AdapterExt = App["vault"]["adapter"] & {
@@ -28,6 +29,12 @@ export class ObsidianFS implements VaultFS {
 
   private isDot(path: string): boolean {
     return path.startsWith(".") || path.includes("/.");
+  }
+
+  /** Obsidian's adapter does not resolve ".." itself; never pass one through. */
+  private checked(path: string): string {
+    if (!isSafeDevicePath(path)) throw new Error(`path escapes vault: ${path}`);
+    return path;
   }
 
   async list(): Promise<FileStat[]> {
@@ -147,6 +154,7 @@ export class ObsidianFS implements VaultFS {
   }
 
   async write(path: string, data: Uint8Array, mtime: number): Promise<void> {
+    path = this.checked(path);
     const opts = { mtime: Math.floor(mtime) };
     const buf = data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength) as ArrayBuffer;
     await this.ensureFolder(path);
@@ -161,6 +169,7 @@ export class ObsidianFS implements VaultFS {
   }
 
   async remove(path: string): Promise<void> {
+    path = this.checked(path);
     const f = this.app.vault.getAbstractFileByPath(path);
     if (f instanceof TFile) {
       // Respects the user's "deleted files" preference (system trash / .trash / permanent).

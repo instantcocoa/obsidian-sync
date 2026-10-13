@@ -56,7 +56,7 @@ export class ObsyncSettingTab extends PluginSettingTab {
             { name: "Vault id" },
             { name: "Recovery passphrase", secret: true },
           ]);
-          if (v) await this.run(() => this.plugin.joinWithPassphrase(v[0], v[1], v[2]));
+          if (v && (await this.plainHttpOk(v[0]))) await this.run(() => this.plugin.joinWithPassphrase(v[0], v[1], v[2]));
         }),
       );
 
@@ -69,7 +69,7 @@ export class ObsyncSettingTab extends PluginSettingTab {
             { name: "Server URL", placeholder: "https://sync.example.com" },
             { name: "Admin token", secret: true },
           ]);
-          if (v) await this.run(() => this.plugin.createVault(v[0], v[1]));
+          if (v && (await this.plainHttpOk(v[0]))) await this.run(() => this.plugin.createVault(v[0], v[1]));
         }),
       );
 
@@ -140,7 +140,7 @@ export class ObsyncSettingTab extends PluginSettingTab {
     new Setting(el)
       .setName("Protect keys")
       .setDesc(
-        "How the vault keys are stored on this device. None: in data.json, safe only if the disk is encrypted. PIN: asked at every launch; resists anyone with the file but not the PIN. OS keychain: unlocked by your login session; resists anyone with the file but not your session. Touch ID (macOS) adds a prompt before the keychain is used.",
+        "How the vault keys are stored on this device. None: in data.json, safe only if the disk is encrypted. PIN: asked at every launch; someone with the file can try PINs offline, so a short PIN only slows them down and a long one stops them. OS keychain: unlocked by your login session; resists anyone with the file but not your session. Touch ID (macOS) adds a prompt before the keychain is used.",
       )
       .addDropdown((d) => {
         for (const o of this.plugin.protectionOptions()) if (o.available || o.method === current) d.addOption(o.method, o.label);
@@ -148,7 +148,7 @@ export class ObsyncSettingTab extends PluginSettingTab {
           try {
             if (v === "pin") {
               const r = await PromptModal.ask(this.app, "Set a PIN", [
-                { name: "PIN (4+ characters)", secret: true },
+                { name: "PIN (6+ characters; longer is better)", secret: true },
                 { name: "Repeat", secret: true },
               ]);
               if (!r) return this.display();
@@ -205,6 +205,21 @@ export class ObsyncSettingTab extends PluginSettingTab {
             }
           }),
       );
+  }
+
+  /**
+   * Plain http is fine on localhost or a private network you trust; over the
+   * internet it hands your device token to every network in between. Ask.
+   */
+  private async plainHttpOk(url: string): Promise<boolean> {
+    if (!/^http:\/\//i.test(url.trim())) return true;
+    if (/^http:\/\/(localhost|127\.0\.0\.1|\[::1\])(:|\/|$)/i.test(url.trim())) return true;
+    return ConfirmModal.ask(
+      this.app,
+      "Use an unencrypted connection?",
+      "This server URL starts with http://, not https://. Your notes stay end-to-end encrypted, but the device token travels in the clear and anyone on the network path could use it to read the encrypted vault or post data. Only do this on a network you trust.",
+      "Use http anyway",
+    );
   }
 
   private async run(fn: () => Promise<unknown>): Promise<void> {

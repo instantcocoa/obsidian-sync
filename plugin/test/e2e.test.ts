@@ -10,6 +10,7 @@ import { join } from "node:path";
 import { TestServer, Device, ADMIN } from "./harness";
 import { createVault, createInviteLink, joinWithLink, listDevices, removeDevice, setRecoveryPassphrase, joinWithPassphrase, reencrypt } from "../src/core/admin";
 import { DEFAULT_EXCLUSIONS } from "../src/core/paths";
+import { utf8 } from "../src/core/encoding";
 
 let srv: TestServer;
 beforeAll(async () => {
@@ -283,6 +284,59 @@ describe("two devices", () => {
     await expect(c.sync()).rejects.toThrow();
     await Promise.all([a.cleanup(), b.cleanup(), c.cleanup(), d.cleanup()]);
   }, 120_000);
+
+  it("a compromised member cannot make another device write outside the vault or under a different path", async () => {
+    const [a, b] = await pair();
+    await a.write("notes/a.md", "legit\n");
+    await a.sync();
+    await b.sync();
+    expect(await b.read("notes/a.md")).toBe("legit\n");
+    // Attacker (holding A's keys and token) crafts ops by hand: valid
+    // ciphertext, but the metadata path is not the path the op is keyed by,
+    // or escapes the vault, or targets the config dir under a note's id.
+    const { vc, client, identity } = a.session;
+    const pid = await vc.pathId("notes/a.md");
+    const payload = utf8("pwned\n");
+    const bid = await vc.blobId(payload);
+    await client.putBlob(identity.vaultId, bid, await vc.encryptBlob(bid, payload));
+    const head = (await client.history(identity.vaultId, pid)).at(-1)!.seq;
+    const evil = async (path: string, base: number) => ({
+      op_id: Math.random().toString(16).slice(2).padEnd(24, "0"),
+      path_id: pid,
+      blob_id: bid,
+      meta_enc: await vc.encryptMeta(pid, { path, mtime: Date.now(), size: payload.length }),
+      meta_epoch: vc.keyring.current,
+      base_seq: base,
+    });
+    let base = head;
+    for (const path of ["../escaped.txt", "notes/../$CONFIG/plugins/obsync/pwned.js", "$CONFIG/plugins/obsync/pwned.js", "notes/other.md", "notes/a.md" /* the one honest op */]) {
+      const r = await client.postOps(identity.vaultId, [await evil(path, base)]);
+      expect(r.results[0].seq ?? 0).toBeGreaterThan(0);
+      base = r.results[0].seq!;
+    }
+    await b.sync();
+    const files = await b.files();
+    expect(files.filter((f) => /pwned|other\.md/.test(f))).toEqual([]);
+    expect(await fsp.readFile(join(b.dir, "..", "escaped.txt"), "utf8").catch(() => null)).toBeNull();
+    // The honest op at the end was applied; nothing else was.
+    expect(await b.read("notes/a.md")).toBe("pwned\n");
+    expect(b.conflicts.length).toBe(0);
+    await a.cleanup();
+    await b.cleanup();
+  });
+
+  it("a real folder literally named $CONFIG is left alone", async () => {
+    const [a, b] = await pair();
+    await a.write("$CONFIG/app.json", "{\"not\":\"config\"}");
+    await a.write("ok.md", "ok\n");
+    await a.sync();
+    await b.sync();
+    expect(await b.read("ok.md")).toBe("ok\n");
+    expect((await b.files()).some((f) => f.startsWith("$CONFIG"))).toBe(false);
+    expect(await fsp.readFile(join(b.dir, ".obsidian/app.json"), "utf8").catch(() => null)).toBeNull();
+    await a.cleanup();
+    await b.cleanup();
+  });
 
   it("restores the vault to a point in time", async () => {
     const [a, b] = await pair();

@@ -17,7 +17,7 @@ import { VaultCrypto, CryptoError, unwrapEpochKey, type FileMeta } from "./crypt
 import { fromB64, bytesEqual } from "./encoding";
 import type { FileStat, StateStore, VaultFS } from "./fs";
 import { mergeJson, mergeText } from "./merge";
-import { compileExclusions, conflictPath, fromLogical, isJsonPath, isTextPath, toLogical, CONFIG_TOKEN } from "./paths";
+import { compileExclusions, conflictPath, fromLogical, isJsonPath, isSafeDevicePath, isSafeLogicalPath, isTextPath, toLogical, CONFIG_TOKEN } from "./paths";
 import { Client, HttpError, type OpInput, type WireOp } from "./transport";
 
 // ---------- types ----------
@@ -266,6 +266,11 @@ export class Engine {
     return toLogical(devPath.normalize("NFC"), this.fs.configDir);
   }
 
+  /** Local paths that must never be synced: unsafe shapes, or a real folder literally named $CONFIG. */
+  private unsyncable(devPath: string): boolean {
+    return !isSafeDevicePath(devPath.normalize("NFC"));
+  }
+
   private device(logical: string): string {
     return fromLogical(logical, this.fs.configDir);
   }
@@ -305,6 +310,7 @@ export class Engine {
 
   /** A change hint for a device path. Cheap: stat now, hash only if the stat moved. */
   noteChange(devPath: string): void {
+    if (this.unsyncable(devPath)) return;
     const logical = this.logical(devPath);
     if (this.excluded(logical)) return;
     void this.withLock(logical, async () => {
@@ -347,6 +353,7 @@ export class Engine {
       const seen = new Set<string>();
       let n = 0;
       for (const st of all) {
+        if (this.unsyncable(st.path)) continue;
         const logical = this.logical(st.path);
         if (opts.onlyDot && !inDotScope(logical)) continue;
         seen.add(logical);
@@ -549,6 +556,14 @@ export class Engine {
         } else {
           this.log("error", `cannot decrypt metadata for op ${op.seq}; skipping`, e);
         }
+      }
+      // The path comes from another device. It must be a plain relative
+      // vault path and it must be the path this op is actually keyed by;
+      // otherwise a compromised member could write outside the vault or
+      // smuggle a file past the exclusion rules under another path's id.
+      if (meta && (!isSafeLogicalPath(meta.path) || (await this.vc.pathId(meta.path)) !== op.path_id)) {
+        this.log("error", `op ${op.seq} carries an unsafe or mismatched path; refusing to apply it`, { path: meta.path });
+        meta = null;
       }
       decoded.push({ op, meta, logical: meta?.path ?? "" });
     }
@@ -862,7 +877,7 @@ export class Engine {
   private connectLive(): void {
     if (this.stopped || typeof WebSocket === "undefined") return;
     try {
-      const ws = new WebSocket(this.client.liveUrl(this.cfg.vaultId));
+      const ws = new WebSocket(this.client.liveUrl(this.cfg.vaultId), this.client.liveProtocols());
       this.ws = ws;
       ws.onopen = () => {
         this.wsBackoff = 1000;

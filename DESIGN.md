@@ -12,8 +12,12 @@ and how to run each suite.
 
 One rule was added during real-Obsidian testing: a device that has never
 synced a config-folder file adopts the vault's version instead of creating a
-conflict copy (§6.6), because every fresh vault already has its own
-`app.json`.
+conflict copy (§6.6). The cause is reproduced, not inferred: every vault has
+its own `app.json` before the plugin runs, Obsidian rewrites it by itself on
+any settings change, so a joining device's copy differs from the vault's with
+no shared base. `plugin/test/obsidian-config.test.ts` turns the rule off,
+joins, and gets the exact conflict copy that was seen; turns it on, joins
+again, and gets silent adoption.
 
 This document records what we learned from reading Self-hosted LiveSync
 (`../git/obsidian-livesync`, v1.0.35, plus its `@vrtmrz/livesync-commonlib`
@@ -742,6 +746,14 @@ version silently. Its local copy is Obsidian's defaults, written before the
 plugin was installed, not a user edit. Ordinary files with no base and
 different bytes still get a sibling, because a hand-copied vault is a common
 way to seed a new device and nothing may be discarded.
+
+Why this exception exists (reproduced in `plugin/test/obsidian-config.test.ts`
+inside real Obsidian): Obsidian creates `app.json` in every vault and rewrites
+it on its own whenever a setting changes, so by the time a second device joins
+its `app.json` is already different from the first device's upload, and there
+is no base to merge against. Without the exception the generic rule produces
+`app (conflict <device> …).json` on every such join. The engine option
+`adoptConfig` (default on) exists only so the test can show both behaviours.
 
 Never a modal. A "Show conflicts" command lists files matching the conflict
 pattern.

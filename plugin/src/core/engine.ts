@@ -67,6 +67,13 @@ export interface EngineConfig {
   massDelete?: { min: number; fraction: number };
   /** Disable the WebSocket (tests, or environments without one). */
   noLive?: boolean;
+  /**
+   * When a config-folder file this device has never synced differs from the
+   * vault's version, adopt the vault's version instead of keeping a conflict
+   * copy (§6.6). Default true. Tests set false to reproduce the pre-rule
+   * behaviour; there is no reason to turn it off in normal use.
+   */
+  adoptConfig?: boolean;
 }
 
 export type Phase = "idle" | "scanning" | "syncing" | "offline" | "error";
@@ -93,6 +100,7 @@ export interface EngineHooks {
 }
 
 const DEFAULTS = {
+  adoptConfig: true,
   debounceMs: 1500,
   pollIntervalMs: 20_000,
   dotScanIntervalMs: 15_000,
@@ -638,7 +646,7 @@ export class Engine {
       return;
     }
     if (st && localEdited) {
-      if (!e && logical.startsWith(CONFIG_TOKEN)) {
+      if (!e && this.cfg.adoptConfig && logical.startsWith(CONFIG_TOKEN)) {
         // A device that has never synced this config file (typically one that
         // just joined) is adopting the vault's configuration: its own copy is
         // Obsidian's defaults, not an edit worth preserving. Remote wins.

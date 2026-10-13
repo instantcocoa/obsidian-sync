@@ -163,6 +163,10 @@ Three layers of tests:
   passphrase brute force is throttled while a correct join still works,
   and enables PIN protection, reloads the plugin, and checks it comes up
   locked, refuses a wrong PIN, and unlocks with the right one.
+  `test/obsidian-config.test.ts` reproduces the one config conflict ever
+  seen (a joining device's own `app.json`, rewritten by Obsidian itself,
+  differing from the vault's) with the adoption rule switched off, then
+  shows the default behaviour adopts silently.
   They run only when `OBSIDIAN_BIN` is set:
 
   ```sh

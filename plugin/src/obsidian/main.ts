@@ -7,7 +7,7 @@
  * data.json, which the default exclusions keep out of sync.
  */
 import { Notice, Plugin, Platform } from "obsidian";
-import { Engine, type Status } from "../core/engine";
+import { Engine, type EngineConfig, type Status } from "../core/engine";
 import { DEFAULT_EXCLUSIONS, CONFIG_TOKEN } from "../core/paths";
 import {
   createInviteLink,
@@ -222,6 +222,13 @@ export default class ObsyncPlugin extends Plugin {
 
   // ---------- engine ----------
 
+  /**
+   * Extra engine configuration merged last when the engine starts. Not a
+   * user setting and never persisted: the test suites use it to flip engine
+   * behaviour (for example `adoptConfig`) before a join.
+   */
+  engineOverrides: Partial<EngineConfig> = {};
+
   async startEngine(): Promise<void> {
     if (this.engine || !this.settings.identity) return;
     const identity = this.settings.identity;
@@ -242,6 +249,7 @@ export default class ObsyncPlugin extends Plugin {
         compress: this.settings.compress,
         pad: this.settings.pad,
         debounceMs: this.settings.debounceMs,
+        ...this.engineOverrides,
       },
       {
         log: (level, msg, data) => {

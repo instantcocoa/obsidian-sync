@@ -12,7 +12,8 @@ vault, `.obsidian` included, and is set up in two minutes.
   setup, what syncs, conflicts, devices and keys.
 - `docs/` — `MOBILE-TEST-PROMPT.md`, a brief for an agent with an Android
   emulator or phone (the plugin has not yet been run on a device), and
-  `SECURITY-REVIEW-GUIDE.md`, what a human security reviewer should check.
+  `SECURITY-REVIEW-GUIDE.md`, what a human security reviewer should check. `HANDOFF.md` is the brief for an agent
+  continuing the project.
 
 ## Quick start
 

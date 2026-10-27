@@ -638,6 +638,9 @@ func TestGCAndRestore(t *testing.T) {
 	time.Sleep(5 * time.Millisecond)
 	e.ops(vault, a, put("n.md", str(v2), 1))   // seq 2 supersedes v1
 	e.ops(vault, a, put("k.md", str(keep), 0)) // seq 3
+	// The last check restores to seq 2's own timestamp; the restore op below
+	// must land in a later millisecond or it is what that check picks.
+	time.Sleep(5 * time.Millisecond)
 
 	// Restore to tBetween: n.md goes back to v1 as a new op; k.md did not exist then so is untouched
 	// (restore only rewinds paths that had a version at T).

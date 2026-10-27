@@ -133,10 +133,13 @@ describe.skipIf(!OBSIDIAN_BIN)("real Obsidian, config conflict root cause", () =
     for (const c of copies) await a.eval(async (_p, app, p) => app.vault.adapter.remove(p), `.obsidian/${c}`);
     for (const c of copies) await fsp.rm(join(b.vault, ".obsidian", c), { force: true });
     await fsp.rm(join(b.vault, ".obsidian/plugins/obsync/state.json"), { force: true });
-    await b.eval((_p, app) => app.vault.setConfig("showLineNumber", false));
+    // Change keys the vault's app.json does not have, so Obsidian's debounced
+    // rewrite is guaranteed to differ from A's file whatever it held before.
     await b.eval((_p, app) => app.vault.setConfig("showLineNumber", true));
+    await b.eval((_p, app) => app.vault.setConfig("readableLineLength", false));
+    await b.eval((_p, app) => app.vault.setConfig("spellcheck", false));
     const ownB = await (async () => {
-      const deadline = Date.now() + 15_000;
+      const deadline = Date.now() + 40_000; // a loaded CI runner can take a while to flush app.json
       const ja = await appJson(a);
       while (Date.now() < deadline) {
         const cur = await appJson(b);

@@ -131,6 +131,11 @@ Obsidian; everything found is fixed and merged:
   ubuntu, macos-14 and windows on every push, real Obsidian included. All
   four jobs are green from commit `7cb5086` on (the first runs needed the
   macOS harness fixes and two timing-tolerant tests).
+- One AWS loose end: the Mac dedicated host `h-05d8e91904b1d7095`
+  (us-east-2b) has its instance terminated but cannot be released before
+  its 24-hour minimum ends at 2026-10-28 15:20 UTC. After that, run
+  `aws ec2 release-hosts --region us-east-2 --host-ids h-05d8e91904b1d7095`
+  and confirm with `aws ec2 describe-hosts` that none remain.
 - Reports with verbatim evidence: `plugin/.cache/agent-{win,mac,android}/REPORT.md`
   on the original machine (gitignored).
 

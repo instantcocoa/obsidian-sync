@@ -676,6 +676,9 @@ export class Engine {
       // smuggle a file past the exclusion rules under another path's id.
       if (meta && (!isSafeLogicalPath(meta.path) || (await this.vc.pathId(meta.path)) !== op.path_id || aliasesConfigDir(this.device(meta.path), this.fs.configDir))) {
         this.log("error", `op ${op.seq} carries an unsafe or mismatched path; refusing to apply it`, { path: meta.path });
+        // Report it like any other skipped op: the user should know a file
+        // exists in the vault that this device will never show.
+        this.hooks.onSkipped?.(meta.path, "the name is not allowed on this device");
         meta = null;
       }
       // Paths are keyed by their NFC form (path_id above proves meta.path is

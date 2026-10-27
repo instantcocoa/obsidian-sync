@@ -323,9 +323,14 @@ describe("two devices", () => {
       expect(r.results[0].seq ?? 0).toBeGreaterThan(0);
       base = r.results[0].seq!;
     }
+    const refused: string[] = [];
+    b.engine["hooks"].onSkipped = (p: string) => refused.push(p);
     await b.sync();
     const files = await b.files();
     expect(files.filter((f) => /pwned|other\.md/.test(f))).toEqual([]);
+    // Each refusal is reported like any other skipped op: the user learns a
+    // file exists in the vault that this device will never show.
+    expect(refused.sort()).toEqual(["$CONFIG/plugins/obsync/pwned.js", "../escaped.txt", "notes/../$CONFIG/plugins/obsync/pwned.js", "notes/other.md"].sort());
     expect(await fsp.readFile(join(b.dir, "..", "escaped.txt"), "utf8").catch(() => null)).toBeNull();
     // The honest op at the end was applied; nothing else was.
     expect(await b.read("notes/a.md")).toBe("pwned\n");

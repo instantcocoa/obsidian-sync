@@ -8,7 +8,10 @@ import { App, Notice, Platform } from "obsidian";
 
 type AppInternals = App & {
   plugins?: {
+    /** Persisted list (community-plugins.json). enablePlugin() does not add to it; enablePluginAndSave() does. */
     enabledPlugins: Set<string>;
+    /** Loaded plugin instances. */
+    plugins?: Record<string, unknown>;
     manifests: Record<string, { isDesktopOnly?: boolean } | undefined>;
     disablePlugin(id: string): Promise<void>;
     enablePlugin(id: string): Promise<void>;
@@ -23,6 +26,11 @@ type AppInternals = App & {
     requestLoadTheme?: () => void;
   };
 };
+
+/** Loaded now, or in the persisted list: either way the plugin is "on" here. */
+function running(p: NonNullable<AppInternals["plugins"]>, id: string): boolean {
+  return p.enabledPlugins.has(id) || Boolean(p.plugins?.[id]);
+}
 
 export class ConfigHooks {
   private pendingReload = new Set<string>();
@@ -78,7 +86,7 @@ export class ConfigHooks {
     let want: Set<string> | null | undefined;
     for (const id of ids) {
       try {
-        if (p.enabledPlugins.has(id)) {
+        if (running(p, id)) {
           await p.disablePlugin(id);
           await p.enablePlugin(id);
           new Notice(`obsync: reloaded plugin ${id}`);
@@ -112,7 +120,7 @@ export class ConfigHooks {
    * without a word. Returns true when the plugin was enabled.
    */
   private async enableFromVault(p: NonNullable<AppInternals["plugins"]>, id: string): Promise<boolean> {
-    if (p.enabledPlugins.has(id) || id === this.selfId) return false;
+    if (running(p, id) || id === this.selfId) return false;
     const m = p.manifests[id];
     if (!m) return false;
     if (Platform.isMobile && m.isDesktopOnly) {
@@ -123,6 +131,9 @@ export class ConfigHooks {
       return false;
     }
     await p.enablePlugin(id);
+    // enablePlugin() loads without recording; record it so later reconciles
+    // and reloads see it as running (the synced list already says so).
+    p.enabledPlugins.add(id);
     // Code from another device just started running here. Say so.
     new Notice(`obsync: enabled plugin "${id}" because it is enabled in the vault`);
     return true;
@@ -136,7 +147,11 @@ export class ConfigHooks {
       if (!want) return;
       await p.loadManifests?.();
       for (const id of want) await this.enableFromVault(p, id);
-      for (const id of [...p.enabledPlugins]) if (!want.has(id) && id !== this.selfId) await p.disablePlugin(id);
+      for (const id of new Set([...p.enabledPlugins, ...Object.keys(p.plugins ?? {})])) {
+        if (want.has(id) || id === this.selfId) continue;
+        await p.disablePlugin(id);
+        p.enabledPlugins.delete(id);
+      }
     } catch (e) {
       console.warn("obsync: community-plugins reconcile failed", e);
       this.noticeRestartOnce();

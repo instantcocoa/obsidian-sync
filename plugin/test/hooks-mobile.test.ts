@@ -30,6 +30,7 @@ function fakeApp() {
   const files = new Map<string, string>();
   const onDisk: Record<string, { id: string; isDesktopOnly?: boolean }> = {};
   const enabled = new Set<string>();
+  const loaded: Record<string, unknown> = {};
   const calls: string[] = [];
   const app = {
     vault: {
@@ -43,22 +44,25 @@ function fakeApp() {
       },
     },
     plugins: {
+      // Like Obsidian: enablePlugin()/disablePlugin() load and unload an
+      // instance; only the *AndSave variants touch enabledPlugins.
       enabledPlugins: enabled,
+      plugins: loaded,
       manifests: {} as Record<string, { id: string; isDesktopOnly?: boolean } | undefined>,
       loadManifests: async () => {
         app.plugins.manifests = { ...onDisk };
       },
       enablePlugin: async (id: string) => {
         calls.push(`enable:${id}`);
-        enabled.add(id);
+        loaded[id] = {};
       },
       disablePlugin: async (id: string) => {
         calls.push(`disable:${id}`);
-        enabled.delete(id);
+        delete loaded[id];
       },
     },
   };
-  return { app, files, onDisk, enabled, calls };
+  return { app, files, onDisk, enabled, loaded, calls };
 }
 
 const flush = () => new Promise((r) => setTimeout(r, 0));
@@ -85,8 +89,32 @@ describe("plugin hooks on mobile", () => {
     hooks.afterApply(".obsidian/plugins/hello/main.js", "put");
     await vi.advanceTimersByTimeAsync(2500);
     expect(f.enabled.has("hello")).toBe(true);
+    expect(f.loaded.hello).toBeDefined();
     expect(f.calls).toEqual(["enable:hello"]);
     expect(stub.notices).toEqual(['obsync: enabled plugin "hello" because it is enabled in the vault']);
+    // The next list change must not enable (and announce) it again.
+    hooks.afterApply(".obsidian/community-plugins.json", "put");
+    await vi.advanceTimersByTimeAsync(10);
+    expect(f.calls).toEqual(["enable:hello"]);
+    expect(stub.notices).toHaveLength(1);
+  });
+
+  it("unloads a plugin it enabled when the vault list drops it", async () => {
+    const f = fakeApp();
+    const hooks = new ConfigHooks(f.app as never, "obsync");
+    f.onDisk.hello = { id: "hello" };
+    f.files.set(".obsidian/community-plugins.json", JSON.stringify(["obsync", "hello"]));
+    hooks.afterApply(".obsidian/community-plugins.json", "put");
+    await flush();
+    await flush();
+    expect(f.loaded.hello).toBeDefined();
+    f.files.set(".obsidian/community-plugins.json", JSON.stringify(["obsync"]));
+    hooks.afterApply(".obsidian/community-plugins.json", "put");
+    await flush();
+    await flush();
+    expect(f.calls).toEqual(["enable:hello", "disable:hello"]);
+    expect(f.loaded.hello).toBeUndefined();
+    expect(f.enabled.has("hello")).toBe(false);
   });
 
   it("leaves a plugin alone when the vault list has not synced yet, without a restart notice", async () => {
@@ -105,7 +133,7 @@ describe("plugin hooks on mobile", () => {
     const f = fakeApp();
     const hooks = new ConfigHooks(f.app as never, "obsync");
     f.onDisk.hello = { id: "hello" };
-    f.enabled.add("hello");
+    f.loaded.hello = {}; // loaded by Obsidian at startup from the synced list
     hooks.afterApply(".obsidian/plugins/hello/main.js", "put");
     await vi.advanceTimersByTimeAsync(2500);
     expect(f.calls).toEqual(["disable:hello", "enable:hello"]);

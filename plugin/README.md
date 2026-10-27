@@ -9,8 +9,9 @@ Pairs with the `obsync` server in `../server`. Design and rationale are in
 
 1. Run the server once (see `../server/README.md`). Note the admin token it
    prints (also saved to `<data>/admin-token`) and the URL it serves on.
-   Plain `http://` is fine on a desktop or a LAN; mobile needs HTTPS with a
-   real certificate, and `--acme-domain` does that for you.
+   Plain `http://` is fine on a desktop or a LAN (the Android app accepts it
+   too); anything reachable from the internet should use HTTPS with a real
+   certificate, and `--acme-domain` does that for you.
 2. Install the plugin: copy `main.js`, `manifest.json` and `styles.css` into
    `<vault>/.obsidian/plugins/obsync/`, restart Obsidian, and under
    Settings → Community plugins turn off Restricted mode and enable
@@ -172,12 +173,38 @@ uses only WebCrypto, `fetch`, `WebSocket`, `CompressionStream` (feature
 detected, optional), and the Obsidian `vault`/`adapter` API. Timestamps are
 floored before every write because Capacitor casts them to a Java `long`.
 Config-folder changes are found by a 15-second scan rather than the
-desktop-only `raw` event. Mobile needs HTTPS with a certificate the OS
-trusts; use the server's `--acme-domain` or a proxy.
+desktop-only `raw` event, so a setting or plugin change from another device
+shows up on a phone within about 20 seconds rather than instantly.
 
-It has **not** been run on iOS or Android by the authors. Everything above
-is verified on desktop Linux inside real Obsidian; mobile is verified only
-by inspection. Treat the first mobile install as a test and keep a backup.
+Run on Android on 2026-10-27 (`docs/MOBILE-TEST-PROMPT.md`, all twelve
+scenarios): Obsidian 1.14.4, the official APK, on an Android 14 emulator
+(API 34 Google APIs x86_64 under KVM, 4 GB), with a real desktop Obsidian
+1.14.4 peer and the real server. What passed as shipped: join with an
+invite link (default device name `android`, rename to `phone` visible on the
+desktop roster), notes and attachments both ways byte for byte (a
+non-ASCII name, an 8 MB file, an empty file), `app.json` changes in both
+directions with no conflict copy, `workspace-mobile.json` never synced,
+Home/resume and force-stop/relaunch, airplane mode (the edit arrived 2.4 s
+after reconnecting), concurrent edits (non-overlapping merged; overlapping
+gave exactly one `(conflict phone …)` sibling, no dialog), PIN protection
+(the keychain option is shown as unavailable; wrong PIN refused, right PIN
+resumes), removal from the desktop (the phone shows the removed message,
+stops, stays removed across a relaunch, rejoins with a new link), the
+recovery passphrase (a wrong one is refused), no crash in `logcat`, and an
+8 MB attachment adding 8.4 MB to the app's PSS. What needed fixing, all on
+branch work from that run: a community plugin enabled on the desktop was
+not enabled on the phone until the list changed again (op order), a
+desktop-only plugin was skipped without a word, reloading obsync itself
+(what Obsidian's plugin updater does) could wipe the sync state, and one
+recovery-passphrase rejoin wrote a note as 0 bytes once, which did not
+reproduce and is now caught by a size check after every write.
+
+Plain `http://` worked from the Android app: its WebView serves Obsidian
+from `http://localhost`, so a cleartext server is neither blocked nor
+mixed content. Use HTTPS (`--acme-domain` or a proxy) for anything that
+leaves your network all the same; the device token travels in the clear
+otherwise. Not run: iOS, a physical phone, HTTPS from a phone. Treat the
+first install on your own device as a test and keep a backup.
 
 ## Development
 
@@ -234,5 +261,11 @@ Three layers of tests:
   the only `require`s are `obsidian` and one `os.hostname()` behind
   `Platform.isMobile` and a `try`, Node globals appear only behind feature
   checks, I/O and crypto are `fetch`, `WebSocket` and WebCrypto. This is the
-  part of iOS/Android support provable without a device; a run on a real
-  phone has not been done.
+  part of iOS/Android support provable without a device; the Android
+  emulator run is described under "Mobile status".
+- **Mobile hooks and adapters** (`test/hooks-mobile.test.ts`,
+  `test/obsidian-fs-write.test.ts`, `test/state-store.test.ts`): what the
+  Android run found, pinned against a stub of the `obsidian` package
+  (`test/stubs/obsidian.ts`, aliased in `vitest.config.ts`): plugin enabling
+  regardless of op order, the desktop-only notice, write-size verification,
+  and loading state while a save is in flight.

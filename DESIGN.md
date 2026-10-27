@@ -19,9 +19,26 @@ multi-device histories are checked for convergence and no loss (§8,
 `docs/CONFLICT-RECOVERY-MATRIX.md`). The full gate, real Obsidian included,
 runs on Linux, macOS and Windows in GitHub Actions on every push, and a
 Windows-specific suite covers NTFS names, case, long paths, DPAPI, file
-locks and CRLF. Not done: any run on
-an actual iOS or Android device, and a security review by a human
-specialist. Each component's README has the operational
+locks and CRLF. On 2026-10-27 the plugin was run on Android for the first
+time, following `docs/MOBILE-TEST-PROMPT.md`: Obsidian 1.14.4 (official
+APK) on an Android 14 emulator (API 34 Google APIs x86_64 under KVM; no
+physical phone) against a real desktop Obsidian 1.14.4 peer and the real
+server, over plain `http://` (the Android WebView accepted it; HTTPS was
+not needed and not exercised). All twelve scenarios ran: join, rename,
+content both ways including non-ASCII names, an 8 MB attachment and an
+empty file, `app.json` sync without conflicts, backgrounding and
+force-stop, airplane mode, concurrent edits with one conflict sibling, PIN
+protection across a relaunch, removal and rejoin, recovery-passphrase
+join, plugin sync, crash check and memory. Eleven passed as shipped;
+plugin sync passed after two fixes (a synced plugin whose files arrive
+after `community-plugins.json` was not enabled, and a desktop-only plugin
+was skipped silently). Two more fixes came out of the run: a plugin reload
+(the path Obsidian's updater takes) raced the final state flush and wiped
+the sync state, and one recovery-passphrase rejoin left a 0-byte note
+once, unreproduced, so every write's size is now verified. The mobile note
+in `plugin/README.md` has the details. Not done: iOS, a physical Android
+device, HTTPS from a phone, and a security review by a human specialist.
+Each component's README has the operational
 details and how to run each suite.
 
 One rule was added during real-Obsidian testing: a device that has never

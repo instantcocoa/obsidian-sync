@@ -5,7 +5,7 @@ import { resolve } from "node:path";
 
 export default function setup() {
   const serverDir = resolve(__dirname, "../../server");
-  const out = resolve(__dirname, "../.cache/obsync-server");
+  const out = resolve(__dirname, "../.cache/obsync-server" + (process.platform === "win32" ? ".exe" : ""));
   mkdirSync(resolve(__dirname, "../.cache"), { recursive: true });
   execSync(`go build -o ${JSON.stringify(out)} ./cmd/obsync`, { cwd: serverDir, stdio: "inherit" });
   process.env.OBSYNC_SERVER_BIN = out;

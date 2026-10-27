@@ -69,7 +69,9 @@ export class ObsidianInstance {
       `--remote-debugging-port=${o.port}`,
       `obsidian://open?path=${encodeURIComponent(o.vault)}`,
     ];
-    const useXvfb = !process.env.DISPLAY && !process.env.WAYLAND_DISPLAY;
+    // macOS and Windows always have a desktop session for a GUI process; only
+    // a display-less Linux needs a virtual X server.
+    const useXvfb = process.platform === "linux" && !process.env.DISPLAY && !process.env.WAYLAND_DISPLAY;
     if (useXvfb && !XVFB) throw new Error("no DISPLAY and XVFB_RUN not set");
     const cmd = useXvfb ? XVFB! : OBSIDIAN_BIN;
     const cmdArgs = useXvfb ? ["-a", "-s", "-screen 0 1280x800x24", OBSIDIAN_BIN, ...args] : args;
@@ -231,6 +233,10 @@ export class ObsidianInstance {
       await this.browser?.close();
     } catch {
       /* ignore */
+    }
+    if (process.platform === "win32" && this.proc.pid) {
+      // No process groups on Windows: kill the tree explicitly.
+      spawn("taskkill", ["/pid", String(this.proc.pid), "/T", "/F"], { stdio: "ignore" });
     }
     try {
       if (this.proc.pid) process.kill(-this.proc.pid, "SIGTERM");

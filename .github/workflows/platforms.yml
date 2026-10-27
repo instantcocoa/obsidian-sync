@@ -1,0 +1,89 @@
+# Full gate on every push, on all three desktop platforms, including the
+# suites that drive real Obsidian. GitHub's macOS and Windows runners have a
+# desktop session, so Obsidian opens windows there; Linux uses xvfb.
+name: platforms
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  OBSIDIAN_VERSION: 1.14.5
+
+jobs:
+  server:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: server/go.mod
+      - run: go test ./...
+        working-directory: server
+
+  plugin:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-14, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: server/go.mod
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: plugin/package-lock.json
+      - run: npm ci
+        working-directory: plugin
+
+      - name: Install Obsidian (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          curl -fsSL -o /tmp/obsidian.deb "https://github.com/obsidianmd/obsidian-releases/releases/download/v${OBSIDIAN_VERSION}/obsidian_${OBSIDIAN_VERSION}_amd64.deb"
+          sudo apt-get update -q
+          sudo apt-get install -y -q ./obsidian.deb xvfb libasound2t64 || sudo apt-get install -y -q /tmp/obsidian.deb xvfb libasound2t64
+          echo "OBSIDIAN_BIN=/opt/Obsidian/obsidian" >> "$GITHUB_ENV"
+          echo "XVFB_RUN=$(which xvfb-run)" >> "$GITHUB_ENV"
+
+      - name: Install Obsidian (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          curl -fsSL -o /tmp/obsidian.dmg "https://github.com/obsidianmd/obsidian-releases/releases/download/v${OBSIDIAN_VERSION}/Obsidian-${OBSIDIAN_VERSION}.dmg"
+          hdiutil attach /tmp/obsidian.dmg -nobrowse -mountpoint /tmp/obsidian-dmg
+          cp -R /tmp/obsidian-dmg/Obsidian.app /Applications/
+          hdiutil detach /tmp/obsidian-dmg
+          xattr -dr com.apple.quarantine /Applications/Obsidian.app || true
+          echo "OBSIDIAN_BIN=/Applications/Obsidian.app/Contents/MacOS/Obsidian" >> "$GITHUB_ENV"
+
+      - name: Install Obsidian (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $url = "https://github.com/obsidianmd/obsidian-releases/releases/download/v$env:OBSIDIAN_VERSION/Obsidian-$env:OBSIDIAN_VERSION.exe"
+          Invoke-WebRequest -Uri $url -OutFile "$env:TEMP\obsidian-setup.exe"
+          Start-Process -Wait -FilePath "$env:TEMP\obsidian-setup.exe" -ArgumentList "/S"
+          $exe = Get-ChildItem -Path "$env:LOCALAPPDATA" -Recurse -Filter "Obsidian.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $exe) { throw "Obsidian.exe not found after install" }
+          "OBSIDIAN_BIN=$($exe.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Typecheck and build
+        run: npm run check && npm run build
+        working-directory: plugin
+
+      - name: Full plugin gate (unit, Node e2e, conflict/recovery, convergence, real Obsidian)
+        run: npx vitest run
+        working-directory: plugin
+
+      - name: Keep Obsidian logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: obsidian-e2e-${{ matrix.os }}
+          path: plugin/.cache/obsidian-e2e/**/state/user-data/logs/**
+          if-no-files-found: ignore

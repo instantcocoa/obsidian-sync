@@ -10,7 +10,7 @@
  * `community-plugins.json`, the `enable-plugin-<id>` localStorage flag) is
  * the one LiveSync's e2e suite uses via @vrtmrz/obsidian-test-session.
  */
-import { spawn, type ChildProcess } from "node:child_process";
+import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { mkdirSync, writeFileSync, copyFileSync, rmSync, existsSync, promises as fsp } from "node:fs";
 import { join, resolve } from "node:path";
 import { createServer } from "node:net";
@@ -273,8 +273,10 @@ export class ObsidianInstance {
       /* ignore */
     }
     if (process.platform === "win32" && this.proc.pid) {
-      // No process groups on Windows: kill the tree explicitly.
-      spawn("taskkill", ["/pid", String(this.proc.pid), "/T", "/F"], { stdio: "ignore" });
+      // No process groups on Windows: kill the tree explicitly, and wait so
+      // the vault directory is no longer held open when it is removed.
+      spawnSync("taskkill", ["/pid", String(this.proc.pid), "/T", "/F"], { stdio: "ignore" });
+      await new Promise((r) => setTimeout(r, 1500));
     }
     try {
       if (this.proc.pid) process.kill(-this.proc.pid, "SIGTERM");
@@ -287,6 +289,6 @@ export class ObsidianInstance {
     } catch {
       /* gone */
     }
-    if (!keep) rmSync(resolve(this.vault, ".."), { recursive: true, force: true });
+    if (!keep) rmSync(resolve(this.vault, ".."), { recursive: true, force: true, maxRetries: 5, retryDelay: 500 });
   }
 }

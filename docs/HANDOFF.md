@@ -147,10 +147,12 @@ Obsidian; everything found is fixed and merged:
 
 ## What needs to be done
 
-1. **iOS.** Android is done on an emulator and a real Pixel 7. iOS needs a
-   Mac with Xcode and an iPhone; AWS Device Farm cannot help because App
-   Store apps cannot be uploaded as an IPA. `docs/MOBILE-TEST-PROMPT.md`
-   still applies to the iOS run.
+1. **iOS on a device.** Android is done on an emulator and a real Pixel 7,
+   and the plugin core passes inside a real WebKit engine in CI (the
+   `webkit` job), which is what Obsidian for iOS runs plugins in. What is
+   left is Obsidian's iOS app around it: it needs a Mac with Xcode and an
+   iPhone, because AWS Device Farm cannot run App Store apps.
+   `docs/MOBILE-TEST-PROMPT.md` still applies to that run.
 2. **Human security review.** Hand `docs/SECURITY-REVIEW-GUIDE.md` to a
    specialist. When findings come back, fix them in the style of the
    existing review rounds: a failing test first (`security_test.go` for the

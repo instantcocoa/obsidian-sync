@@ -43,8 +43,12 @@ day: a Google Pixel 7 (Android 14) in AWS Device Farm, driven by Appium,
 installed the APK, opened a vault, enabled the plugin, joined with an
 invite link over plain http, and synced notes, a non-ASCII name, an empty
 file and an 8 MB attachment both ways, with reconnects after
-backgrounding and a force-stop, twice on two units. Not done: iOS, HTTPS
-from a phone, and a security review by a human specialist.
+backgrounding and a force-stop, twice on two units. The plugin's core also runs
+inside a real WebKit engine in CI (`plugin/test/webkit.test.ts`: crypto
+vectors, a two-engine sync round trip with a conflict, the WebSocket live
+channel), which is the engine Obsidian for iOS runs plugins in. Not done:
+Obsidian's iOS app itself on an iPhone, HTTPS from a phone, and a
+security review by a human specialist.
 Each component's README has the operational
 details and how to run each suite.
 

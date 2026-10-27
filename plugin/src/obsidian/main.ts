@@ -53,6 +53,10 @@ interface Settings {
   debounceMs: number;
 }
 
+/** Where an unloading instance leaves its engine's stop promise for the next one (see onunload). */
+const STOPPING = "__obsyncStopping";
+type HandoffGlobal = { [STOPPING]?: Promise<void> };
+
 const DEFAULT_SETTINGS: Settings = {
   identity: null,
   sealed: null,
@@ -133,8 +137,14 @@ export default class ObsyncPlugin extends Plugin {
   }
 
   override async onunload(): Promise<void> {
-    await this.engine?.stop();
+    // Obsidian does not wait for this. A reload (or an update) constructs
+    // the next instance while this engine is still flushing state.json;
+    // leave the stop promise where that instance can wait for it, or its
+    // loadState() reads a file mid-rename and the engine never starts.
+    const stopping = this.engine?.stop() ?? Promise.resolve();
     this.engine = null;
+    (globalThis as HandoffGlobal)[STOPPING] = stopping;
+    await stopping;
   }
 
   // ---------- settings ----------
@@ -255,6 +265,12 @@ export default class ObsyncPlugin extends Plugin {
 
   async startEngine(): Promise<void> {
     if (this.engine || !this.settings.identity) return;
+    const prev = (globalThis as HandoffGlobal)[STOPPING];
+    if (prev) {
+      await prev.catch(() => {});
+      delete (globalThis as HandoffGlobal)[STOPPING];
+      if (this.engine) return;
+    }
     const identity = this.settings.identity;
     this.session = openSession(identity);
     const fs = new ObsidianFS(this.app);

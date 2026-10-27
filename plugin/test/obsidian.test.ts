@@ -138,6 +138,20 @@ describe.skipIf(!OBSIDIAN_BIN)("inside real Obsidian", () => {
     expect(await b.waitForGone(sibling)).toBe(true);
   }, 150_000);
 
+  it("a plugin reload (update, disable/enable) hands the engine over: the new one starts and syncs", async () => {
+    // Obsidian does not await onunload. Without the stop-promise handoff the
+    // new engine read state.json mid-rename and came up constructed but never
+    // started: no timers, no live channel, cursor 0, nothing ever synced.
+    await a.eval(async (_p, app) => {
+      await app.plugins.disablePlugin("obsync");
+      await app.plugins.enablePlugin("obsync");
+    });
+    expect(await a.waitFor(() => Boolean((globalThis as any).app.plugins.plugins.obsync?.engine?.pollTimer), 20_000)).toBe(true);
+    expect(await a.eval((plugin) => plugin.engine.state.cursor)).toBeGreaterThan(0);
+    await b.eval((_p, app) => app.vault.create("After reload.md", "survived the reload\n"));
+    expect(await a.waitForFile("After reload.md", "survived the reload\n")).not.toBeNull();
+  }, 60_000);
+
   it("recovery passphrase: B leaves, then rejoins with only server, vault id and passphrase", async () => {
     await a.eval((plugin) => plugin.setRecovery("correct horse battery staple"));
     await b.eval((plugin) => plugin.leaveVault());

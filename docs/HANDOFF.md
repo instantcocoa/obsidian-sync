@@ -128,9 +128,9 @@ Obsidian; everything found is fixed and merged:
   11/12 as shipped, plugin sync fixed, reload race fixed, write size
   verified; plain http works from the WebView.
 - GitHub Actions (`.github/workflows/platforms.yml`) runs the full gate on
-  ubuntu, macos-14 and windows on every push. Linux and Windows pass; the
-  macOS job hung before the macOS harness fixes were merged, so check the
-  first run after `9704a4d`.
+  ubuntu, macos-14 and windows on every push, real Obsidian included. All
+  four jobs are green from commit `7cb5086` on (the first runs needed the
+  macOS harness fixes and two timing-tolerant tests).
 - Reports with verbatim evidence: `plugin/.cache/agent-{win,mac,android}/REPORT.md`
   on the original machine (gitignored).
 

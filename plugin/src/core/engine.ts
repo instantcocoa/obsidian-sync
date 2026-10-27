@@ -231,7 +231,18 @@ export class Engine {
   // ----- state persistence -----
 
   private async loadState(): Promise<void> {
-    const raw = await this.store.load();
+    let raw: string | null = null;
+    try {
+      raw = await this.store.load();
+    } catch (e) {
+      // Obsidian does not await onunload, so a plugin reload can read the
+      // state file while the previous instance's final flush is still
+      // replacing it (seen with OS-keychain protection, whose unlock needs no
+      // user input: the new engine started and died here, leaving the vault
+      // without a live channel until the next Obsidian restart). State is a
+      // cache: start empty and rescan.
+      this.log("warn", "state.json could not be read; rescanning", e);
+    }
     if (raw) {
       try {
         const s = JSON.parse(raw) as State;

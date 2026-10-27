@@ -144,7 +144,25 @@ export class ObsidianFS implements VaultFS {
     if (f instanceof TFile) return { path, size: f.stat.size, mtime: Math.floor(f.stat.mtime) };
     const st = await this.app.vault.adapter.stat(path).catch(() => null);
     if (!st || st.type !== "file") return null;
+    // On a case-insensitive volume (Windows, macOS) the adapter answers for
+    // "note.md" with the stat of "Note.md". The engine keys files by exact
+    // name, so that answer would make a case-only rename look like a new
+    // file beside a surviving old one, and a remote case twin look like a
+    // local edit of the other file. Only an exact-name entry counts.
+    if (!(await this.exactName(path))) return null;
     return { path, size: st.size, mtime: Math.floor(st.mtime) };
+  }
+
+  /** Does an entry with exactly this name (case and all) exist in its folder? */
+  private async exactName(path: string): Promise<boolean> {
+    const i = path.lastIndexOf("/");
+    const dir = i < 0 ? "" : path.slice(0, i);
+    try {
+      const l = await this.app.vault.adapter.list(dir);
+      return l.files.some((f) => normalizePath(f) === path);
+    } catch {
+      return false;
+    }
   }
 
   async read(path: string): Promise<Uint8Array> {

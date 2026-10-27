@@ -3,8 +3,10 @@
  *
  * - Text: conservative three-way merge (diff3). Non-overlapping hunks merge;
  *   any overlap means "no clean merge" and the caller makes a sibling copy.
- *   Line endings and a BOM are preserved verbatim because we split on "\n"
- *   and leave "\r" attached.
+ *   Lines are compared without their line ending, so a side that re-saved
+ *   the file with the other convention (CRLF on Windows, LF elsewhere) has
+ *   not changed every line. The merge is written with one convention: the
+ *   side that changed it, else the base's. A BOM is preserved verbatim.
  * - JSON (anything under $CONFIG ending in .json, and .canvas): key-level
  *   three-way merge. A key changed on one side only takes that side; the
  *   same key changed on both sides to different values is a conflict.
@@ -20,16 +22,24 @@ export interface MergeResult {
 
 export function mergeText(base: Uint8Array, local: Uint8Array, remote: Uint8Array): MergeResult {
   if (!isValidUtf8(base) || !isValidUtf8(local) || !isValidUtf8(remote)) return { ok: false };
-  const b = fromUtf8(base).split("\n");
-  const l = fromUtf8(local).split("\n");
-  const r = fromUtf8(remote).split("\n");
-  const regions = diff3Merge(l, b, r, { excludeFalseConflicts: true, stringSeparator: "\n" });
+  const [bs, ls, rs] = [fromUtf8(base), fromUtf8(local), fromUtf8(remote)];
+  const lines = (s: string) => s.split("\n").map((x) => (x.endsWith("\r") ? x.slice(0, -1) : x));
+  const regions = diff3Merge(lines(ls), lines(bs), lines(rs), { excludeFalseConflicts: true, stringSeparator: "\n" });
   const out: string[] = [];
   for (const reg of regions) {
     if (reg.ok) out.push(...reg.ok);
     else return { ok: false };
   }
-  return { ok: true, merged: utf8(out.join("\n")) };
+  const [be, le, re] = [eol(bs), eol(ls), eol(rs)];
+  const sep = le !== be ? le : re !== be ? re : be;
+  return { ok: true, merged: utf8(out.join(sep)) };
+}
+
+/** The file's dominant line ending ("\r\n" or "\n"); LF for a file without one. */
+function eol(s: string): string {
+  const crlf = s.split("\r\n").length - 1;
+  const lf = s.split("\n").length - 1 - crlf;
+  return crlf > lf ? "\r\n" : "\n";
 }
 
 type Json = null | boolean | number | string | Json[] | { [k: string]: Json };

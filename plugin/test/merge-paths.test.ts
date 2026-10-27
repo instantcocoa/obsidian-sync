@@ -14,6 +14,18 @@ describe("mergeText", () => {
     expect(m.ok).toBe(true);
     expect(fromUtf8(m.merged!)).toBe("﻿A\r\nb\r\nc\r\nD\r\n");
   });
+  it("a side that re-saved with the other line ending has not changed every line", () => {
+    // Windows edits line 3 and keeps CRLF; Linux rewrites the file with LF and edits line 1.
+    const m = mergeText(t("one\r\ntwo\r\nthree\r\n"), t("one (linux)\ntwo\nthree\n"), t("one\r\ntwo\r\nthree (win)\r\n"));
+    expect(m.ok).toBe(true);
+    expect(fromUtf8(m.merged!)).toBe("one (linux)\ntwo\nthree (win)\n"); // the side that changed the convention sets it
+    // Only the remote side changed the convention: the merge follows it.
+    const m2 = mergeText(t("a\nb\nc\n"), t("A\nb\nc\n"), t("a\r\nb\r\nC\r\n"));
+    expect(m2.ok).toBe(true);
+    expect(fromUtf8(m2.merged!)).toBe("A\r\nb\r\nC\r\n");
+    // A real overlap is still a conflict, whatever the endings.
+    expect(mergeText(t("a\r\nb\r\n"), t("a\nB1\n"), t("a\r\nB2\r\n")).ok).toBe(false);
+  });
   it("refuses overlapping edits", () => {
     const m = mergeText(t("a\nb\n"), t("a\nB1\n"), t("a\nB2\n"));
     expect(m.ok).toBe(false);

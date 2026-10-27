@@ -1,5 +1,9 @@
 import { defineConfig } from "vitest/config";
+import { resolve } from "node:path";
 export default defineConfig({
+  // `obsidian` is types only (Obsidian supplies the runtime); unit tests of the
+  // Obsidian-facing modules get a stub instead.
+  resolve: { alias: { obsidian: resolve(__dirname, "test/stubs/obsidian.ts") } },
   test: {
     include: ["test/**/*.test.ts"],
     globalSetup: ["test/global-setup.ts"],

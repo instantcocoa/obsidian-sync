@@ -13,7 +13,10 @@ the §6.5 path validation came out of it) and a first-time-user walkthrough
 that set up two devices from the READMEs alone (24 friction points and one
 bug, all addressed). The shipped bundle is checked statically for mobile
 safety (`plugin/test/bundle-mobile.test.ts`: no Node modules or globals
-outside feature-guarded paths, `isDesktopOnly: false`). Not done: any run on
+outside feature-guarded paths, `isDesktopOnly: false`). Every conflict
+shape and recovery path has a scenario test, and seeded random
+multi-device histories are checked for convergence and no loss (§8,
+`docs/CONFLICT-RECOVERY-MATRIX.md`). Not done: any run on
 an actual iOS or Android device, and a security review by a human
 specialist. Each component's README has the operational
 details and how to run each suite.
@@ -805,8 +808,11 @@ for P is now M ≠ N.
    lower generation" (LiveSync's hidden-file JSON merge does the latter and
    its own spec lists it as unsafe).
 3. Otherwise: keep the server head at P, write local bytes to
-   `P (conflict on <device> 2026-10-08 1432).md` as a new file, and show a
-   notice. Both versions are in the op log forever anyway.
+   `P (conflict <device> 2026-10-08 1432).md` as a new file, and show a
+   notice. Both versions are in the op log forever anyway. The stamp has
+   minute resolution, so a second conflict on the same file within the same
+   minute gets an ordinal (`… 1432 2).md`) instead of overwriting the first
+   copy; a copy with identical bytes is reused rather than duplicated.
 
 Exception: a file under `$CONFIG` that this device has never synced (no base
 at all, which is the state of a device that just joined) takes the vault's
@@ -837,6 +843,46 @@ retried as a whole. Without this, a single bad op would stall every device
 forever. Exclusion patterns match case-insensitively and the config-dir
 alias check folds case and combining marks, because on macOS and Windows
 volumes `Workspace.json` and `plugins/Obsync/` are the excluded paths.
+
+### 6.8 Restored server
+
+An operator who restores the server from a backup (DB file plus blob
+directory, see `server/README.md`) rewinds the op log. Devices that synced
+after the backup hold versions the server has forgotten, and the server now
+hands out sequence numbers those devices have already consumed. Left alone,
+a device would see "nothing new" forever and never re-push, and a device
+that was behind would apply old ops under numbers it had already passed.
+
+Detection is by identity, not by number: every feed carries the `op_id` at
+the cursor (`cursor_op_id`), the client stores it beside its cursor and
+sends it back as `expect`; the server answers `rewound: true` when the op
+at that sequence is not the one the client saw (or no longer exists). A
+restore that happens to have re-issued exactly the same count of ops is
+therefore still caught. Feeds also carry the vault's `seq` for the cheap
+case.
+
+Reconciliation (`Engine.recoverFromRewind`) compares every state entry with
+the server's current heads and uses the server's own timestamps, which it
+stores per entry as `at`:
+
+- the entry matches the head: nothing to do;
+- the server's history for the path contains the version the device last
+  synced: the server moved on after the restore, so the head is applied
+  through the ordinary rules (a later local edit merges or becomes a
+  sibling);
+- the server has never seen that version and its head is older than the
+  device's sync: the device's copy is the newer one, so it is rebased on
+  the head and pushed again, which re-uploads any blob the restore lost;
+- the server has never seen that version and its head is newer (another
+  device wrote the path after the restore): a genuine concurrent edit, so
+  the local copy becomes a conflict sibling and the head is applied;
+- the path is unknown to the server: pushed as a new file.
+
+Then the cursor resets and a snapshot pull plus the usual push finish the
+job. Nothing is written to disk by the reconciliation itself; every
+outcome goes through §6.5 and §6.6, so the "nothing is lost" guarantee
+holds across a restore. `plugin/test/conflict-recovery.test.ts` rows 21 and
+22 exercise both the simple case and the concurrent one.
 
 ### 6.7 Mobile
 
@@ -937,6 +983,14 @@ repaired on the next loop and the reload is idempotent.
 - **One scan rebuilds everything.** Delete `state.json` on any device and the
   next start reconciles correctly by hashing. There is no "rebuild database"
   or flag-file workflow because there is no database to rebuild.
+- **A restored server is noticed, not trusted.** The feed names the op at
+  the cursor; a mismatch triggers reconciliation (§6.8) instead of silence.
+- **Proven, not argued.** `plugin/test/conflict-recovery.test.ts` runs one
+  scenario per conflict shape and recovery path (31 of them, listed in
+  `docs/CONFLICT-RECOVERY-MATRIX.md`); `plugin/test/convergence.test.ts`
+  runs seeded random multi-device histories with restarts, crashes, state
+  loss and server outages and checks convergence and that no last write is
+  ever lost.
 
 ---
 

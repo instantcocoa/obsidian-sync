@@ -142,7 +142,12 @@ export function isJsonPath(path: string): boolean {
 }
 
 /** `notes/a.md` → `notes/a (conflict laptop 2026-10-08 1432).md` */
-export function conflictPath(path: string, device: string, when = new Date()): string {
+/**
+ * Name of the conflict sibling for `path`. `n` > 1 adds an ordinal so a
+ * second conflict on the same file in the same minute gets its own file
+ * instead of overwriting the first copy.
+ */
+export function conflictPath(path: string, device: string, when = new Date(), n = 1): string {
   const dir = path.includes("/") ? path.slice(0, path.lastIndexOf("/") + 1) : "";
   const base = path.slice(dir.length);
   const dot = base.lastIndexOf(".");
@@ -151,10 +156,11 @@ export function conflictPath(path: string, device: string, when = new Date()): s
   const pad = (n: number) => String(n).padStart(2, "0");
   const stamp = `${when.getFullYear()}-${pad(when.getMonth() + 1)}-${pad(when.getDate())} ${pad(when.getHours())}${pad(when.getMinutes())}`;
   const safeDev = device.replace(/[\\/:*?"<>|]/g, "_").slice(0, 32) || "device";
-  return `${dir}${stem} (conflict ${safeDev} ${stamp})${ext}`;
+  const ord = n > 1 ? ` ${n}` : "";
+  return `${dir}${stem} (conflict ${safeDev} ${stamp}${ord})${ext}`;
 }
 
-export const CONFLICT_RE = / \(conflict [^()]* \d{4}-\d{2}-\d{2} \d{4}\)(\.[^.]+)?$/;
+export const CONFLICT_RE = / \(conflict [^()]* \d{4}-\d{2}-\d{2} \d{4}( \d+)?\)(\.[^.]+)?$/;
 
 /** Path components over 255 UTF-8 bytes fail on Android/Linux (DESIGN.md §1.5). */
 export function overlongComponents(path: string): string[] {

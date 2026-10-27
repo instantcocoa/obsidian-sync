@@ -32,6 +32,22 @@ per minute (default 10, burst 2N; `-1` disables, for tests). Behind a reverse
 proxy pass `--trust-proxy` so the limiter keys on `X-Forwarded-For`; without
 it every client would share the proxy's address.
 
+## Backup and restore
+
+Everything lives under `--data`: `db.sqlite` (op log, heads, devices,
+keybox) and `blobs/` (encrypted content, content-addressed). Back up both
+together, with the server stopped or with SQLite's online backup
+(`sqlite3 db.sqlite ".backup /path/db.sqlite"`) followed by a copy of
+`blobs/`. The server holds no keys, so a backup is ciphertext and can sit
+anywhere.
+
+Restoring an older backup is safe for the devices: each one notices that the
+op at its cursor is no longer the one it saw (`cursor_op_id` / `expect` on
+the changes feed) and reconciles against the restored heads. Versions the
+restore forgot are pushed back by whichever device still holds them, blobs
+included; a version written by another device after the restore is kept as
+a conflict copy rather than overwritten. See `DESIGN.md` §6.8.
+
 ```sh
 ./obsync vault create --data /var/lib/obsync   # prints the vault id
 ./obsync vault list   --data /var/lib/obsync

@@ -10,6 +10,13 @@ import * as nodePath from "node:path";
 export class NodeFS implements VaultFS {
   readonly configDir: string;
   private watchers: FSWatcher[] = [];
+  /**
+   * NFC path -> the name actually on disk, for files whose on-disk name is
+   * not NFC (a vault copied from a Mac keeps NFD names on Linux). Every
+   * path the engine sees is NFC; this map keeps reads and writes going to
+   * the existing file instead of creating an NFC twin beside it.
+   */
+  private raw = new Map<string, string>();
 
   constructor(
     public readonly root: string,
@@ -19,6 +26,7 @@ export class NodeFS implements VaultFS {
   }
 
   private abs(p: string): string {
+    p = this.raw.get(p) ?? p;
     // Defence in depth: the engine validates paths, but the file layer must
     // never step outside the vault root whatever it is handed.
     const abs = nodePath.resolve(this.root, ...p.split("/"));
@@ -38,7 +46,9 @@ export class NodeFS implements VaultFS {
           // Files can vanish between readdir and stat (editor temp files,
           // our own atomic renames). They are simply not part of this listing.
           const st = await fsp.stat(this.abs(p)).catch(() => null);
-          if (st) out.push({ path: p.normalize("NFC"), size: st.size, mtime: Math.floor(st.mtimeMs) });
+          const nfc = p.normalize("NFC");
+          if (nfc !== p) this.raw.set(nfc, p);
+          if (st) out.push({ path: nfc, size: st.size, mtime: Math.floor(st.mtimeMs) });
         }
       }
     };

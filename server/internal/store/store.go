@@ -871,6 +871,23 @@ type OpResult struct {
 	Seq      int64  `json:"seq,omitempty"`
 	Conflict *Op    `json:"conflict,omitempty"`
 	Error    string `json:"error,omitempty"`
+	// CreatedAt is the server's timestamp for an accepted op. Clients keep
+	// it so that, after a server restore, "which side is newer" is decided
+	// on one clock (DESIGN.md §6.8).
+	CreatedAt int64 `json:"created_at,omitempty"`
+}
+
+// OpIDAt returns the op_id stored at seq, or "" when no such op exists. A
+// client passes the id it last saw with its cursor; a mismatch means the
+// log was restored from a backup and the sequence numbers no longer mean
+// what the client thinks.
+func (s *Store) OpIDAt(ctx context.Context, vault string, seq int64) (string, error) {
+	var id string
+	err := s.db.QueryRowContext(ctx, `SELECT op_id FROM ops WHERE vault_id=? AND seq=?`, vault, seq).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	return id, err
 }
 
 const opCols = `seq, op_id, device_id, path_id, blob_id, meta_enc, meta_epoch, base_seq, created_at`
@@ -938,10 +955,11 @@ func (s *Store) AppendOps(ctx context.Context, vault, device string, ops []Op) (
 				continue
 			}
 			// Idempotent replay.
-			var existing int64
-			err := tx.QueryRowContext(ctx, `SELECT seq FROM ops WHERE vault_id=? AND op_id=?`, vault, o.OpID).Scan(&existing)
+			var existing, existingAt int64
+			err := tx.QueryRowContext(ctx, `SELECT seq, created_at FROM ops WHERE vault_id=? AND op_id=?`, vault, o.OpID).Scan(&existing, &existingAt)
 			if err == nil {
 				results[i].Seq = existing
+				results[i].CreatedAt = existingAt
 				continue
 			} else if !errors.Is(err, sql.ErrNoRows) {
 				return err
@@ -979,11 +997,13 @@ func (s *Store) AppendOps(ctx context.Context, vault, device string, ops []Op) (
 				}
 			}
 			seq++
+			ts := now()
 			if _, err := tx.ExecContext(ctx,
 				`INSERT INTO ops(vault_id, seq, op_id, device_id, path_id, blob_id, meta_enc, meta_epoch, base_seq, created_at) VALUES(?,?,?,?,?,?,?,?,?,?)`,
-				vault, seq, o.OpID, device, o.PathID, o.BlobID, o.MetaEnc, o.MetaEpoch, o.BaseSeq, now()); err != nil {
+				vault, seq, o.OpID, device, o.PathID, o.BlobID, o.MetaEnc, o.MetaEpoch, o.BaseSeq, ts); err != nil {
 				return err
 			}
+			results[i].CreatedAt = ts
 			if _, err := tx.ExecContext(ctx,
 				`INSERT INTO heads(vault_id, path_id, seq) VALUES(?,?,?) ON CONFLICT(vault_id, path_id) DO UPDATE SET seq=excluded.seq`,
 				vault, o.PathID, seq); err != nil {

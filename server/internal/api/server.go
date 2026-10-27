@@ -612,6 +612,14 @@ type feedResponse struct {
 	Epoch    int64      `json:"epoch"`
 	MinEpoch int64      `json:"min_epoch"`
 	Cursor   int64      `json:"cursor"`
+	// Seq is the vault's head sequence. A client whose cursor is above it
+	// knows the server was restored from a backup and reconciles (DESIGN §6.8).
+	Seq int64 `json:"seq"`
+	// CursorOpID is the op_id at Cursor; the client sends it back as
+	// `expect` so a restore that happens to have re-issued the same
+	// sequence numbers is still detected. Rewound reports that mismatch.
+	CursorOpID string `json:"cursor_op_id,omitempty"`
+	Rewound    bool   `json:"rewound,omitempty"`
 	Ops      []store.Op `json:"ops"`
 	More     bool       `json:"more"`
 }
@@ -628,12 +636,18 @@ func (s *Server) snapshot(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, feedResponse{Epoch: vault.Epoch, MinEpoch: vault.MinEpoch, Cursor: vault.Seq, Ops: ops})
+	cursorOp, err := s.st.OpIDAt(r.Context(), v, vault.Seq)
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, feedResponse{Epoch: vault.Epoch, MinEpoch: vault.MinEpoch, Cursor: vault.Seq, Seq: vault.Seq, CursorOpID: cursorOp, Ops: ops})
 }
 
 func (s *Server) changes(w http.ResponseWriter, r *http.Request) {
 	v := r.PathValue("v")
 	since := qInt(r, "since", 0)
+	expect := r.URL.Query().Get("expect")
 	limit := int(qInt(r, "limit", int64(s.cfg.ChangesLimit)))
 	if limit <= 0 || limit > s.cfg.ChangesLimit {
 		limit = s.cfg.ChangesLimit
@@ -659,6 +673,23 @@ func (s *Server) changes(w http.ResponseWriter, r *http.Request) {
 			s.fail(w, err)
 			return
 		}
+		if since > 0 && expect != "" {
+			// The client names the op it believes sits at its cursor. If the
+			// log no longer agrees, the server was restored from a backup:
+			// say so instead of feeding ops whose numbers collide with ones
+			// the client already applied.
+			id, err := s.st.OpIDAt(r.Context(), v, since)
+			if err != nil {
+				unsub()
+				s.fail(w, err)
+				return
+			}
+			if id != expect {
+				unsub()
+				writeJSON(w, http.StatusOK, feedResponse{Epoch: vault.Epoch, MinEpoch: vault.MinEpoch, Cursor: since, Seq: vault.Seq, Rewound: true, Ops: []store.Op{}})
+				return
+			}
+		}
 		remaining := time.Until(deadline)
 		if len(ops) > 0 || remaining <= 0 {
 			unsub()
@@ -672,10 +703,12 @@ func (s *Server) changes(w http.ResponseWriter, r *http.Request) {
 				ops = ops[:limit]
 			}
 			cursor := since
+			cursorOp := ""
 			if len(ops) > 0 {
 				cursor = ops[len(ops)-1].Seq
+				cursorOp = ops[len(ops)-1].OpID
 			}
-			writeJSON(w, http.StatusOK, feedResponse{Epoch: vault.Epoch, MinEpoch: vault.MinEpoch, Cursor: cursor, Ops: ops, More: more})
+			writeJSON(w, http.StatusOK, feedResponse{Epoch: vault.Epoch, MinEpoch: vault.MinEpoch, Cursor: cursor, Seq: vault.Seq, CursorOpID: cursorOp, Ops: ops, More: more})
 			return
 		}
 		t := time.NewTimer(remaining)

@@ -163,11 +163,14 @@ type opsOut struct {
 }
 
 type feed struct {
-	Epoch    int64      `json:"epoch"`
-	MinEpoch int64      `json:"min_epoch"`
-	Cursor   int64      `json:"cursor"`
-	Ops      []store.Op `json:"ops"`
-	More     bool       `json:"more"`
+	Epoch      int64      `json:"epoch"`
+	MinEpoch   int64      `json:"min_epoch"`
+	Cursor     int64      `json:"cursor"`
+	Seq        int64      `json:"seq"`
+	CursorOpID string     `json:"cursor_op_id"`
+	Rewound    bool       `json:"rewound"`
+	Ops        []store.Op `json:"ops"`
+	More       bool       `json:"more"`
 }
 
 func put(path string, blobID *string, base int64) opIn {
@@ -704,4 +707,53 @@ func TestBlobValidation(t *testing.T) {
 		t.Fatalf("missing: %+v", miss)
 	}
 	e.do("GET", "/v1/vaults/"+vault+"/blobs/"+hexID("nope"), a.token, nil, nil).expect(t, 404)
+}
+
+// A client names the op it believes sits at its cursor. After the operator
+// restores the server from a backup the log is shorter, or has re-issued the
+// same numbers for different ops; either way the feed must say "rewound"
+// instead of pretending nothing happened (DESIGN.md §6.8).
+func TestRestoredLogIsDetected(t *testing.T) {
+	e := newEnv(t)
+	vault, a, _ := e.setup()
+	bid := hexID("blob-r")
+	e.upload(vault, a, bid, blob(1, "x")).expect(t, 201)
+	r1 := e.ops(vault, a, put("r.md", &bid, 0))
+	r2 := e.ops(vault, a, put("s.md", &bid, 0))
+	if r1.Results[0].Seq != 1 || r2.Results[0].Seq != 2 || r2.Results[0].CreatedAt == 0 {
+		t.Fatalf("unexpected results %+v %+v", r1.Results, r2.Results)
+	}
+	op2 := r2.Results[0].OpID
+
+	// The feed reports the vault seq and the op id at the cursor.
+	f := e.changes(vault, a, 0, "")
+	if f.Seq != 2 || f.CursorOpID != op2 || f.Rewound {
+		t.Fatalf("feed %+v", f)
+	}
+	// Right expectation: nothing new, not rewound.
+	f = e.changes(vault, a, 2, "&expect="+op2)
+	if f.Rewound || len(f.Ops) != 0 || f.Seq != 2 {
+		t.Fatalf("feed %+v", f)
+	}
+	// Wrong expectation (the op at seq 2 is not the one the client saw): rewound.
+	f = e.changes(vault, a, 2, "&expect=op-not-this-one")
+	if !f.Rewound || len(f.Ops) != 0 || f.Seq != 2 || f.Cursor != 2 {
+		t.Fatalf("feed %+v", f)
+	}
+	// A cursor beyond the log (the backup was older than the client's view) is rewound too.
+	f = e.changes(vault, a, 5, "&expect="+op2)
+	if !f.Rewound || f.Seq != 2 {
+		t.Fatalf("feed %+v", f)
+	}
+	// Without an expectation the feed still reports seq so an older client can compare.
+	f = e.changes(vault, a, 5, "")
+	if f.Rewound || f.Seq != 2 {
+		t.Fatalf("feed %+v", f)
+	}
+	// Snapshot carries the cursor's op id so a fresh client can start checking at once.
+	var snap feed
+	e.do("GET", "/v1/vaults/"+vault+"/snapshot", a.token, nil, nil).expect(t, 200).json(t, &snap)
+	if snap.Cursor != 2 || snap.CursorOpID != op2 {
+		t.Fatalf("snapshot %+v", snap)
+	}
 }

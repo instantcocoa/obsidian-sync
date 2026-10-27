@@ -4,7 +4,7 @@
  * scenarios without Obsidian.
  */
 import { spawn, type ChildProcess } from "node:child_process";
-import { mkdtempSync, rmSync, promises as fsp } from "node:fs";
+import { cpSync, mkdtempSync, rmSync, promises as fsp } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createServer } from "node:net";
@@ -29,6 +29,7 @@ export class TestServer {
   proc!: ChildProcess;
   url!: string;
   dir!: string;
+  private args: string[] = [];
 
   /** `rateLimit` keeps the production limiter on (the Obsidian suite); the Node suite redeems too many invites for that. */
   static async start(opts: { rateLimit?: boolean } = {}): Promise<TestServer> {
@@ -37,12 +38,18 @@ export class TestServer {
     t.dir = mkdtempSync(join(tmpdir(), "obsync-srv-"));
     const port = await freePort();
     t.url = `http://127.0.0.1:${port}`;
-    t.proc = spawn(bin, ["serve", "--data", t.dir, "--listen", `127.0.0.1:${port}`, "--admin-token", ADMIN, "--gc-interval", "0", "--auth-rate", opts.rateLimit ? "10" : "-1"], { stdio: ["ignore", "ignore", "pipe"] });
+    t.args = ["serve", "--data", t.dir, "--listen", `127.0.0.1:${port}`, "--admin-token", ADMIN, "--gc-interval", "0", "--auth-rate", opts.rateLimit ? "10" : "-1"];
+    await t.launch();
+    return t;
+  }
+
+  private async launch(): Promise<void> {
+    this.proc = spawn(process.env.OBSYNC_SERVER_BIN!, this.args, { stdio: ["ignore", "ignore", "pipe"] });
     let log = "";
-    t.proc.stderr!.on("data", (d) => (log += d));
+    this.proc.stderr!.on("data", (d) => (log += d));
     for (let i = 0; i < 100; i++) {
       try {
-        if ((await fetch(t.url + "/healthz")).ok) return t;
+        if ((await fetch(this.url + "/healthz")).ok) return;
       } catch {
         /* not up yet */
       }
@@ -51,9 +58,47 @@ export class TestServer {
     throw new Error("server did not start: " + log);
   }
 
-  async stop(): Promise<void> {
+  /** Kill the process but keep its data: the "server went away" half of a restart. */
+  async halt(): Promise<void> {
+    if (this.proc.exitCode !== null) return;
     this.proc.kill("SIGTERM");
     await new Promise((r) => this.proc.once("exit", r));
+  }
+
+  /** Bring a halted server back on the same port and data. */
+  async resume(): Promise<void> {
+    await this.launch();
+  }
+
+  async restart(): Promise<void> {
+    await this.halt();
+    await this.resume();
+  }
+
+  /** Copy the data directory (database and blobs) while the server is stopped; returns the copy's path. */
+  async backup(): Promise<string> {
+    await this.halt();
+    const out = mkdtempSync(join(tmpdir(), "obsync-bak-"));
+    cpSync(this.dir, out, { recursive: true });
+    await this.resume();
+    return out;
+  }
+
+  /** Replace the data directory with an earlier backup, the way an operator would after a disk loss. */
+  async restoreFrom(backup: string): Promise<void> {
+    await this.halt();
+    rmSync(this.dir, { recursive: true, force: true });
+    cpSync(backup, this.dir, { recursive: true });
+    await this.resume();
+  }
+
+  /** Delete one blob's file on disk (a lost or corrupted object store entry). */
+  async dropBlob(vaultId: string, blobId: string): Promise<void> {
+    rmSync(join(this.dir, "blobs", vaultId, blobId.slice(0, 2), blobId), { force: true });
+  }
+
+  async stop(): Promise<void> {
+    await this.halt();
     rmSync(this.dir, { recursive: true, force: true });
   }
 

@@ -75,6 +75,16 @@ Plugin (TypeScript, esbuild, WebCrypto only):
 - `plugin/test/bundle-mobile.test.ts`: static proof that the production
   bundle needs nothing a Capacitor WebView lacks. This is the only mobile
   evidence that exists.
+- Conflict and recovery proof: `plugin/test/conflict-recovery.test.ts` (31
+  scenarios, one per row of `docs/CONFLICT-RECOVERY-MATRIX.md`) and
+  `plugin/test/convergence.test.ts` (seeded random three-device histories
+  with restarts, crashes, state loss and server outages; checks convergence
+  and that no last write is lost). Two gaps they found are fixed: conflict
+  siblings in the same minute now get an ordinal instead of overwriting, and
+  a server restored from backup is detected by op identity
+  (`cursor_op_id`/`expect`) and reconciled (DESIGN §6.8). The Node and
+  Obsidian filesystem adapters map NFD on-disk names to NFC so a Mac-copied
+  vault does not grow NFC twins.
 
 ## How to run the gate
 

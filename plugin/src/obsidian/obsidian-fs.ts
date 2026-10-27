@@ -34,13 +34,26 @@ export class ObsidianFS implements VaultFS {
   /** Obsidian's adapter does not resolve ".." itself; never pass one through. */
   private checked(path: string): string {
     if (!isSafeDevicePath(path)) throw new Error(`path escapes vault: ${path}`);
-    return path;
+    return this.raw.get(path) ?? path;
+  }
+
+  /**
+   * NFC path -> the name Obsidian actually reports, for files whose on-disk
+   * name is not NFC (Linux keeps whatever bytes a Mac wrote). The engine
+   * works in NFC; this keeps reads and writes on the existing file.
+   */
+  private raw = new Map<string, string>();
+
+  private nfc(p: string): string {
+    const n = p.normalize("NFC");
+    if (n !== p) this.raw.set(n, p);
+    return n;
   }
 
   async list(): Promise<FileStat[]> {
     const out: FileStat[] = [];
     for (const f of this.app.vault.getFiles()) {
-      out.push({ path: f.path.normalize("NFC"), size: f.stat.size, mtime: Math.floor(f.stat.mtime) });
+      out.push({ path: this.nfc(f.path), size: f.stat.size, mtime: Math.floor(f.stat.mtime) });
     }
     // Dot entries are not indexed. Walk every folder once and descend into
     // dot-folders fully. The config dir is a dot-folder at the root.
@@ -53,7 +66,7 @@ export class ObsidianFS implements VaultFS {
         return;
       }
       for (const f of l.files) {
-        const p = normalizePath(f).normalize("NFC");
+        const p = this.nfc(normalizePath(f));
         if (seen.has(p)) continue;
         const st = await this.app.vault.adapter.stat(p).catch(() => null);
         if (st?.type === "file") {
@@ -73,7 +86,7 @@ export class ObsidianFS implements VaultFS {
         continue;
       }
       for (const f of l.files) {
-        const p = normalizePath(f).normalize("NFC");
+        const p = this.nfc(normalizePath(f));
         if (seen.has(p) || !this.isDot(p)) continue;
         const st = await this.app.vault.adapter.stat(p).catch(() => null);
         if (st?.type === "file") {
@@ -106,14 +119,14 @@ export class ObsidianFS implements VaultFS {
         return;
       }
       for (const f of l.files) {
-        const p = normalizePath(f).normalize("NFC");
+        const p = this.nfc(normalizePath(f));
         const st = await this.app.vault.adapter.stat(p).catch(() => null);
         if (st?.type === "file") out.push({ path: p, size: st.size, mtime: Math.floor(st.mtime) });
       }
       for (const d of l.folders) await walk(normalizePath(d));
     };
     for (const f of root.files) {
-      const p = normalizePath(f).normalize("NFC");
+      const p = this.nfc(normalizePath(f));
       if (!p.startsWith(".")) continue;
       const st = await this.app.vault.adapter.stat(p).catch(() => null);
       if (st?.type === "file") out.push({ path: p, size: st.size, mtime: Math.floor(st.mtime) });
@@ -126,6 +139,7 @@ export class ObsidianFS implements VaultFS {
   }
 
   async stat(path: string): Promise<FileStat | null> {
+    path = this.raw.get(path) ?? path;
     const f = this.app.vault.getAbstractFileByPath(path);
     if (f instanceof TFile) return { path, size: f.stat.size, mtime: Math.floor(f.stat.mtime) };
     const st = await this.app.vault.adapter.stat(path).catch(() => null);
@@ -134,7 +148,7 @@ export class ObsidianFS implements VaultFS {
   }
 
   async read(path: string): Promise<Uint8Array> {
-    return new Uint8Array(await this.app.vault.adapter.readBinary(path));
+    return new Uint8Array(await this.app.vault.adapter.readBinary(this.raw.get(path) ?? path));
   }
 
   private async ensureFolder(path: string): Promise<void> {

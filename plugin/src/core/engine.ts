@@ -27,6 +27,8 @@ export interface FileEntry {
   hash: string | null;
   /** Server head seq this entry corresponds to (the base for local edits). */
   seq: number;
+  /** Server time (ms) of the op behind this entry; decides "which side is newer" after a server restore (§6.8). */
+  at?: number;
   /** Disk stat at the time of sync; a cheap "maybe changed" check. */
   size: number;
   mtime: number;
@@ -44,6 +46,8 @@ export interface Inflight {
 export interface State {
   version: 1;
   cursor: number;
+  /** op_id at `cursor`, when known; the server checks it so a restore from backup is never mistaken for "nothing new". */
+  cursorOp?: string;
   epoch: number;
   /** keyed by logical path ($CONFIG-mapped) */
   files: Record<string, FileEntry>;
@@ -459,7 +463,10 @@ export class Engine {
   }
 
   private rewindCursor(to: number): void {
-    if (to < this.state.cursor) this.state.cursor = Math.max(0, to);
+    if (to < this.state.cursor) {
+      this.state.cursor = Math.max(0, to);
+      this.state.cursorOp = undefined;
+    }
   }
 
   // ----- sync loop -----
@@ -508,6 +515,68 @@ export class Engine {
     return this.syncing;
   }
 
+  /**
+   * The server's head sequence is below our cursor: it was restored from a
+   * backup and has forgotten ops we (and maybe other devices) already
+   * synced, and it is handing out sequence numbers we have already seen.
+   * Reconcile every state entry against the server's current heads
+   * (DESIGN.md §6.8):
+   *   - the server has our last synced version in the path's history: it
+   *     moved on legitimately after the restore; take its head as usual;
+   *   - it has never seen our version (that op was lost): our copy is the
+   *     newer one; rebase it on the server's head and push it again, which
+   *     also re-uploads any blob the restore dropped;
+   *   - the path is unknown to the server: push it as a new file.
+   * Nothing on disk is touched here; the pull and push that follow do the
+   * work through the ordinary conflict rules, so nothing can be lost.
+   */
+  private async recoverFromRewind(serverSeq: number): Promise<void> {
+    const v = this.cfg.vaultId;
+    this.log("warn", `server sequence went backwards (${this.state.cursor} -> ${serverSeq}); reconciling against a restored server`);
+    const snap = await this.client.snapshot(v);
+    await this.adoptEpoch(snap.epoch, snap.min_epoch);
+    const heads = new Map<string, WireOp>();
+    for (const op of snap.ops) heads.set(op.path_id, op);
+    let rebased = 0;
+    for (const [logical, e] of Object.entries(this.state.files)) {
+      if (this.state.inflight[logical]) continue;
+      const pid = await this.vc.pathId(logical);
+      const head = heads.get(pid);
+      if (head && head.seq === e.seq && head.blob_id === e.hash) continue;
+      if (!head) {
+        // Never reached the restored server. A tombstone needs nothing; a file is created again.
+        delete this.state.files[logical];
+        if (e.hash !== null) this.markDirty(logical);
+        rebased++;
+        continue;
+      }
+      const known = e.hash === head.blob_id || (e.hash !== null && (await this.client.history(v, pid)).some((o) => o.blob_id === e.hash));
+      if (known) {
+        // The server moved on after the restore; let the snapshot apply its head on top of our base.
+        e.seq = e.hash === head.blob_id ? head.seq : 0;
+      } else if (e.at === undefined || head.created_at <= e.at) {
+        // Our synced version was lost and the server's head predates it: ours is
+        // the newer one. Rebase on the head and push it.
+        e.hash = head.blob_id;
+        e.seq = head.seq;
+        this.markDirty(logical);
+        rebased++;
+      } else {
+        // Our synced version was lost, and another device has written this path
+        // since the restore. Neither side knows the other's bytes: treat ours
+        // as a local edit with no base, so the pull resolves it like any
+        // concurrent edit (sibling copy, head applied) and nothing is dropped.
+        e.hash = null;
+        e.seq = 0;
+        rebased++;
+      }
+    }
+    this.state.cursor = 0;
+    this.state.cursorOp = undefined;
+    this.scheduleSave();
+    this.log("info", `restored-server reconciliation: ${rebased} path(s) reconciled`);
+  }
+
   // ----- keys -----
 
   /** Fetch keybox rows and adopt any epoch keys we do not have. */
@@ -544,15 +613,21 @@ export class Engine {
       await this.adoptEpoch(snap.epoch, snap.min_epoch);
       await this.applyBatch(snap.ops);
       this.state.cursor = snap.cursor;
+      this.state.cursorOp = snap.cursor_op_id;
       this.scheduleSave();
       return;
     }
     for (;;) {
-      const feed = await this.client.changes(v, this.state.cursor, { limit: 500 });
+      const feed = await this.client.changes(v, this.state.cursor, { limit: 500, expect: this.state.cursorOp });
+      if (feed.rewound || (feed.seq !== undefined && feed.seq < this.state.cursor)) {
+        await this.recoverFromRewind(feed.seq ?? 0);
+        return this.pull();
+      }
       await this.adoptEpoch(feed.epoch, feed.min_epoch);
       if (feed.ops.length === 0) break;
       await this.applyBatch(feed.ops);
       this.state.cursor = feed.cursor;
+      if (feed.cursor_op_id) this.state.cursorOp = feed.cursor_op_id;
       this.scheduleSave();
       if (!feed.more) break;
     }
@@ -650,7 +725,7 @@ export class Engine {
     const e = this.state.files[logical];
     if (e && e.seq >= op.seq) return; // already applied (replay after a rewind)
     if (this.excluded(logical)) {
-      this.state.files[logical] = { hash: op.blob_id, seq: op.seq, size: meta.size, mtime: meta.mtime, excluded: true };
+      this.state.files[logical] = { hash: op.blob_id, seq: op.seq, at: op.created_at, size: meta.size, mtime: meta.mtime, excluded: true };
       this.scheduleSave();
       return;
     }
@@ -672,19 +747,19 @@ export class Engine {
     if (op.blob_id === null) {
       // Remote deletion.
       if (!st) {
-        this.state.files[logical] = { hash: null, seq: op.seq, size: 0, mtime: 0 };
+        this.state.files[logical] = { hash: null, seq: op.seq, at: op.created_at, size: 0, mtime: 0 };
         this.dirty.delete(logical);
       } else if (diskHash !== (e?.hash ?? null)) {
         // Local edit vs remote delete: the edit wins; re-upload on top of the tombstone.
         this.log("info", `remote deleted ${devPath} but it was edited here; keeping local`);
-        this.state.files[logical] = { hash: null, seq: op.seq, size: 0, mtime: 0 };
+        this.state.files[logical] = { hash: null, seq: op.seq, at: op.created_at, size: 0, mtime: 0 };
         this.markDirty(logical);
       } else {
         this.state.inflight[logical] = { blob: null, seq: op.seq, size: 0, mtime: 0 };
         await this.flushState();
         await this.fs.remove(devPath);
         delete this.state.inflight[logical];
-        this.state.files[logical] = { hash: null, seq: op.seq, size: 0, mtime: 0 };
+        this.state.files[logical] = { hash: null, seq: op.seq, at: op.created_at, size: 0, mtime: 0 };
         this.dirty.delete(logical);
         this.hooks.afterApply?.(devPath, "delete");
       }
@@ -695,7 +770,7 @@ export class Engine {
     // Remote put.
     if (diskHash === op.blob_id) {
       // Converged (echo of our own upload, or both sides wrote the same bytes).
-      this.state.files[logical] = { hash: op.blob_id, seq: op.seq, size: st!.size, mtime: st!.mtime };
+      this.state.files[logical] = { hash: op.blob_id, seq: op.seq, at: op.created_at, size: st!.size, mtime: st!.mtime };
       this.dirty.delete(logical);
       this.scheduleSave();
       return;
@@ -749,7 +824,7 @@ export class Engine {
     await this.fs.write(devPath, plain, mtime);
     const st = (await this.fs.stat(devPath)) ?? { path: devPath, size: plain.length, mtime };
     delete this.state.inflight[logical];
-    this.state.files[logical] = { hash: blobId, seq: op.seq, size: st.size, mtime: st.mtime };
+    this.state.files[logical] = { hash: blobId, seq: op.seq, at: op.created_at, size: st.size, mtime: st.mtime };
     this.dirty.delete(logical);
     this.scheduleSave();
     this.hooks.afterApply?.(devPath, "put");
@@ -774,14 +849,14 @@ export class Engine {
     const devPath = this.device(logical);
     const e = this.state.files[logical];
     if (head.blob_id === localHash) {
-      this.state.files[logical] = { hash: localHash, seq: head.seq, size: local.length, mtime: e?.mtime ?? Date.now() };
+      this.state.files[logical] = { hash: localHash, seq: head.seq, at: head.created_at, size: local.length, mtime: e?.mtime ?? Date.now() };
       this.dirty.delete(logical);
       this.scheduleSave();
       return;
     }
     if (head.blob_id === null) {
       // Remote delete vs local edit: keep local, rebase on the tombstone.
-      this.state.files[logical] = { hash: null, seq: head.seq, size: 0, mtime: 0 };
+      this.state.files[logical] = { hash: null, seq: head.seq, at: head.created_at, size: 0, mtime: 0 };
       this.markDirty(logical);
       return;
     }
@@ -801,7 +876,7 @@ export class Engine {
           await this.fs.write(devPath, m.merged, mtime);
           delete this.state.inflight[logical];
           // Base is now the head; disk holds the merge, which is dirty and uploads next.
-          this.state.files[logical] = { hash: head.blob_id, seq: head.seq, size: -1, mtime: -1 };
+          this.state.files[logical] = { hash: head.blob_id, seq: head.seq, at: head.created_at, size: -1, mtime: -1 };
           this.markDirty(logical);
           this.log("info", `merged concurrent edits of ${devPath}`);
           this.hooks.afterApply?.(devPath, "put");
@@ -812,13 +887,31 @@ export class Engine {
       }
     }
     // Sibling copy, then apply the head.
-    const sibLogical = conflictPath(logical, this.cfg.deviceName);
+    const sibLogical = await this.siblingFor(logical, local);
     const sibDev = this.device(sibLogical);
     await this.fs.write(sibDev, local, Date.now());
     this.markDirty(sibLogical);
     await this.writeRemote(logical, head, meta, blobs);
     this.log("warn", `conflict on ${devPath}; local version saved as ${sibDev}`);
     this.hooks.onConflict?.(devPath, sibDev);
+  }
+
+  /**
+   * A sibling name that does not clobber an earlier conflict copy: the
+   * stamp has minute resolution, and two conflicts on one file within a
+   * minute are not rare when two devices are being used at once. An
+   * existing copy with identical bytes (the same conflict resolved twice,
+   * e.g. after an interrupted apply) is reused rather than duplicated.
+   */
+  private async siblingFor(logical: string, local: Uint8Array): Promise<string> {
+    const now = new Date();
+    for (let n = 1; n < 10_000; n++) {
+      const sib = conflictPath(logical, this.cfg.deviceName, now, n);
+      const st = await this.fs.stat(this.device(sib));
+      if (!st) return sib;
+      if (st.size === local.length && bytesEqual(await this.fs.read(this.device(sib)), local)) return sib;
+    }
+    throw new Error(`too many conflict copies of ${logical}`);
   }
 
   // ----- push -----
@@ -881,10 +974,13 @@ export class Engine {
   /** Apply one post result to local state: accepted, conflicting, or rejected. */
   private async settle(p: { logical: string; op: OpInput; bytes?: Uint8Array; st?: FileStat }, r: OpResult): Promise<void> {
     if (r.seq && !r.conflict && !r.error) {
-      this.state.files[p.logical] = { hash: p.op.blob_id, seq: r.seq, size: p.st?.size ?? 0, mtime: p.st?.mtime ?? 0 };
+      this.state.files[p.logical] = { hash: p.op.blob_id, seq: r.seq, at: r.created_at, size: p.st?.size ?? 0, mtime: p.st?.mtime ?? 0 };
       this.dirty.delete(p.logical);
       // The server's cursor can jump past our own op; keep cursor in step so we do not re-pull it.
-      if (r.seq === this.state.cursor + 1) this.state.cursor = r.seq;
+      if (r.seq === this.state.cursor + 1) {
+        this.state.cursor = r.seq;
+        this.state.cursorOp = p.op.op_id;
+      }
     } else if (r.conflict) {
       const meta = await this.vc.decryptMeta(r.conflict.path_id, fromB64(r.conflict.meta_enc));
       if (p.bytes) await this.resolveConflict(p.logical, p.bytes, p.op.blob_id!, r.conflict, meta);
@@ -926,9 +1022,12 @@ export class Engine {
         r = (await this.client.postOps(this.cfg.vaultId, [{ ...op, op_id: opId(), base_seq: r.conflict.seq }])).results[0];
       }
       if (!r.seq || r.conflict || r.error) throw new Error(r.error ?? "the file changed elsewhere; sync first, then retry");
-      this.state.files[logical] = { hash, seq: r.seq, size: st.size, mtime: st.mtime };
+      this.state.files[logical] = { hash, seq: r.seq, at: r.created_at, size: st.size, mtime: st.mtime };
       this.dirty.delete(logical);
-      if (r.seq === this.state.cursor + 1) this.state.cursor = r.seq;
+      if (r.seq === this.state.cursor + 1) {
+        this.state.cursor = r.seq;
+        this.state.cursorOp = r.op_id;
+      }
       this.scheduleSave();
     });
     this.kick(0);

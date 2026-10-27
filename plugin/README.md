@@ -69,8 +69,16 @@ Two devices editing the same file while offline:
 - Text files with non-overlapping edits: merged three-way against the exact
   version both started from. JSON under `.obsidian` merges per key.
 - Anything else: the other device's version stays at the path and yours is
-  saved next to it as `name (conflict <device> <date> <time>).md`. A notice
-  tells you; **Show conflicts** lists them.
+  saved next to it as `name (conflict <device> <date> <time>).md` (a second
+  one in the same minute gets a number: `… <time> 2).md`). A notice tells
+  you; **Show conflicts** lists them.
+
+Nothing you wrote is ever discarded: it is at its path, in a conflict copy,
+or in the server's history. That holds across restarts, crashes, lost sync
+state, a server restart or outage, a removed device, a key rotation while
+you were offline, and a server restored from an older backup.
+`test/conflict-recovery.test.ts` has one scenario for each of those and
+`test/convergence.test.ts` checks random multi-device histories for it.
 
 Deletions are conservative: a file edited on one device and deleted on
 another keeps the edit. Deleting many files at once (50+ and 20 % of the
@@ -195,6 +203,11 @@ Three layers of tests:
 - unit: crypto (with pinned vectors), merge, path rules;
 - `test/e2e.test.ts`: the engine under Node with real files against the real
   server, two or more simulated devices;
+- `test/conflict-recovery.test.ts`: one scenario per conflict shape and
+  recovery path (`../docs/CONFLICT-RECOVERY-MATRIX.md` lists them), and
+  `test/convergence.test.ts`: seeded random histories on three devices with
+  restarts, crashes, state loss and server outages, checked for convergence
+  and for no lost write;
 - `test/obsidian.test.ts` and `test/obsidian-ui.test.ts`: the plugin as
   shipped inside real Obsidian, headless, driven over the DevTools protocol.
   Two Obsidian instances create a vault, invite, join, sync notes through

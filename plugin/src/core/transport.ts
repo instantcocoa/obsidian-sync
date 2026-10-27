@@ -59,6 +59,8 @@ export interface OpInput {
 export interface OpResult {
   op_id: string;
   seq?: number;
+  /** Server time of an accepted op (ms). */
+  created_at?: number;
   conflict?: WireOp;
   error?: string;
 }
@@ -67,6 +69,12 @@ export interface Feed {
   epoch: number;
   min_epoch: number;
   cursor: number;
+  /** The vault's current head sequence. Lower than our cursor means the server was restored from a backup. */
+  seq?: number;
+  /** op_id at `cursor`; sent back as `expect` on the next poll. */
+  cursor_op_id?: string;
+  /** The op at our cursor is not the one we saw: the server was restored from a backup. */
+  rewound?: boolean;
   ops: WireOp[];
   more: boolean;
 }
@@ -272,9 +280,10 @@ export class Client {
     return this.json("GET", `/v1/vaults/${vaultId}/snapshot`);
   }
 
-  async changes(vaultId: string, since: number, opts: { wait?: number; limit?: number; signal?: AbortSignal } = {}): Promise<Feed> {
+  async changes(vaultId: string, since: number, opts: { wait?: number; limit?: number; expect?: string; signal?: AbortSignal } = {}): Promise<Feed> {
     const q = new URLSearchParams({ since: String(since) });
     if (opts.wait) q.set("wait", String(opts.wait));
+    if (opts.expect) q.set("expect", opts.expect);
     if (opts.limit) q.set("limit", String(opts.limit));
     return this.json("GET", `/v1/vaults/${vaultId}/changes?${q}`, undefined, { signal: opts.signal });
   }

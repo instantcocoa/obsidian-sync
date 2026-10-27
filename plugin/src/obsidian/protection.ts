@@ -14,7 +14,7 @@ interface ElectronRemote {
     encryptString(s: string): { toString(enc: string): string };
     decryptString(b: unknown): string;
   };
-  systemPreferences?: { promptTouchID?(reason: string): Promise<void> };
+  systemPreferences?: { promptTouchID?(reason: string): Promise<void>; canPromptTouchID?(): boolean };
 }
 
 function remote(): ElectronRemote | null {
@@ -34,8 +34,19 @@ export function safeStorageAvailable(): boolean {
   return backend === undefined || backend !== "basic_text";
 }
 
+/**
+ * True only when this Mac can actually show a Touch ID prompt. The API
+ * exists on every Mac (a Mac mini has it and no sensor), so the presence of
+ * `promptTouchID` says nothing; `canPromptTouchID` asks the hardware.
+ */
 export function touchIdAvailable(): boolean {
-  return Platform.isMacOS && typeof remote()?.systemPreferences?.promptTouchID === "function";
+  const sp = remote()?.systemPreferences;
+  if (!Platform.isMacOS || typeof sp?.promptTouchID !== "function" || typeof sp.canPromptTouchID !== "function") return false;
+  try {
+    return sp.canPromptTouchID() === true;
+  } catch {
+    return false;
+  }
 }
 
 /** Wrap a 32-byte key with the OS keychain; returns base64 of the opaque ciphertext. */

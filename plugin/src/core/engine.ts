@@ -116,11 +116,19 @@ const DEFAULTS = {
 
 export class SyncError extends Error {}
 
+/** A write refused because another program holds the file (Windows sharing violation, a read-only or locked file). */
+function isFileInUse(e: unknown): boolean {
+  return /\b(EBUSY|EPERM|EACCES|EAGAIN|ETXTBSY)\b|sharing violation|being used by another process/i.test(String((e as Error)?.message ?? e));
+}
+
 // ---------- engine ----------
 
 export class Engine {
   state: State = { version: 1, cursor: 0, epoch: 1, files: {}, dirty: [], inflight: {} };
   private dirty = new Set<string>();
+  /** Remote puts whose write failed because the file was in use; retried each cycle (see retryBusy). */
+  private busy = new Set<string>();
+  private busyReported = new Set<string>();
   private locks = new Map<string, Promise<void>>();
   private excluded: (p: string) => boolean;
   private syncing: Promise<void> | null = null;
@@ -483,6 +491,7 @@ export class Engine {
         do {
           this.wantSync = false;
           this.setStatus({ phase: "syncing", message: undefined });
+          await this.retryBusy();
           await this.pull();
           await this.push();
           this.setStatus({ phase: "idle", lastSync: Date.now() });
@@ -513,6 +522,22 @@ export class Engine {
       }
     })();
     return this.syncing;
+  }
+
+  /**
+   * Writes that failed because the file was in use: decide from the bytes on
+   * disk what happened, exactly as after a crash. Old bytes still there means
+   * the write never happened and the cursor rewinds so the pull applies the
+   * op again; it fails again while the lock is held and lands once it goes.
+   */
+  private async retryBusy(): Promise<void> {
+    for (const logical of [...this.busy]) {
+      this.busy.delete(logical);
+      await this.withLock(logical, async () => {
+        if (!this.state.inflight[logical]) return;
+        await this.resolveInflight(logical, await this.fs.stat(this.device(logical)));
+      });
+    }
   }
 
   /**
@@ -716,8 +741,21 @@ export class Engine {
         // retried as a whole; everything else is logged and skipped, and the
         // cursor moves on. A later op for the path heals it.
         if (e instanceof NetworkError || (e instanceof HttpError && e.transient)) throw e;
-        this.log("error", `op ${d.op.seq} for ${d.logical} could not be applied; skipping`, e);
-        this.hooks.onSkipped?.(this.device(d.logical), String((e as Error).message ?? e));
+        if (isFileInUse(e) && this.state.inflight[d.logical]) {
+          // Another program holds the file open (Windows: EBUSY/EPERM for a
+          // note open in an editor or being scanned). The inflight record
+          // says what we meant to write; retry at the next cycle instead of
+          // waiting for someone to edit the file again. Reported once.
+          this.busy.add(d.logical);
+          this.log("warn", `op ${d.op.seq} for ${d.logical} could not be written because the file is in use; will retry`, e);
+          if (!this.busyReported.has(d.logical)) {
+            this.busyReported.add(d.logical);
+            this.hooks.onSkipped?.(this.device(d.logical), "the file is in use by another program; it will be retried");
+          }
+        } else {
+          this.log("error", `op ${d.op.seq} for ${d.logical} could not be applied; skipping`, e);
+          this.hooks.onSkipped?.(this.device(d.logical), String((e as Error).message ?? e));
+        }
       }
       this.setStatus({ progress: { done: ++done, total: last.size } });
     }
@@ -840,6 +878,7 @@ export class Engine {
     await this.fs.write(devPath, plain, mtime);
     const st = (await this.fs.stat(devPath)) ?? { path: devPath, size: plain.length, mtime };
     delete this.state.inflight[logical];
+    this.busyReported.delete(logical);
     this.state.files[logical] = { hash: blobId, seq: op.seq, at: op.created_at, size: st.size, mtime: st.mtime };
     this.dirty.delete(logical);
     this.scheduleSave();

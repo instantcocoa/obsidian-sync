@@ -387,6 +387,41 @@ describe("two devices", () => {
     await b.cleanup();
   });
 
+  it("a file held open by another program: the remote edit is reported once, retried, and lands when the file is free", async () => {
+    const [a, b] = await pair();
+    await a.write("open.md", "v1\n");
+    await a.sync();
+    await b.sync();
+    // B's editor (or an antivirus scanner) holds open.md with an exclusive lock:
+    // Windows refuses the write with EBUSY. Simulate at the file layer.
+    const realWrite = b.fs.write.bind(b.fs);
+    let locked = true;
+    b.fs.write = async (p, data, mtime) => {
+      if (locked && p === "open.md") throw new Error("EBUSY: resource busy or locked, open 'open.md'");
+      return realWrite(p, data, mtime);
+    };
+    const skipped: [string, string][] = [];
+    b.engine["hooks"].onSkipped = (p: string, why: string) => skipped.push([p, why]);
+    await a.write("open.md", "v2\n");
+    await a.sync();
+    await b.sync();
+    expect(skipped).toEqual([["open.md", "the file is in use by another program; it will be retried"]]);
+    expect(await b.read("open.md")).toBe("v1\n");
+    expect(b.engine.getStatus().phase).toBe("idle");
+    // Still locked: retried silently, nothing partial, no second notice.
+    await b.sync();
+    expect(skipped.length).toBe(1);
+    expect(await b.read("open.md")).toBe("v1\n");
+    expect((await b.files()).filter((f) => f.startsWith("open"))).toEqual(["open.md"]);
+    // Released: the next cycle applies it with no one touching the file.
+    locked = false;
+    await b.sync();
+    expect(await b.read("open.md")).toBe("v2\n");
+    expect(b.uploads).toBe(0);
+    await a.cleanup();
+    await b.cleanup();
+  });
+
   it("a real folder literally named $CONFIG is left alone", async () => {
     const [a, b] = await pair();
     await a.write("$CONFIG/app.json", "{\"not\":\"config\"}");

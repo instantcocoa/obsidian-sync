@@ -723,12 +723,16 @@ export class Engine {
       if (meta) meta.path = meta.path.normalize("NFC");
       decoded.push({ op, meta, logical: meta?.path ?? "" });
     }
-    // Only the last op per path in this batch matters.
+    // Only the last op per path in this batch matters. Deletes go first: a
+    // rename on a case-insensitive volume ("Note.md" -> "note.md") is a delete
+    // and a put whose names are the same file there, and the put can only
+    // land once the old name is gone.
     const last = new Map<string, Decoded>();
     for (const d of decoded) if (d.meta) last.set(d.logical, d);
+    const ordered = [...last.values()].sort((x, y) => Number(x.op.blob_id !== null) - Number(y.op.blob_id !== null));
     // Prefetch blobs we will probably write (skip excluded and already-synced).
     const want = new Set<string>();
-    for (const d of last.values()) {
+    for (const d of ordered) {
       if (this.excluded(d.logical) || !d.op.blob_id) continue;
       if (this.state.files[d.logical]?.hash === d.op.blob_id) continue;
       want.add(d.op.blob_id);
@@ -742,7 +746,7 @@ export class Engine {
       }
     });
     let done = 0;
-    for (const d of last.values()) {
+    for (const d of ordered) {
       try {
         await this.withLock(d.logical, () => this.applyRemote(d.logical, d.op, d.meta!, blobs));
       } catch (e) {
@@ -997,6 +1001,9 @@ export class Engine {
         else this.dirty.delete(logical);
       }
       if (pending.length === 0) break;
+      // Deletes before puts, so a rename reaches other devices as "old name
+      // gone, then new name" in that order (see applyBatch).
+      pending.sort((x, y) => Number(x.op.blob_id !== null) - Number(y.op.blob_id !== null));
       // Upload missing blobs first (server enforces blobs-before-ops).
       const byBlob = new Map<string, Uint8Array>();
       for (const p of pending) if (p.op.blob_id && p.bytes) byBlob.set(p.op.blob_id, p.bytes);

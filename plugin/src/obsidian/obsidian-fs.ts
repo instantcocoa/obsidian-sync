@@ -154,6 +154,47 @@ export class ObsidianFS implements VaultFS {
   }
 
   /** Does an entry with exactly this name (case and all) exist in its folder? */
+  /**
+   * Does the volume answer for any casing of a name (APFS and NTFS by
+   * default)? Probed once with the config dir, which always exists.
+   */
+  private caseInsensitive: Promise<boolean> | null = null;
+  private volumeIgnoresCase(): Promise<boolean> {
+    if (!this.caseInsensitive) {
+      const swapped = this.configDir.replace(/[a-zA-Z]/g, (c) => (c === c.toLowerCase() ? c.toUpperCase() : c.toLowerCase()));
+      this.caseInsensitive = swapped === this.configDir ? Promise.resolve(false) : this.app.vault.adapter.exists(swapped).catch(() => false);
+    }
+    return this.caseInsensitive;
+  }
+
+  /** The entry in `path`'s folder that equals `path` ignoring case, as the file system spells it, or null. */
+  private async spelledAs(path: string): Promise<string | null> {
+    const i = path.lastIndexOf("/");
+    const dir = i < 0 ? "" : path.slice(0, i);
+    try {
+      const want = path.toLowerCase();
+      for (const f of (await this.app.vault.adapter.list(dir)).files) {
+        const p = normalizePath(f);
+        if (p.toLowerCase() === want) return p;
+      }
+    } catch {
+      /* folder missing */
+    }
+    return null;
+  }
+
+  /**
+   * A new file whose name differs only in case from an existing one cannot
+   * exist on a case-insensitive volume; writing it would silently replace
+   * the other file's bytes. Refuse, so the engine skips the op and reports
+   * it (a case-sensitive device keeps both; this one keeps the first).
+   */
+  private async refuseCaseClash(path: string): Promise<void> {
+    if (!(await this.volumeIgnoresCase())) return;
+    const other = await this.spelledAs(path);
+    if (other && other !== path) throw new Error(`"${other}" already exists and this volume ignores case`);
+  }
+
   private async exactName(path: string): Promise<boolean> {
     const i = path.lastIndexOf("/");
     const dir = i < 0 ? "" : path.slice(0, i);
@@ -191,6 +232,7 @@ export class ObsidianFS implements VaultFS {
     const buf = data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength) as ArrayBuffer;
     await this.ensureFolder(path);
     if (this.isDot(path)) {
+      if (!(await this.exactName(path))) await this.refuseCaseClash(path);
       await this.app.vault.adapter.writeBinary(path, buf, opts);
       await this.verifyWrite(path, buf, opts);
       await (this.app.vault.adapter as AdapterExt).reconcileInternalFile?.(path).catch(() => {});
@@ -198,7 +240,10 @@ export class ObsidianFS implements VaultFS {
     }
     const existing = this.app.vault.getAbstractFileByPath(path);
     if (existing instanceof TFile) await this.app.vault.modifyBinary(existing, buf, opts);
-    else await this.app.vault.createBinary(path, buf, opts);
+    else {
+      await this.refuseCaseClash(path);
+      await this.app.vault.createBinary(path, buf, opts);
+    }
     await this.verifyWrite(path, buf, opts);
   }
 
@@ -228,7 +273,9 @@ export class ObsidianFS implements VaultFS {
       await this.app.fileManager.trashFile(f);
       return;
     }
-    if (await this.app.vault.adapter.exists(path)) await this.app.vault.adapter.remove(path);
+    // Only under exactly this spelling: on a case-insensitive volume the
+    // adapter would otherwise remove the differently cased survivor of a rename.
+    if ((await this.app.vault.adapter.exists(path)) && (await this.exactName(path))) await this.app.vault.adapter.remove(path);
     await (this.app.vault.adapter as AdapterExt).reconcileInternalFile?.(path).catch(() => {});
   }
 

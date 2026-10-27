@@ -48,7 +48,7 @@ export class ObsidianInstance {
     o.vault = join(base, "vault");
     o.state = join(base, "state");
     o.id = `obsync-e2e-${name}-${Date.now()}`;
-    for (const d of ["vault/.obsidian/plugins/obsync", "state/home/.config/obsidian", "state/xdg-config/obsidian", "state/xdg-cache", "state/xdg-data", "state/user-data"]) {
+    for (const d of ["vault/.obsidian/plugins/obsync", "state/home/.config/obsidian", "state/home/Library/Application Support/obsidian", "state/xdg-config/obsidian", "state/xdg-cache", "state/xdg-data", "state/user-data"]) {
       mkdirSync(join(base, d), { recursive: true });
     }
     for (const f of ["main.js", "manifest.json", "styles.css"]) copyFileSync(join(ROOT, f), join(o.vault, ".obsidian/plugins/obsync", f));
@@ -57,14 +57,17 @@ export class ObsidianInstance {
     writeFileSync(join(o.vault, ".obsidian/community-plugins.json"), JSON.stringify(["obsync"]));
     const record = { path: o.vault, ts: Date.now(), open: true, name: `vault-${name}` };
     const registry = JSON.stringify({ cli: true, vaults: { [o.id]: record } });
-    for (const d of ["state/home/.config/obsidian", "state/xdg-config/obsidian", "state/user-data"]) writeFileSync(join(base, d, "obsidian.json"), registry);
+    for (const d of ["state/home/.config/obsidian", "state/home/Library/Application Support/obsidian", "state/xdg-config/obsidian", "state/user-data"]) writeFileSync(join(base, d, "obsidian.json"), registry);
     writeFileSync(join(o.state, "user-data", `${o.id}.json`), JSON.stringify(record));
 
     o.port = await freePort();
+    // Software rendering is what Xvfb needs. On macOS it makes WindowServer
+    // flatten every frame itself; two instances for a few minutes made it
+    // abort on IOSurface allocation and took the whole login session down.
+    const darwin = process.platform === "darwin";
     const args = [
       "--no-sandbox",
-      "--disable-gpu",
-      "--disable-software-rasterizer",
+      ...(darwin ? [] : ["--disable-gpu", "--disable-software-rasterizer"]),
       `--user-data-dir=${join(o.state, "user-data")}`,
       `--remote-debugging-port=${o.port}`,
       `obsidian://open?path=${encodeURIComponent(o.vault)}`,
@@ -80,11 +83,15 @@ export class ObsidianInstance {
       stdio: ["ignore", "pipe", "pipe"],
       env: {
         ...process.env,
-        HOME: join(o.state, "home"),
+        // On macOS the Security framework hangs the main process in
+        // SecItemCopyMatching when $HOME has no Library/Keychains (Chromium's
+        // os_crypt looks the keychain up at startup), so keep the real HOME
+        // there; --user-data-dir already isolates the instances.
+        HOME: darwin ? process.env.HOME : join(o.state, "home"),
         XDG_CONFIG_HOME: join(o.state, "xdg-config"),
         XDG_CACHE_HOME: join(o.state, "xdg-cache"),
         XDG_DATA_HOME: join(o.state, "xdg-data"),
-        OBSIDIAN_DISABLE_GPU: "1",
+        ...(darwin ? {} : { OBSIDIAN_DISABLE_GPU: "1" }),
       },
     });
     o.proc.stdout!.on("data", (d) => (o.log += d));
@@ -95,9 +102,14 @@ export class ObsidianInstance {
 
   private async connect(): Promise<void> {
     const deadline = Date.now() + 60_000;
+    // Wait for the vault window to be loaded before attaching. Attaching while
+    // it is still loading leaves Playwright's session without a usable
+    // execution context on Electron 43 / Chrome 150 (Obsidian 1.14 on macOS):
+    // the first evaluate answers, every later one hangs for ever.
     while (Date.now() < deadline) {
       try {
-        if ((await fetch(`http://127.0.0.1:${this.port}/json/version`)).ok) break;
+        const targets = (await (await fetch(`http://127.0.0.1:${this.port}/json`)).json()) as { type: string; title: string }[];
+        if (targets.some((t) => t.type === "page" && / - Obsidian/.test(t.title))) break;
       } catch {
         /* not yet */
       }

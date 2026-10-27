@@ -19,7 +19,9 @@ multi-device histories are checked for convergence and no loss (§8,
 `docs/CONFLICT-RECOVERY-MATRIX.md`). The full gate, real Obsidian included,
 runs on Linux, macOS and Windows in GitHub Actions on every push, and a
 Windows-specific suite covers NTFS names, case, long paths, DPAPI, file
-locks and CRLF. On 2026-10-27 the plugin was run on Android for the first
+locks and CRLF; a macOS suite (run on an Intel EC2 Mac with Obsidian
+1.14.5) covers case-only renames, case twins, NFD names, the Keychain and
+Touch ID, shell edits and server restarts. On 2026-10-27 the plugin was run on Android for the first
 time, following `docs/MOBILE-TEST-PROMPT.md`: Obsidian 1.14.4 (official
 APK) on an Android 14 emulator (API 34 Google APIs x86_64 under KVM; no
 physical phone) against a real desktop Obsidian 1.14.4 peer and the real

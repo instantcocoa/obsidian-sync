@@ -82,9 +82,27 @@ divergence before every reconciliation).
 
 ## Not covered by a test here
 
-- macOS: the engine's rules are tested on Linux and Windows; the macOS run
-  (APFS case-insensitivity, NFD names, Keychain) is in progress on an EC2
-  Mac and reported under `plugin/.cache/agent-mac`.
+- Only Intel macOS was run (an EC2 mac1 host; no Apple-silicon host had
+  capacity). The plugin bundle is architecture-independent.
+
+## macOS (plugin/test/obsidian-macos.test.ts, real Obsidian 1.14.5 on macOS 15.8, Intel)
+
+| # | Situation | Outcome |
+| --- | --- | --- |
+| M1 | Case-only rename `Note.md` to `note.md` | Every device ends with exactly one file with the new casing (was: the peer kept the old casing for ever) |
+| M2 | `A.md` and `a.md` from a case-sensitive device | First kept, second refused and reported; nothing overwritten |
+| M3 | NFD-named `café.md` created, edited on the peer, back again | One file per side, NFC stored, edits flow both ways |
+| M4 | OS keychain protection, plugin reload, Touch ID | Keys sealed, reload unlocks without a prompt; Touch ID offered only when the Mac can prompt for it (was: offered on a Mac mini with no sensor, and a reload could start the engine dead) |
+| M5 | Shell edits while Obsidian is open (`echo >`, `mv`) | Put, then delete plus put, as expected |
+| M6 | Server halted and resumed on the same port | Reconnects and catches up without a restart |
+
+Bugs this run found and fixed: a case-only rename never produced its delete
+because the adapter's stat answered for any casing (the fix is shared with
+the Windows finding), a case twin could replace the other file's bytes,
+Touch ID was offered on Macs without a sensor, and an unreadable state
+file at start killed the engine (now a warning and a rescan). Three harness
+problems specific to macOS were fixed too and are what makes the suites run
+there at all.
 
 ## Windows (plugin/test/obsidian-windows.test.ts, real Obsidian on Windows Server 2022)
 

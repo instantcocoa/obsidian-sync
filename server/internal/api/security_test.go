@@ -349,7 +349,8 @@ func TestBlobSizeLimit(t *testing.T) {
 	bs, _ := blobstore.New(dir + "/blobs")
 	srv := api.New(api.Config{AdminToken: adminTok, MaxBlobSize: 100, InviteTTL: time.Hour, AuthRatePerMinute: -1}, st, bs)
 	ts := httptest.NewServer(srv)
-	defer ts.Close()
+	// Close the store too: Windows cannot remove the TempDir while db.sqlite is open.
+	t.Cleanup(func() { ts.Close(); st.Close() })
 	e := &env{t: t, ts: ts, srv: srv, st: st}
 	vault, a, _ := e.setup()
 	e.upload(vault, a, hexID("big"), blob(1, strings.Repeat("x", 200))).expect(t, 413)
@@ -369,7 +370,8 @@ func TestRateLimiting(t *testing.T) {
 	// 60/min with burst 5: the 6th rapid attempt from one IP is throttled.
 	srv := api.New(api.Config{AdminToken: adminTok, InviteTTL: time.Hour, AuthRatePerMinute: 60, AuthBurst: 5}, st, bs)
 	ts := httptest.NewServer(srv)
-	defer ts.Close()
+	// Close the store too: Windows cannot remove the TempDir while db.sqlite is open.
+	t.Cleanup(func() { ts.Close(); st.Close() })
 	e := &env{t: t, ts: ts, srv: srv, st: st}
 	vault, a, _ := e.setup() // uses a few unauth requests itself (2 redemptions)
 

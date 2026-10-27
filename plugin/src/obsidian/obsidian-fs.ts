@@ -192,12 +192,32 @@ export class ObsidianFS implements VaultFS {
     await this.ensureFolder(path);
     if (this.isDot(path)) {
       await this.app.vault.adapter.writeBinary(path, buf, opts);
+      await this.verifyWrite(path, buf, opts);
       await (this.app.vault.adapter as AdapterExt).reconcileInternalFile?.(path).catch(() => {});
       return;
     }
     const existing = this.app.vault.getAbstractFileByPath(path);
     if (existing instanceof TFile) await this.app.vault.modifyBinary(existing, buf, opts);
     else await this.app.vault.createBinary(path, buf, opts);
+    await this.verifyWrite(path, buf, opts);
+  }
+
+  /**
+   * Seen once on Android 14 (Obsidian 1.14.4, recovery-passphrase rejoin): a
+   * write returned normally and left a 0-byte file, and the engine recorded
+   * the version as applied. The next join turned the empty file into a
+   * conflict copy, so nothing was lost, but a silent short write must not
+   * count as success. Compare the size the adapter reports with what was
+   * written; rewrite once through the adapter; if it still differs, throw so
+   * the engine skips and reports this op instead of recording it.
+   */
+  private async verifyWrite(path: string, buf: ArrayBuffer, opts: { mtime: number }): Promise<void> {
+    const size = async () => (await this.app.vault.adapter.stat(path).catch(() => null))?.size;
+    if ((await size()) === buf.byteLength) return;
+    await this.app.vault.adapter.writeBinary(path, buf, opts);
+    const after = await size();
+    if (after !== buf.byteLength) throw new Error(`write verification failed for ${path}: wrote ${buf.byteLength} bytes, the adapter reports ${after ?? "no file"}`);
+    console.warn(`obsync: ${path} was short after writing; rewritten through the adapter`);
   }
 
   async remove(path: string): Promise<void> {

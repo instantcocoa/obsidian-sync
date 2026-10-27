@@ -34,13 +34,13 @@ describe.skipIf(!OBSIDIAN_BIN)("real Obsidian, settings UI onboarding, rate limi
     await a.clickModalButton("Create");
     expect(await a.waitForNotice(/fill in/, 5_000)).not.toBeNull();
     await a.fill("https://sync.example.com", srv.url); // first prompt field (server URL)
-    await a.page.locator('input[type="password"]').first().fill(ADMIN);
+    await (await a.locator('input[type="password"]')).fill(ADMIN);
     await a.clickModalButton("Create");
     expect(await a.waitForNotice(/vault created/)).not.toBeNull();
     expect(await a.waitFor(() => Boolean((globalThis as any).app.plugins.plugins.obsync.settings.identity), 20_000)).toBe(true);
     expect(await a.waitFor(() => Boolean((globalThis as any).app.plugins.plugins.obsync.engine), 20_000)).toBe(true);
     // The tab re-rendered into the "joined" view.
-    expect(await a.page.locator('button:has-text("Generate")').count()).toBeGreaterThan(0);
+    expect(await (await a.locator('button:has-text("Generate")')).count()).toBeGreaterThan(0);
     await a.closeSettings();
   }, 60_000);
 
@@ -48,7 +48,7 @@ describe.skipIf(!OBSIDIAN_BIN)("real Obsidian, settings UI onboarding, rate limi
     // Generate via the UI on A: the modal shows the link in a textarea.
     await a.openSettings();
     await a.clickButton("Generate");
-    const link = await a.page.locator("textarea[readonly]").first().inputValue({ timeout: 10_000 });
+    const link = await (await a.locator("textarea[readonly]")).inputValue({ timeout: 10_000 });
     expect(link.startsWith("obsync://join#")).toBe(true);
     await a.page.keyboard.press("Escape");
     await a.closeSettings();
@@ -59,7 +59,7 @@ describe.skipIf(!OBSIDIAN_BIN)("real Obsidian, settings UI onboarding, rate limi
     const joined = await b.waitFor(() => Boolean((globalThis as any).app.plugins.plugins.obsync.settings.identity), 20_000);
     if (!joined) {
       const notices = await b.eval(() => Array.from(document.querySelectorAll(".notice")).map((n) => n.textContent));
-      const field = await b.page.locator('input[placeholder="obsync://join#…"]').first().inputValue().catch(() => "?");
+      const field = await (await b.locator('input[placeholder="obsync://join#…"]')).inputValue().catch(() => "?");
       throw new Error(`UI join failed. notices=${JSON.stringify(notices)} field=${field.slice(0, 40)}…\n${await b.diagnostics()}`);
     }
     await b.closeSettings();
@@ -124,10 +124,22 @@ describe.skipIf(!OBSIDIAN_BIN)("real Obsidian, settings UI onboarding, rate limi
   }, 120_000);
 
   it("PIN protection: keys sealed on disk, plugin reload locks, wrong PIN refused, right PIN unlocks", async () => {
-    // OS keychain is not available on a headless Linux box (basic_text backend): the plugin must say so, not pretend.
+    // The OS keychain is real on macOS (Keychain) and Windows (DPAPI) and the
+    // plugin must offer it there; on a headless Linux box Electron falls back
+    // to basic_text and the plugin must say it is unavailable, not pretend.
     const opts: { method: string; available: boolean }[] = await a.eval((plugin) => plugin.protectionOptions());
-    expect(opts.find((o) => o.method === "safe")!.available).toBe(false);
-    await expect(a.eval((plugin) => plugin.setProtection("safe"))).rejects.toThrow(/keychain/);
+    const safe = opts.find((o) => o.method === "safe")!;
+    if (process.platform === "linux") {
+      expect(safe.available).toBe(false);
+      await expect(a.eval((plugin) => plugin.setProtection("safe"))).rejects.toThrow(/keychain/);
+    } else {
+      expect(safe.available).toBe(true);
+      await a.eval((plugin) => plugin.setProtection("safe"));
+      const sealed = JSON.parse(await fsp.readFile(join(a.vault, ".obsidian/plugins/obsync/data.json"), "utf8"));
+      expect(sealed.identity).toBeNull();
+      expect(sealed.sealed.method).toBe("safe");
+      await a.eval((plugin) => plugin.setProtection("none"));
+    }
 
     await a.eval((plugin) => plugin.setProtection("pin", { pin: "4321-abcd" }));
     const onDisk = JSON.parse(await fsp.readFile(join(a.vault, ".obsidian/plugins/obsync/data.json"), "utf8"));
@@ -146,14 +158,14 @@ describe.skipIf(!OBSIDIAN_BIN)("real Obsidian, settings UI onboarding, rate limi
     expect(await a.eval((plugin) => plugin.engine)).toBeNull();
     expect(await a.waitFor(() => document.querySelectorAll('.modal input[type="password"]').length > 0, 15_000)).toBe(true);
     // Wrong PIN: still locked, a notice explains.
-    await a.page.locator('.modal input[type="password"]').first().fill("wrong-pin");
+    await (await a.locator('.modal input[type="password"]')).fill("wrong-pin");
     await a.clickModalButton("Unlock");
     expect(await a.waitFor(() => /wrong PIN/.test(document.querySelector(".notice")?.textContent ?? ""), 10_000)).toBe(true);
     expect(await a.eval((plugin) => plugin.locked)).toBe(true);
     // Right PIN via the "Unlock vault keys" command path.
     await a.eval((plugin) => void plugin.unlock());
     expect(await a.waitFor(() => document.querySelectorAll('.modal input[type="password"]').length > 0, 10_000)).toBe(true);
-    await a.page.locator('.modal input[type="password"]').first().fill("4321-abcd");
+    await (await a.locator('.modal input[type="password"]')).fill("4321-abcd");
     await a.clickModalButton("Unlock");
     expect(await a.waitFor(() => Boolean((globalThis as any).app.plugins.plugins.obsync.engine) && !(globalThis as any).app.plugins.plugins.obsync.locked, 20_000)).toBe(true);
     // And it syncs again.

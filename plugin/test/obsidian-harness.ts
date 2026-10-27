@@ -14,7 +14,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { mkdirSync, writeFileSync, copyFileSync, rmSync, existsSync, promises as fsp } from "node:fs";
 import { join, resolve } from "node:path";
 import { createServer } from "node:net";
-import { chromium, type Browser, type Page } from "playwright-core";
+import { chromium, type Browser, type Locator, type Page } from "playwright-core";
 
 export const OBSIDIAN_BIN = process.env.OBSIDIAN_BIN;
 const XVFB = process.env.XVFB_RUN;
@@ -113,7 +113,14 @@ export class ObsidianInstance {
           if (owns) {
             this.page = p;
             await p.evaluate((id) => localStorage.setItem(`enable-plugin-${id}`, "true"), this.id);
-            const loaded = await this.waitFor(() => Boolean((globalThis as unknown as { app: { plugins: { plugins: Record<string, unknown> } } }).app.plugins.plugins["obsync"]), 30_000).catch(() => false);
+            const loaded = await this.waitFor(() => {
+              // Obsidian 1.14+ asks "Do you trust the author of this vault?" when a
+              // vault it has never opened ships plugins; nothing loads until it is
+              // answered. Trust it (the vault is ours) and keep waiting.
+              const trust = [...document.querySelectorAll(".modal.mod-trust-folder button")].find((b) => !b.classList.contains("mod-cancel")) as HTMLButtonElement | undefined;
+              trust?.click();
+              return Boolean((globalThis as unknown as { app: { plugins: { plugins: Record<string, unknown> } } }).app.plugins.plugins["obsync"]);
+            }, 30_000).catch(() => false);
             if (!loaded) {
               // Restricted mode may have blocked plugins before the flag was set: reload once.
               await p.evaluate(() => location.reload());
@@ -149,9 +156,38 @@ export class ObsidianInstance {
     return false;
   }
 
+  /**
+   * Every renderer window of this instance, popouts first. Since Obsidian
+   * 1.14 the settings dialog is its own window, and modals opened from it
+   * live there too; before that everything was in the vault window. UI
+   * helpers search all of them so one suite drives both.
+   */
+  private windows(): Page[] {
+    const all = this.browser.contexts().flatMap((c) => c.pages()).filter((p) => !p.isClosed());
+    return [...all.filter((p) => p !== this.page).reverse(), this.page];
+  }
+
+  /** First window where `build(page)` yields a locator with a match. */
+  private async locate(build: (p: Page) => Locator, what: string, timeoutMs = 10_000): Promise<Locator> {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      for (const p of this.windows()) {
+        const l = build(p);
+        if ((await l.count().catch(() => 0)) > 0) return l.first();
+      }
+      await new Promise((r) => setTimeout(r, 200));
+    }
+    throw new Error(`no window shows ${what}`);
+  }
+
+  /** A locator for `selector` in whichever window currently shows it. */
+  async locator(selector: string, timeoutMs = 10_000): Promise<Locator> {
+    return this.locate((p) => p.locator(selector), selector, timeoutMs);
+  }
+
   /** Find a settings/modal control by its visible text and click it. */
   async clickButton(text: string): Promise<void> {
-    await this.page.locator(`button:has-text("${text}")`).first().click({ timeout: 10_000 });
+    await (await this.locate((p) => p.locator(`button:has-text("${text}")`), `button "${text}"`)).click({ timeout: 10_000 });
   }
 
   /**
@@ -160,21 +196,21 @@ export class ObsidianInstance {
    * "Create" prompt.
    */
   async clickModalButton(text: string): Promise<void> {
-    await this.page.locator(".modal-container").last().locator(`button:text-is("${text}")`).first().click({ timeout: 10_000 });
+    await (await this.locate((p) => p.locator(".modal-container").last().locator(`button:text-is("${text}")`), `modal button "${text}"`)).click({ timeout: 10_000 });
   }
 
   /** Type into the input whose placeholder matches. */
   async fill(placeholder: string, value: string): Promise<void> {
-    await this.page.locator(`input[placeholder="${placeholder}"]`).first().fill(value, { timeout: 10_000 });
+    await (await this.locate((p) => p.locator(`input[placeholder="${placeholder}"]`), `input "${placeholder}"`)).fill(value, { timeout: 10_000 });
   }
 
-  /** Open this plugin's settings tab in the real settings dialog. */
+  /** Open this plugin's settings tab in the real settings dialog (a modal before 1.14, its own window since). */
   async openSettings(): Promise<void> {
     await this.eval((_p, app) => {
       app.setting.open();
       app.setting.openTabById("obsync");
     });
-    await this.page.waitForSelector(".vertical-tab-content", { timeout: 10_000 });
+    await this.locate((p) => p.locator(".vertical-tab-content"), "the settings tab");
   }
 
   async closeSettings(): Promise<void> {
@@ -194,9 +230,11 @@ export class ObsidianInstance {
   async waitForNotice(re: RegExp, timeoutMs = 20_000): Promise<string | null> {
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
-      const texts = (await this.page.evaluate(`[...document.querySelectorAll(".notice")].map((n) => n.textContent)`).catch(() => [])) as string[];
-      const hit = texts.find((t) => re.test(t));
-      if (hit) return hit;
+      for (const p of this.windows()) {
+        const texts = (await p.evaluate(`[...document.querySelectorAll(".notice")].map((n) => n.textContent)`).catch(() => [])) as string[];
+        const hit = texts.find((t) => re.test(t));
+        if (hit) return hit;
+      }
       await new Promise((r) => setTimeout(r, 150));
     }
     return null;

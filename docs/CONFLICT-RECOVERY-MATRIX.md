@@ -63,6 +63,23 @@ partial bytes on disk, rotation locking out a removed device, recovery
 passphrase join, restore to a point in time, a compromised member's crafted
 paths being refused, an undecryptable blob being skipped and repaired.
 
+## Extreme scenarios
+
+| # | Situation | Outcome |
+| --- | --- | --- |
+| 32 | Thirty conflicts on one file inside one minute | Thirty numbered siblings; every losing version kept |
+| 33 | Four key rotations while a device is offline with edits | It catches up through every epoch and its edits land |
+| 34 | Server restored to a backup taken before a key rotation | Devices move back to the restored epoch key, re-encrypt what they push, repair the vault; a new device joins cleanly |
+| 35 | 3,000 files, then 100 deleted on one side and 100 edited on the other | Converges; files deleted on one side but edited on the other survive |
+| 36 | A 48 MB binary edited concurrently | Head and sibling both bit-exact |
+| 37 | Twenty folders deep with a 196-character name | Syncs and conflicts like any file |
+| 38 | Deleted and recreated on one side while the other edits the old content | Both versions kept |
+
+`plugin/test/convergence.test.ts` also runs two harsher configurations:
+five devices on four files for 40 rounds (nearly every sync conflicts), and
+three devices that sync only one round in five for 36 rounds (long offline
+divergence before every reconciliation).
+
 ## Not covered by a test here
 
 - Case-insensitive and normalising file systems (macOS, Windows): the

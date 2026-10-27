@@ -21,8 +21,25 @@ import { createVault, createInviteLink, joinWithLink } from "../src/core/admin";
 import { CONFLICT_RE } from "../src/core/paths";
 import { utf8 } from "../src/core/encoding";
 
-const SEEDS = [1, 2, 3, 4, 5, 6];
-const ROUNDS = 28;
+interface Config {
+  name: string;
+  devices: number;
+  rounds: number;
+  paths: string[];
+  /** Probability that a device skips a round's sync (stays "offline"). */
+  skipSync: number;
+  seeds: number[];
+}
+
+const ALL_PATHS = ["a.md", "b.md", "notes/c.md", "notes/d.md", "deep/x/e.md", "f.txt", "bin.dat", "g.md"];
+
+const CONFIGS: Config[] = [
+  { name: "3 devices, mixed", devices: 3, rounds: 28, paths: ALL_PATHS, skipSync: 0.35, seeds: [1, 2, 3, 4, 5, 6] },
+  // Harsher: five devices on four files, so nearly every sync conflicts.
+  { name: "5 devices, 4 hot files", devices: 5, rounds: 40, paths: ALL_PATHS.slice(0, 4), skipSync: 0.3, seeds: [11, 12, 13] },
+  // Harsher: syncs are rare, so each device diverges for many rounds before reconciling.
+  { name: "3 devices, long divergence", devices: 3, rounds: 36, paths: ALL_PATHS, skipSync: 0.8, seeds: [21, 22, 23] },
+];
 
 function rng(seed: number): () => number {
   let a = seed >>> 0;
@@ -35,20 +52,20 @@ function rng(seed: number): () => number {
   };
 }
 
-const PATHS = ["a.md", "b.md", "notes/c.md", "notes/d.md", "deep/x/e.md", "f.txt", "bin.dat", "g.md"];
 const stem = (p: string) => p.replace(/\.[^.]+$/, "");
 
 describe("randomised multi-device convergence", () => {
-  for (const seed of SEEDS) {
-    it(`seed ${seed}: ${ROUNDS} rounds of random edits, syncs, restarts and outages converge without loss`, async () => {
+  for (const cfg of CONFIGS)
+    for (const seed of cfg.seeds) {
+      const { rounds: ROUNDS, paths: PATHS } = cfg;
+      it(`${cfg.name}, seed ${seed}: ${ROUNDS} rounds converge without loss`, async () => {
       const r = rng(seed);
       const pick = <T>(xs: T[]): T => xs[Math.floor(r() * xs.length)];
       const chance = (p: number) => r() < p;
       const srv = await TestServer.start();
       const sa = await createVault(srv.url, ADMIN, "d0");
-      const sb = await joinWithLink(await createInviteLink(sa), "d1");
-      const sc = await joinWithLink(await createInviteLink(sa), "d2");
-      const devs = [await new Device("d0", sa).start(), await new Device("d1", sb).start(), await new Device("d2", sc).start()];
+      const devs = [await new Device("d0", sa).start()];
+      for (let i = 1; i < cfg.devices; i++) devs.push(await new Device(`d${i}`, await joinWithLink(await createInviteLink(sa), `d${i}`)).start());
       // What each device last wrote per path, and whether it deleted the path afterwards.
       const lastWrite = devs.map(() => new Map<string, Uint8Array>());
       const trace: string[] = [];
@@ -123,7 +140,7 @@ describe("randomised multi-device convergence", () => {
           // Syncs in random order; some devices stay offline this round.
           const order = [...devs].sort(() => r() - 0.5);
           for (const d of order) {
-            if (chance(0.35)) continue;
+            if (chance(cfg.skipSync)) continue;
             trace.push(`${round} ${d.name} sync`);
             await d.sync();
             await followMerges(d);
@@ -132,9 +149,12 @@ describe("randomised multi-device convergence", () => {
         for (const d of devs) await followMerges(d);
         // Settle.
         let quiet = 0;
-        for (let i = 0; i < 12 && quiet < 2; i++) {
+        for (let i = 0; i < 20 && quiet < 2; i++) {
           const before = devs.map((d) => d.posts + d.uploads);
-          for (const d of devs) await d.sync();
+          for (const d of devs) {
+            await d.sync();
+            await followMerges(d);
+          }
           quiet = devs.every((d, k) => d.posts + d.uploads === before[k]) ? quiet + 1 : 0;
         }
         expect(quiet, "did not converge").toBeGreaterThanOrEqual(2);
@@ -177,6 +197,6 @@ describe("randomised multi-device convergence", () => {
         await Promise.all(devs.map((d) => d.cleanup()));
         await srv.stop();
       }
-    }, 180_000);
-  }
+      }, 300_000);
+    }
 });

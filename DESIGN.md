@@ -878,8 +878,12 @@ stores per entry as `at`:
   the local copy becomes a conflict sibling and the head is applied;
 - the path is unknown to the server: pushed as a new file.
 
-Then the cursor resets and a snapshot pull plus the usual push finish the
-job. Nothing is written to disk by the reconciliation itself; every
+If the backup predates a key rotation the server's epoch goes backwards
+too. The device re-learns the old epoch key from the restored keybox,
+makes it current again (so its authority token and new ciphertext match
+what the server expects), and forgets epochs the server no longer has, so
+the next invite does not offer them. Then the cursor resets and a snapshot
+pull plus the usual push finish the job. Nothing is written to disk by the reconciliation itself; every
 outcome goes through §6.5 and §6.6, so the "nothing is lost" guarantee
 holds across a restore. `plugin/test/conflict-recovery.test.ts` rows 21 and
 22 exercise both the simple case and the concurrent one.

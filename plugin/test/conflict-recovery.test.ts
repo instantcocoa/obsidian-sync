@@ -637,3 +637,160 @@ describe("recovery paths", () => {
     await Promise.all([a.cleanup(), b.cleanup()]);
   });
 });
+
+describe("extreme scenarios", () => {
+  const text = (m: Record<string, string>, f: string) => m[f];
+
+  it("32 thirty conflicts on one file inside one minute: thirty numbered siblings, every version kept", async () => {
+    const [a, b] = await pair();
+    await a.write("storm.md", "0\n");
+    await converge([a, b]);
+    const phoneVersions: string[] = [];
+    for (let i = 1; i <= 30; i++) {
+      await a.write("storm.md", `A${i}\n`);
+      await b.write("storm.md", `B${i}\n`);
+      phoneVersions.push(`B${i}\n`);
+      await a.sync();
+      await b.sync();
+    }
+    await converge([a, b]);
+    const m = await expectIdentical([a, b]);
+    const sibs = siblingsOf(Object.keys(m), "storm (conflict phone");
+    expect(sibs).toHaveLength(30);
+    expect(sibs.map((s) => text(m, s)).sort()).toEqual([...phoneVersions].sort());
+    await Promise.all([a.cleanup(), b.cleanup()]);
+  }, 120_000);
+
+  it("33 rotation storm: four rotations while a device is offline with edits; it catches up through all of them", async () => {
+    const sa = await createVault(srv.url, ADMIN, "laptop");
+    const a = await new Device("laptop", sa).start();
+    const sb = await joinWithLink(await createInviteLink(sa), "phone");
+    const b = await new Device("phone", sb).start();
+    await a.write("r.md", "v1\n");
+    await converge([a, b]);
+    await b.write("r.md", "phone edit during the storm\n");
+    await b.write("r2.md", "phone new during the storm\n");
+    for (let i = 0; i < 4; i++) {
+      const t = await new Device(`temp${i}`, await joinWithLink(await createInviteLink(sa), `temp${i}`)).start();
+      await t.sync();
+      await a.write(`epoch${i + 2}.md`, `written in epoch ${i + 2}\n`);
+      await a.sync();
+      await removeDevice(sa, (await listDevices(sa)).find((d) => d.name === `temp${i}`)!.id);
+      await t.cleanup();
+    }
+    const info = await sa.client.vault(sa.identity.vaultId);
+    expect([info.epoch, info.min_epoch]).toEqual([5, 5]);
+    await converge([a, b]);
+    const m = await expectIdentical([a, b]);
+    expect(m["r.md"]).toBe("phone edit during the storm\n");
+    expect(m["r2.md"]).toBe("phone new during the storm\n");
+    for (let e = 2; e <= 5; e++) expect(m[`epoch${e}.md`]).toBe(`written in epoch ${e}\n`);
+    await Promise.all([a.cleanup(), b.cleanup()]);
+  }, 120_000);
+
+  it("34 server restored to a backup taken before a key rotation: devices re-adopt the old epoch and repair", async () => {
+    const own = await TestServer.start();
+    const sa = await createVault(own.url, ADMIN, "laptop");
+    const a = await new Device("laptop", sa).start();
+    const sb = await joinWithLink(await createInviteLink(sa), "phone");
+    const b = await new Device("phone", sb).start();
+    await a.write("k.md", "epoch 1 content\n");
+    await converge([a, b]);
+    const backup = await own.backup();
+    const t = await new Device("temp", await joinWithLink(await createInviteLink(sa), "temp")).start();
+    await t.sync();
+    await removeDevice(sa, (await listDevices(sa)).find((d) => d.name === "temp")!.id);
+    await t.cleanup();
+    await a.write("k.md", "epoch 2 content\n");
+    await a.write("k2.md", "new in epoch 2\n");
+    await converge([a, b]);
+    expect((await sa.client.vault(sa.identity.vaultId)).epoch).toBe(2);
+    await own.restoreFrom(backup);
+    expect((await sa.client.vault(sa.identity.vaultId)).epoch).toBe(1);
+    await converge([a, b], 12);
+    const m = await expectIdentical([a, b]);
+    expect(m).toEqual({ "k.md": "epoch 2 content\n", "k2.md": "new in epoch 2\n" });
+    for (const d of [a, b]) expect(d.engine.getStatus().phase).toBe("idle");
+    const c = await new Device("tablet", await joinWithLink(await createInviteLink(sa), "tablet")).start();
+    await c.sync();
+    expect(await contents(c)).toEqual(m);
+    await Promise.all([a.cleanup(), b.cleanup(), c.cleanup()]);
+    await own.stop();
+  }, 120_000);
+
+  it("35 large vault: 3000 files synced, then 100 deleted on one side and 100 edited on the other", async () => {
+    const sa = await createVault(srv.url, ADMIN, "laptop");
+    const sb = await joinWithLink(await createInviteLink(sa), "phone");
+    const a = await new Device("laptop", sa).start();
+    const b = await new Device("phone", sb, { massDelete: { min: 1000, fraction: 1 } }).start();
+    const t0 = Date.now();
+    for (let i = 0; i < 3000; i++) await a.write(`v/${i % 30}/f${i}.md`, `file ${i}\n`);
+    await a.sync();
+    await b.sync();
+    const t1 = Date.now();
+    expect((await b.files()).length).toBe(3000);
+    for (let i = 0; i < 100; i++) await b.remove(`v/${i % 30}/f${i}.md`);
+    for (let i = 50; i < 150; i++) await a.write(`v/${i % 30}/f${i}.md`, `file ${i} edited\n`);
+    await converge([a, b]);
+    const m = await expectIdentical([a, b]);
+    expect(Object.keys(m)).toHaveLength(2950); // 0..49 gone; 50..99 deleted on one side but edited on the other survive
+    expect(m["v/20/f50.md"]).toBe("file 50 edited\n");
+    expect(m["v/0/f0.md"]).toBeUndefined();
+    console.log(`35: 3000 files, first sync ${t1 - t0} ms, reconciliation ${Date.now() - t1} ms`);
+    await Promise.all([a.cleanup(), b.cleanup()]);
+  }, 300_000);
+
+  it("36 a 48 MB file edited concurrently: head and sibling both bit-exact", async () => {
+    const own = await TestServer.start();
+    const [a, b] = await pair(own);
+    const big = new Uint8Array(48 * 1024 * 1024);
+    for (let i = 0; i < big.length; i += 4096) big[i] = (i / 4096) & 0xff;
+    await a.write("big.bin", big);
+    await converge([a, b]);
+    const va = new Uint8Array(big);
+    va[12345] ^= 1;
+    const vb = new Uint8Array(big);
+    vb[40_000_000] ^= 1;
+    await a.write("big.bin", va);
+    await b.write("big.bin", vb);
+    await converge([a, b]);
+    const sib = siblingsOf(await b.files(), "big (conflict phone");
+    expect(sib).toHaveLength(1);
+    const same = (x: Uint8Array, y: Uint8Array) => Buffer.compare(Buffer.from(x), Buffer.from(y)) === 0;
+    expect(same(await b.readBytes("big.bin"), va)).toBe(true);
+    expect(same(await a.readBytes(sib[0]), vb)).toBe(true);
+    await Promise.all([a.cleanup(), b.cleanup()]);
+    await own.stop();
+  }, 300_000);
+
+  it("37 twenty levels deep with a 196-character name: syncs and conflicts like any file", async () => {
+    const [a, b] = await pair();
+    const dir = Array.from({ length: 20 }, (_, i) => `level${i}`).join("/");
+    const p = `${dir}/${"n".repeat(196)}.md`;
+    await a.write(p, "deep\n");
+    await converge([a, b]);
+    await a.write(p, "deep A\n");
+    await b.write(p, "deep B\n");
+    await converge([a, b]);
+    const m = await expectIdentical([a, b]);
+    expect(m[p]).toBe("deep A\n");
+    const sib = Object.keys(m).filter((f) => f !== p && f.startsWith(`${dir}/`) && CONFLICT_RE.test(f));
+    expect(sib).toHaveLength(1);
+    expect(m[sib[0]]).toBe("deep B\n");
+    await Promise.all([a.cleanup(), b.cleanup()]);
+  });
+
+  it("38 deleted and recreated on one side while the other edits the old content: both kept", async () => {
+    const [a, b] = await pair();
+    await a.write("re.md", "original\n");
+    await converge([a, b]);
+    await a.remove("re.md");
+    await a.sync();
+    await a.write("re.md", "brand new\n");
+    await b.write("re.md", "original, edited on phone\n");
+    await converge([a, b]);
+    const m = await expectIdentical([a, b]);
+    expect(Object.values(m).sort()).toEqual(["brand new\n", "original, edited on phone\n"]);
+    await Promise.all([a.cleanup(), b.cleanup()]);
+  });
+});

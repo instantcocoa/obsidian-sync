@@ -1,3 +1,4 @@
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { readFileSync, writeFileSync, existsSync } from "node:fs";
 import {
@@ -177,7 +178,7 @@ describe("test vectors", () => {
       name_enc_seq_rng: hex(await vc.encryptName("laptop", { rng: seqRng(9) })),
       invite_keybox_I_zero_seq_rng: hex(await encryptInviteKeybox(new Uint8Array(32), fixedKeyring(), seqRng(3))),
     };
-    const file = new URL("./vectors.json", import.meta.url).pathname;
+    const file = fileURLToPath(new URL("./vectors.json", import.meta.url));
     if (process.env.UPDATE_VECTORS || !existsSync(file)) {
       writeFileSync(file, JSON.stringify(vectors, null, 2) + "\n");
     }

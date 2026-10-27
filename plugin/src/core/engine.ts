@@ -637,6 +637,19 @@ export class Engine {
     if (epoch !== this.vc.keyring.current || !this.vc.keyring.epochs.has(epoch) || minEpoch > 1) {
       await this.refreshKeys(minEpoch);
       if (!this.vc.keyring.epochs.has(epoch)) throw new SyncError(`no key for vault epoch ${epoch}; this device may have been removed`);
+      if (epoch < this.vc.keyring.current) {
+        // The server's epoch went backwards: it was restored from a backup
+        // taken before a rotation (§6.8). Its authority hash and its keybox
+        // are the old epoch's, and refreshKeys just re-learned that key from
+        // the restored keybox, so everything we encrypt or sign from now on
+        // uses it again. A later rotation moves forward as usual.
+        this.log("warn", `vault epoch went backwards (${this.vc.keyring.current} -> ${epoch}); using the restored epoch key`);
+        this.vc.keyring.current = epoch;
+        // Keys for epochs the server no longer knows would only be offered to
+        // the next device we invite, which the server would then refuse.
+        for (const e of [...this.vc.keyring.epochs.keys()]) if (e > epoch) this.vc.keyring.epochs.delete(e);
+        this.hooks.onKeysChanged?.();
+      }
       this.state.epoch = epoch;
     }
   }

@@ -22,6 +22,29 @@ jobs:
       - run: go test ./...
         working-directory: server
 
+  # The plugin core inside a real WebKit engine: what Obsidian for iOS runs
+  # plugins in. Crypto vectors, a sync round trip with a conflict, and the
+  # WebSocket live channel, against the real server. Not an iOS device run.
+  webkit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: server/go.mod
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: plugin/package-lock.json
+      - run: npm ci
+        working-directory: plugin
+      - run: npx playwright-core install --with-deps webkit
+        working-directory: plugin
+      - run: WEBKIT=1 npx vitest run test/webkit.test.ts
+        working-directory: plugin
+
   plugin:
     strategy:
       fail-fast: false

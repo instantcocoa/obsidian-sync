@@ -38,8 +38,13 @@ was skipped silently). Two more fixes came out of the run: a plugin reload
 (the path Obsidian's updater takes) raced the final state flush and wiped
 the sync state, and one recovery-passphrase rejoin left a 0-byte note
 once, unreproduced, so every write's size is now verified. The mobile note
-in `plugin/README.md` has the details. Not done: iOS, a physical Android
-device, HTTPS from a phone, and a security review by a human specialist.
+in `plugin/README.md` has the details. A physical phone followed on the same
+day: a Google Pixel 7 (Android 14) in AWS Device Farm, driven by Appium,
+installed the APK, opened a vault, enabled the plugin, joined with an
+invite link over plain http, and synced notes, a non-ASCII name, an empty
+file and an 8 MB attachment both ways, with reconnects after
+backgrounding and a force-stop, twice on two units. Not done: iOS, HTTPS
+from a phone, and a security review by a human specialist.
 Each component's README has the operational
 details and how to run each suite.
 

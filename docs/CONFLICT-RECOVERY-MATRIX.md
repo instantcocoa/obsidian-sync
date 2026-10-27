@@ -82,8 +82,9 @@ divergence before every reconciliation).
 
 ## Not covered by a test here
 
-- iOS and a physical Android phone: need an iPhone, a Mac with Xcode, and
-  a real Android device; the Android emulator run covers the rest.
+- iOS: needs an iPhone and a Mac with Xcode. Android is covered on an
+  emulator (twelve scenarios) and on a physical Pixel 7 (install, join,
+  sync both ways, attachments, backgrounding).
 
 ## macOS (plugin/test/obsidian-macos.test.ts, real Obsidian 1.14.5; Intel EC2 Mac on macOS 15.8, and Apple silicon on GitHub's macos-14 runner in CI)
 

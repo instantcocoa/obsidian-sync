@@ -128,6 +128,11 @@ Obsidian; everything found is fixed and merged:
 - Android (emulator API 34, Obsidian 1.14.4 APK, real desktop peer):
   11/12 as shipped, plugin sync fixed, reload race fixed, write size
   verified; plain http works from the WebView.
+- Physical Android (Google Pixel 7, Android 14, AWS Device Farm, Appium):
+  install, enable, join, notes both ways, non-ASCII name, empty file, 8 MB
+  attachment, backgrounding and force-stop reconnects, two runs on two
+  units, 5.4 device-minutes, no code change. Report under
+  `plugin/.cache/agent-devicefarm/`.
 - GitHub Actions (`.github/workflows/platforms.yml`) runs the full gate on
   ubuntu, macos-14 and windows on every push, real Obsidian included. All
   four jobs are green from commit `7cb5086` on (the first runs needed the
@@ -142,9 +147,10 @@ Obsidian; everything found is fixed and merged:
 
 ## What needs to be done
 
-1. **iOS and a physical Android phone.** The Android emulator run is done;
-   iOS needs a Mac with Xcode and an iPhone, and nobody has held the plugin
-   on a real phone yet. `docs/MOBILE-TEST-PROMPT.md` still applies.
+1. **iOS.** Android is done on an emulator and a real Pixel 7. iOS needs a
+   Mac with Xcode and an iPhone; AWS Device Farm cannot help because App
+   Store apps cannot be uploaded as an IPA. `docs/MOBILE-TEST-PROMPT.md`
+   still applies to the iOS run.
 2. **Human security review.** Hand `docs/SECURITY-REVIEW-GUIDE.md` to a
    specialist. When findings come back, fix them in the style of the
    existing review rounds: a failing test first (`security_test.go` for the

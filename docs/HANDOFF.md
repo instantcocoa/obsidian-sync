@@ -112,16 +112,33 @@ join livelocked the client; if review agents work in the tree, never
 `git add -A` (their probe files were committed once) and give vitest an
 explicit file list.
 
+## Platform runs (2026-10-27)
+
+All three desktop platforms and Android have been exercised with real
+Obsidian; everything found is fixed and merged:
+
+- Windows (EC2 Windows Server 2022, Obsidian 1.14.5): gate 107/107,
+  `plugin/test/obsidian-windows.test.ts`, four plugin bugs fixed (case
+  stat, CRLF merge, locked-file retry, reload race).
+- macOS (EC2 Intel Mac, macOS 15.8, Obsidian 1.14.5): gate 103/103,
+  `plugin/test/obsidian-macos.test.ts`, fixes for case-only renames and
+  case twins, Touch ID detection, unreadable state file; three harness
+  fixes without which Obsidian cannot be driven on macOS.
+- Android (emulator API 34, Obsidian 1.14.4 APK, real desktop peer):
+  11/12 as shipped, plugin sync fixed, reload race fixed, write size
+  verified; plain http works from the WebView.
+- GitHub Actions (`.github/workflows/platforms.yml`) runs the full gate on
+  ubuntu, macos-14 and windows on every push. Linux and Windows pass; the
+  macOS job hung before the macOS harness fixes were merged, so check the
+  first run after `9704a4d`.
+- Reports with verbatim evidence: `plugin/.cache/agent-{win,mac,android}/REPORT.md`
+  on the original machine (gitignored).
+
 ## What needs to be done
 
-1. **Mobile run.** Needs a machine with `/dev/kvm` and about 25 GB free, or
-   a real Android phone, or a Mac for iOS. Follow
-   `docs/MOBILE-TEST-PROMPT.md` to the letter: twelve ordered scenarios,
-   fixes committed one per symptom, a report under
-   `plugin/.cache/mobile/REPORT.md`, then update the status paragraph in
-   `DESIGN.md` and the mobile note in `plugin/README.md` with what was
-   actually run. The original machine cannot do this (no KVM, 7 GB free),
-   which is why it stopped.
+1. **iOS and a physical Android phone.** The Android emulator run is done;
+   iOS needs a Mac with Xcode and an iPhone, and nobody has held the plugin
+   on a real phone yet. `docs/MOBILE-TEST-PROMPT.md` still applies.
 2. **Human security review.** Hand `docs/SECURITY-REVIEW-GUIDE.md` to a
    specialist. When findings come back, fix them in the style of the
    existing review rounds: a failing test first (`security_test.go` for the

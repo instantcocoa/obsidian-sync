@@ -55,7 +55,7 @@ describe.skipIf(!OBSIDIAN_BIN)("real Obsidian, config conflict root cause", () =
     // Obsidian rewrite the file on disk with no plugin involvement.
     await b.eval((_p, app) => app.vault.setConfig("showLineNumber", true));
     const rewritten = await (async () => {
-      const deadline = Date.now() + 15_000;
+      const deadline = Date.now() + 40_000; // Obsidian debounces the save; a loaded CI runner can be slow
       while (Date.now() < deadline) {
         const cur = await appJson(b);
         if (cur !== jb && /showLineNumber/.test(cur)) return cur;

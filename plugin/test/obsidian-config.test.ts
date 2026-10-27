@@ -109,15 +109,20 @@ describe.skipIf(!OBSIDIAN_BIN)("real Obsidian, config conflict root cause", () =
       return [];
     })();
     console.log(`conflict copies on B with adoptConfig=false: ${JSON.stringify(conflict)}`);
-    expect(conflict).toHaveLength(1);
-    expect(conflict[0]).toMatch(/^app \(conflict /);
+    // app.json always conflicts. Depending on when Obsidian rewrites its other
+    // config files (community-plugins.json on 1.14 after the plugin loads),
+    // they can conflict too: the same pathology, one more file. Never zero,
+    // and the app.json copy must hold B's own bytes.
+    expect(conflict.length).toBeGreaterThanOrEqual(1);
+    const appCopy = conflict.find((f) => /^app \(conflict /.test(f))!;
+    expect(appCopy).toBeDefined();
     // The sibling holds B's own pre-join bytes; the live app.json is the vault's.
-    expect(await fsp.readFile(join(b.vault, ".obsidian", conflict[0]), "utf8")).toBe(jb);
+    expect(await fsp.readFile(join(b.vault, ".obsidian", appCopy), "utf8")).toBe(jb);
     expect(await b.waitForFile(".obsidian/app.json", ja, 20_000)).toBe(ja);
-    // The sibling is listed once B has pushed it (state entry gets a hash then).
-    expect(await b.waitFor(() => (globalThis as any).app.plugins.plugins.obsync.engine.conflictFiles().length === 1, 30_000)).toBe(true);
+    // The siblings are listed once B has pushed them (state entries get a hash then).
+    expect(await b.waitFor(() => (globalThis as any).app.plugins.plugins.obsync.engine.conflictFiles().length >= 1, 30_000)).toBe(true);
     const listed: string[] = await b.eval((plugin) => plugin.engine.conflictFiles());
-    expect(listed).toEqual([`.obsidian/${conflict[0]}`]);
+    expect(listed).toContain(`.obsidian/${appCopy}`);
   }, 120_000);
 
   it("WITH the adoption rule (default), the same join adopts the vault's app.json silently", async () => {

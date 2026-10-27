@@ -76,14 +76,22 @@ jobs:
         run: npm run check && npm run build
         working-directory: plugin
 
-      - name: Full plugin gate (unit, Node e2e, conflict/recovery, convergence, real Obsidian)
-        run: npx vitest run
+      - name: Node suites (unit, e2e, conflict/recovery, convergence, platform suites)
+        run: npx vitest run --exclude 'test/obsidian.test.ts' --exclude 'test/obsidian-ui.test.ts' --exclude 'test/obsidian-config.test.ts'
         working-directory: plugin
+        timeout-minutes: 25
 
-      - name: Keep Obsidian logs on failure
-        if: failure()
+      - name: Real-Obsidian suites
+        run: npx vitest run --reporter=verbose test/obsidian.test.ts test/obsidian-ui.test.ts test/obsidian-config.test.ts
+        working-directory: plugin
+        timeout-minutes: 30
+
+      - name: Keep Obsidian state and logs
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: obsidian-e2e-${{ matrix.os }}
-          path: plugin/.cache/obsidian-e2e/**/state/user-data/logs/**
+          path: |
+            plugin/.cache/obsidian-e2e/**/state/user-data/logs/**
+            plugin/.cache/obsidian-e2e/**/vault/.obsidian/plugins/obsync/*.json
           if-no-files-found: ignore

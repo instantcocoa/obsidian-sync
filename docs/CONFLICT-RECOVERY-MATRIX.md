@@ -82,10 +82,28 @@ divergence before every reconciliation).
 
 ## Not covered by a test here
 
-- Case-insensitive and normalising file systems (macOS, Windows): the
-  engine's rules are tested on Linux; a run on those systems is part of the
-  macOS brief (`plugin/.cache/agent-mac` report) and still pending for
-  Windows.
+- macOS: the engine's rules are tested on Linux and Windows; the macOS run
+  (APFS case-insensitivity, NFD names, Keychain) is in progress on an EC2
+  Mac and reported under `plugin/.cache/agent-mac`.
+
+## Windows (plugin/test/obsidian-windows.test.ts, real Obsidian on Windows Server 2022)
+
+| # | Situation | Outcome |
+| --- | --- | --- |
+| W1 | Names NTFS refuses (`CON.md`, `aux.txt`, `NUL`, trailing dot or space, `:` `|` `?`) arrive from another device | Refused and reported through the skipped-op notice; nothing written under another name; sync continues |
+| W2 | `Note.md` and `note.md` from a case-sensitive device | First kept, second skipped and reported; no overwrite; a Linux device keeps both |
+| W3 | Case-only rename on Windows | Every device ends with exactly one file with the new casing, no sibling, no delete/put loop |
+| W4 | 318- and 378-character absolute paths with the stock long-path policy | Sync cleanly |
+| W5 | OS keychain (DPAPI) protection | Keys sealed, nothing sensitive in `data.json`, reload unlocks without a prompt |
+| W6 | A note held open with an exclusive lock while a remote edit arrives | Reported once, nothing partial on disk, applied after the lock is released |
+| W7 | CRLF on Windows, LF on Linux, concurrent edits | Merge cleanly; lines compare without their line ending |
+
+Bugs this run found and fixed, all with regression tests that also run on
+Linux: `ObsidianFS.stat` answered for the wrong case on case-insensitive
+volumes; CRLF/LF re-saves conflicted on every line; a write refused because
+the file was in use was skipped for good instead of retried; and, on every
+platform, a plugin reload raced the previous engine's state flush so the
+new engine could come up and never start.
 - Simultaneous conflicting edits on the two halves of a plugin update
   (`main.js` and `manifest.json` from different versions): the files are
   independent and would merge or sibling individually; §7.3 atomicity covers

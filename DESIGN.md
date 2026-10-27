@@ -16,7 +16,10 @@ safety (`plugin/test/bundle-mobile.test.ts`: no Node modules or globals
 outside feature-guarded paths, `isDesktopOnly: false`). Every conflict
 shape and recovery path has a scenario test, and seeded random
 multi-device histories are checked for convergence and no loss (§8,
-`docs/CONFLICT-RECOVERY-MATRIX.md`). Not done: any run on
+`docs/CONFLICT-RECOVERY-MATRIX.md`). The full gate, real Obsidian included,
+runs on Linux, macOS and Windows in GitHub Actions on every push, and a
+Windows-specific suite covers NTFS names, case, long paths, DPAPI, file
+locks and CRLF. Not done: any run on
 an actual iOS or Android device, and a security review by a human
 specialist. Each component's README has the operational
 details and how to run each suite.

@@ -258,10 +258,31 @@ export class ObsidianStateStore implements StateStore {
     private app: App,
     private file: string,
   ) {}
+  /**
+   * A save is write tmp → remove → rename, so the file is briefly absent.
+   * That window met a reload on both Android and desktop: Obsidian does not
+   * await an async onunload, so the next plugin instance loads state while
+   * the previous engine's final flush is still running; exists() said yes,
+   * read() threw ENOENT, the engine started with an empty state and later
+   * saved it over the real one. While the tmp file is there a rename is
+   * imminent: wait for it. A tmp file that never goes away (a crash mid-save)
+   * is the newest state there is and is used.
+   */
   async load(): Promise<string | null> {
     const a = this.app.vault.adapter;
-    if (!(await a.exists(this.file))) return null;
-    return a.read(this.file);
+    const tmp = this.file + ".tmp";
+    for (let attempt = 0; attempt < 20; attempt++) {
+      if (await a.exists(this.file)) {
+        try {
+          return await a.read(this.file);
+        } catch {
+          /* removed between exists and read: a save is in flight */
+        }
+      }
+      if (!(await a.exists(tmp))) return null;
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    return (await a.exists(tmp)) ? a.read(tmp).catch(() => null) : null;
   }
   async save(json: string): Promise<void> {
     const a = this.app.vault.adapter;

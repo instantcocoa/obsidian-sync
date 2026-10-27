@@ -120,7 +120,8 @@ Obsidian; everything found is fixed and merged:
 - Windows (EC2 Windows Server 2022, Obsidian 1.14.5): gate 107/107,
   `plugin/test/obsidian-windows.test.ts`, four plugin bugs fixed (case
   stat, CRLF merge, locked-file retry, reload race).
-- macOS (EC2 Intel Mac, macOS 15.8, Obsidian 1.14.5): gate 103/103,
+- macOS (EC2 Intel Mac, macOS 15.8, Obsidian 1.14.5, and Apple silicon on
+  the macos-14 CI runner): gate 103/103,
   `plugin/test/obsidian-macos.test.ts`, fixes for case-only renames and
   case twins, Touch ID detection, unreadable state file; three harness
   fixes without which Obsidian cannot be driven on macOS.

@@ -82,10 +82,10 @@ divergence before every reconciliation).
 
 ## Not covered by a test here
 
-- Only Intel macOS was run (an EC2 mac1 host; no Apple-silicon host had
-  capacity). The plugin bundle is architecture-independent.
+- iOS and a physical Android phone: need an iPhone, a Mac with Xcode, and
+  a real Android device; the Android emulator run covers the rest.
 
-## macOS (plugin/test/obsidian-macos.test.ts, real Obsidian 1.14.5 on macOS 15.8, Intel)
+## macOS (plugin/test/obsidian-macos.test.ts, real Obsidian 1.14.5; Intel EC2 Mac on macOS 15.8, and Apple silicon on GitHub's macos-14 runner in CI)
 
 | # | Situation | Outcome |
 | --- | --- | --- |

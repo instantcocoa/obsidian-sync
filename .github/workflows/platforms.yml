@@ -81,8 +81,15 @@ jobs:
         working-directory: plugin
         timeout-minutes: 25
 
+      # A hung Electron can outlive the step timeout and take the job's log
+      # with it, so the step kills itself after 25 minutes and its output is
+      # written to a file that is uploaded whatever happens.
       - name: Real-Obsidian suites
-        run: npx vitest run --reporter=verbose test/obsidian.test.ts test/obsidian-ui.test.ts test/obsidian-config.test.ts
+        shell: bash
+        run: |
+          set -o pipefail
+          mkdir -p .cache
+          perl -e 'alarm 1500; exec @ARGV' npx vitest run --reporter=verbose test/obsidian.test.ts test/obsidian-ui.test.ts test/obsidian-config.test.ts 2>&1 | tee .cache/obsidian-gate.log
         working-directory: plugin
         timeout-minutes: 30
 
@@ -92,6 +99,7 @@ jobs:
         with:
           name: obsidian-e2e-${{ matrix.os }}
           path: |
+            plugin/.cache/obsidian-gate.log
             plugin/.cache/obsidian-e2e/**/state/user-data/logs/**
             plugin/.cache/obsidian-e2e/**/vault/.obsidian/plugins/obsync/*.json
           if-no-files-found: ignore

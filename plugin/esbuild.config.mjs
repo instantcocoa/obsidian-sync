@@ -17,7 +17,7 @@ const ctx = await esbuild.context({
   minify: prod,
   treeShaking: true,
   outfile: "main.js",
-  banner: { js: "/* obsync — https://github.com/ (see DESIGN.md) */" },
+  banner: { js: "/* obsync — https://github.com/instantcocoa/obsidian-sync */" },
 });
 
 if (prod) {

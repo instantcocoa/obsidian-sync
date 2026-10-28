@@ -12,7 +12,14 @@ Pairs with the `obsync` server in `../server`. Design and rationale are in
    Plain `http://` is fine on a desktop or a LAN (the Android app accepts it
    too); anything reachable from the internet should use HTTPS with a real
    certificate, and `--acme-domain` does that for you.
-2. Install the plugin: copy `main.js`, `manifest.json` and `styles.css` into
+2. Install the plugin. The easy way, on desktop and mobile alike, is
+   [BRAT](https://github.com/TfTHacker/obsidian42-brat): install BRAT from
+   Community plugins, then in its settings choose **Add beta plugin**, paste
+   `instantcocoa/obsidian-sync`, and let it install and enable obsync from
+   the latest GitHub release. By hand: download `main.js`, `manifest.json`
+   and `styles.css` from the
+   [latest release](https://github.com/instantcocoa/obsidian-sync/releases/latest)
+   (or build them, see Development) into
    `<vault>/.obsidian/plugins/obsync/`, restart Obsidian, and under
    Settings → Community plugins turn off Restricted mode and enable
    **obsync**. Then open the obsync settings tab.

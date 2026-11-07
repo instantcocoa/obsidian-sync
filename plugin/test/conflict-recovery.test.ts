@@ -812,6 +812,43 @@ describe("extreme scenarios", () => {
     await b.cleanup();
   });
 
+  it("40 a local edit lands while the push of the previous edit is in flight and that push conflicts: nothing lost", async () => {
+    const [a, b] = await pair();
+    await a.write("note.md", "base\n");
+    await a.sync();
+    await b.sync();
+    await b.write("note.md", "base\nlocal one\n");
+    // While b's push is in flight (bytes read, hash computed, request
+    // out): the head moves on the server, and a keystroke saves locally.
+    // The push comes back as a conflict that must not be resolved with the
+    // bytes b read before the keystroke.
+    const client = b.session.client;
+    const orig = client.postOps.bind(client);
+    let injected = false;
+    client.postOps = async (v, ops) => {
+      if (!injected) {
+        injected = true;
+        await a.write("note.md", "base\nremote line\n");
+        await a.sync();
+        await b.write("note.md", (await b.read("note.md")) + "local two\n");
+      }
+      return orig(v, ops);
+    };
+    await b.sync();
+    expect(injected).toBe(true);
+    await b.sync();
+    await a.sync();
+    await b.sync();
+    await a.sync();
+    const all = (await Promise.all((await a.files()).filter((p) => p.startsWith("note")).map((p) => a.read(p)))).join("\n");
+    expect(all).toContain("remote line");
+    expect(all).toContain("local one");
+    expect(all).toContain("local two");
+    expect(await b.files()).toEqual(await a.files());
+    await a.cleanup();
+    await b.cleanup();
+  });
+
   it("38 deleted and recreated on one side while the other edits the old content: both kept", async () => {
     const [a, b] = await pair();
     await a.write("re.md", "original\n");

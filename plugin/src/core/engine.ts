@@ -969,6 +969,13 @@ export class Engine {
     blobs?: Map<string, Uint8Array>,
     seen?: FileStat | null,
   ): Promise<void> {
+    // Decided from `seen` (the stat the local bytes were read under); if the
+    // file is not as it was, those bytes are stale and nothing may be
+    // written on their strength, not even the sibling.
+    if (seen !== undefined) {
+      const now = await this.fs.stat(this.device(logical));
+      if ((seen === null) !== (now === null) || (seen && now && (seen.size !== now.size || seen.mtime !== now.mtime))) throw new ConcurrentLocalEdit(logical);
+    }
     const devPath = this.device(logical);
     const e = this.state.files[logical];
     if (head.blob_id === localHash) {
@@ -1109,8 +1116,19 @@ export class Engine {
       }
     } else if (r.conflict) {
       const meta = await this.vc.decryptMeta(r.conflict.path_id, fromB64(r.conflict.meta_enc));
-      if (p.bytes) await this.resolveConflict(p.logical, p.bytes, p.op.blob_id!, r.conflict, meta);
-      else {
+      if (p.bytes) {
+        // The bytes we pushed were read at scan time; if the file moved on
+        // since (a keystroke saved during the round trip), resolving with
+        // them would overwrite that edit. Leave the file dirty instead: the
+        // next round re-reads it and resolves against the real head.
+        try {
+          await this.resolveConflict(p.logical, p.bytes, p.op.blob_id!, r.conflict, meta, undefined, p.st ?? null);
+        } catch (e) {
+          if (!(e instanceof ConcurrentLocalEdit)) throw e;
+          this.log("info", `${this.device(p.logical)} changed while its push was in flight; resolving next round`);
+          this.markDirty(p.logical);
+        }
+      } else {
         // We tried to delete, but the remote moved on: remote wins, drop the delete.
         await this.applyRemote(p.logical, r.conflict, meta, new Map());
         this.dirty.delete(p.logical);

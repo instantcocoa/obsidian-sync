@@ -135,7 +135,7 @@ describe.skipIf(!OBSIDIAN_BIN)("real Obsidian, config conflict root cause", () =
     expect(appCopy).toBeDefined();
     // The sibling holds B's own pre-join bytes; the live app.json is the vault's.
     expect(await fsp.readFile(join(b.vault, ".obsidian", appCopy), "utf8")).toBe(jb);
-    expect(await b.waitForFile(".obsidian/app.json", ja, 20_000)).toBe(ja);
+    expect(await b.waitForFile(".obsidian/app.json", ja, 60_000)).toBe(ja); // the macOS runner has taken over 20 s here
     // The siblings are listed once B has pushed them (state entries get a hash then).
     expect(await b.waitFor(() => (globalThis as any).app.plugins.plugins.obsync.engine.conflictFiles().length >= 1, 30_000)).toBe(true);
     const listed: string[] = await b.eval((plugin) => plugin.engine.conflictFiles());

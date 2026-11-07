@@ -172,9 +172,11 @@ Obsidian; everything found is fixed and merged:
    under 2 000 000 iterations, one-hour invites, `server/obsync.service`,
    CI actions pinned by commit and releases built in CI from the tag with
    provenance (`.github/workflows/release.yml`). Regression tests:
-   `review4_hardening_test.go`, `review4-hardening.test.ts`. Not yet done:
-   installing the systemd unit on `util` (its devices were lent to another
-   session at the time) and a device re-run of the 0.1.3 plugin.
+   `review4_hardening_test.go`, `review4-hardening.test.ts`. util runs the
+   server as that unit (data in `/var/lib/private/obsync`, admin token
+   regenerated there). CI is green on all five jobs at `c069b18`. Not yet
+   done: a device re-run of the 0.1.3 plugin (the iPhone and iPad were lent
+   to another session when it was cut).
 2. **Human security review.** Hand `docs/SECURITY-REVIEW-GUIDE.md` to a
    specialist. When findings come back, fix them in the style of the
    existing review rounds: a failing test first (`security_test.go` for the

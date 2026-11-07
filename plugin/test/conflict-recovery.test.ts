@@ -780,6 +780,38 @@ describe("extreme scenarios", () => {
     await Promise.all([a.cleanup(), b.cleanup()]);
   });
 
+  it("39 a local edit lands while a remote version is being applied (Obsidian saving a keystroke mid-download): nothing lost", async () => {
+    const [a, b] = await pair();
+    await a.write("note.md", "base\n");
+    await a.sync();
+    await b.sync();
+    await a.write("note.md", "base\nremote line\n");
+    await a.sync();
+    // On b, the local file changes after the apply decision and before the
+    // write: injected at blob decryption, which sits between the two.
+    const orig = b.engine["vc"].decryptBlob.bind(b.engine["vc"]);
+    let injected = false;
+    b.engine["vc"].decryptBlob = async (id: string, ct: Uint8Array) => {
+      if (!injected) {
+        injected = true;
+        await b.write("note.md", "base\nlocal line\n");
+      }
+      return orig(id, ct);
+    };
+    await b.sync();
+    expect(injected).toBe(true);
+    await b.sync();
+    await a.sync();
+    await b.sync();
+    const texts = await Promise.all((await a.files()).filter((p) => p.startsWith("note")).map((p) => a.read(p)));
+    const all = texts.join("\n");
+    expect(all).toContain("remote line");
+    expect(all).toContain("local line");
+    expect(await b.files()).toEqual(await a.files());
+    await a.cleanup();
+    await b.cleanup();
+  });
+
   it("38 deleted and recreated on one side while the other edits the old content: both kept", async () => {
     const [a, b] = await pair();
     await a.write("re.md", "original\n");

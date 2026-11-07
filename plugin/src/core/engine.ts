@@ -116,6 +116,9 @@ const DEFAULTS = {
 
 export class SyncError extends Error {}
 
+/** The local file changed between the apply decision and the write; the decision is remade. */
+class ConcurrentLocalEdit extends Error {}
+
 /** A write refused because another program holds the file (Windows sharing violation, a read-only or locked file). */
 function isFileInUse(e: unknown): boolean {
   return /\b(EBUSY|EPERM|EACCES|EAGAIN|ETXTBSY)\b|sharing violation|being used by another process/i.test(String((e as Error)?.message ?? e));
@@ -809,7 +812,25 @@ export class Engine {
    * Apply one remote op to disk (DESIGN.md §6.5). Caller holds the path lock.
    * `blobs` is a prefetch cache; a miss fetches on demand.
    */
+  /**
+   * Apply one remote op. The decision (converged, local edit, plain write)
+   * is taken from a stat of the file; if the file changes before the write
+   * lands (Obsidian saving a keystroke while a blob downloads), the write is
+   * abandoned and the decision remade, so the edit becomes a merge or a
+   * sibling instead of being overwritten.
+   */
   private async applyRemote(logical: string, op: WireOp, meta: FileMeta, blobs: Map<string, Uint8Array>): Promise<void> {
+    for (let attempt = 0; ; attempt++) {
+      try {
+        return await this.applyRemoteOnce(logical, op, meta, blobs);
+      } catch (e) {
+        if (!(e instanceof ConcurrentLocalEdit) || attempt >= 4) throw e;
+        this.log("info", `${this.device(logical)} changed while a remote version was being applied; deciding again`);
+      }
+    }
+  }
+
+  private async applyRemoteOnce(logical: string, op: WireOp, meta: FileMeta, blobs: Map<string, Uint8Array>): Promise<void> {
     const devPath = this.device(logical);
     const e = this.state.files[logical];
     if (e && e.seq >= op.seq) return; // already applied (replay after a rewind)
@@ -870,12 +891,12 @@ export class Engine {
         // just joined) is adopting the vault's configuration: its own copy is
         // Obsidian's defaults, not an edit worth preserving. Remote wins.
         this.log("info", `adopting vault configuration for ${devPath}`);
-        await this.writeRemote(logical, op, meta, blobs);
+        await this.writeRemote(logical, op, meta, blobs, st);
         return;
       }
       // Concurrent local edit. Resolve (merge or sibling), never overwrite.
       const local = diskBytes ?? (await this.fs.read(devPath));
-      await this.resolveConflict(logical, local, diskHash!, op, meta, blobs);
+      await this.resolveConflict(logical, local, diskHash!, op, meta, blobs, st);
       return;
     }
     if (!st && e && e.hash !== null && this.dirty.has(logical)) {
@@ -883,7 +904,7 @@ export class Engine {
       // deletion was of an older version). Fall through and write it.
       this.dirty.delete(logical);
     }
-    await this.writeRemote(logical, op, meta, blobs);
+    await this.writeRemote(logical, op, meta, blobs, st);
   }
 
   private async fetchBlob(id: string, blobs?: Map<string, Uint8Array>): Promise<Uint8Array> {
@@ -895,7 +916,7 @@ export class Engine {
   }
 
   /** Download (if needed), decrypt, verify, and write a remote put to disk. */
-  private async writeRemote(logical: string, op: WireOp, meta: FileMeta, blobs?: Map<string, Uint8Array>): Promise<void> {
+  private async writeRemote(logical: string, op: WireOp, meta: FileMeta, blobs?: Map<string, Uint8Array>, seen?: FileStat | null): Promise<void> {
     const devPath = this.device(logical);
     const blobId = op.blob_id!;
     let plain: Uint8Array;
@@ -912,6 +933,12 @@ export class Engine {
     // another blob (or the metadata was forged by a key holder); either way
     // the file must not be written.
     if (meta.size !== plain.length) throw new Error(`blob ${blobId} is ${plain.length} bytes but the metadata says ${meta.size}`);
+    // The decision was taken from `seen`; the download above took time. If
+    // the file is not as it was, someone wrote it meanwhile: do not overwrite.
+    if (seen !== undefined) {
+      const now = await this.fs.stat(devPath);
+      if ((seen === null) !== (now === null) || (seen && now && (seen.size !== now.size || seen.mtime !== now.mtime))) throw new ConcurrentLocalEdit(devPath);
+    }
     const mtime = Math.floor(meta.mtime || Date.now());
     this.state.inflight[logical] = { blob: blobId, seq: op.seq, size: plain.length, mtime };
     await this.flushState();
@@ -940,6 +967,7 @@ export class Engine {
     head: WireOp,
     meta: FileMeta,
     blobs?: Map<string, Uint8Array>,
+    seen?: FileStat | null,
   ): Promise<void> {
     const devPath = this.device(logical);
     const e = this.state.files[logical];
@@ -986,7 +1014,7 @@ export class Engine {
     const sibDev = this.device(sibLogical);
     await this.fs.write(sibDev, local, Date.now());
     this.markDirty(sibLogical);
-    await this.writeRemote(logical, head, meta, blobs);
+    await this.writeRemote(logical, head, meta, blobs, seen);
     this.log("warn", `conflict on ${devPath}; local version saved as ${sibDev}`);
     this.hooks.onConflict?.(devPath, sibDev);
   }

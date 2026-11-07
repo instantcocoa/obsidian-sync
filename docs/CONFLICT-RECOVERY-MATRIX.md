@@ -74,6 +74,7 @@ paths being refused, an undecryptable blob being skipped and repaired.
 | 36 | A 48 MB binary edited concurrently | Head and sibling both bit-exact |
 | 37 | Twenty folders deep with a 196-character name | Syncs and conflicts like any file |
 | 38 | Deleted and recreated on one side while the other edits the old content | Both versions kept |
+| 39 | A local edit lands between the apply decision and the write (Obsidian saving a keystroke while a blob downloads) | The write is abandoned and the decision remade: merge or sibling, never an overwrite (found by the iOS rapid-edit scenario, run 8) |
 
 `plugin/test/convergence.test.ts` also runs two harsher configurations:
 five devices on four files for 40 rounds (nearly every sync conflicts), and
@@ -155,7 +156,7 @@ scenarios, all green on 2026-11-07 (run 7):
 | I16 | Renamed on the Mac while the iPad edited it at the old name | Both files on all three |
 | I17 | 1 MB binary edited on both devices at once | Head and copy bit-exact on all three |
 | I18 | Folder deleted on the Mac while the iPhone edited a note inside | Edited note survives everywhere, the other note is gone everywhere |
-| I19 | Ten rapid alternating in-app appends from both devices | Every appended line present; head plus one copy |
+| I19 | Ten rapid alternating in-app appends from both devices | Every appended line present; head plus copies. Run 8 lost one line here: an append landed between the plugin's apply decision and its write of a remote version. Fixed in the engine (scenario 39 above) |
 | I20 | Byte-for-byte comparison | 25 files identical on the Mac, the iPhone and the iPad |
 
 Then `plugin/test/linux-joins.test.ts`: real Obsidian 1.14.5 on Linux

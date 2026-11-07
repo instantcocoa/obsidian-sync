@@ -91,7 +91,18 @@ describe("roster trust (names, planted devices)", () => {
   });
 });
 
-describe("AEAD bindings (what a tampering server can do)", () => {
+const HAS_SQLITE3 = (() => {
+  try {
+    execFileSync("sqlite3", ["--version"], { stdio: "ignore" });
+    return true;
+  } catch {
+    return false;
+  }
+})();
+
+// The tamper step edits the server's database with the sqlite3 CLI, which
+// GitHub's Windows runners do not ship; the Linux and macOS jobs run it.
+describe.skipIf(!HAS_SQLITE3)("AEAD bindings (what a tampering server can do)", () => {
   it("a server cannot re-pair one path's metadata with another path's blob", async () => {
     const sa = await createVault(srv.url, ADMIN, "laptop");
     const vault = sa.identity.vaultId;

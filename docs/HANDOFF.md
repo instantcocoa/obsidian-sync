@@ -186,6 +186,19 @@ Obsidian; everything found is fixed and merged:
    offered only at enrolment, a paused device re-downloading the snapshot).
    All fixed; `review5_test.go`, `review5.test.ts`. util's admin token was
    rotated and its journal purged afterwards.
+1d. **Sixth review (2026-11-07): fresh eyes over the whole 0.1.4 system,
+   3.5/5 → fixed.** Protocol and plugin half: the review-3 folding fix had
+   reached one of three comparison sites (exclusions and the plugin-reload
+   hook matched with a bare `i` flag, so `plugins/obſync/main.js` landed in
+   the real obsync folder on APFS); `decryptBlob` inflated without bound
+   (a 64 KiB ciphertext of zeros became 64 MiB on every device, before any
+   check); honest devices with 0.1.0 name rows were revoked as unproven by
+   the next rotation; `meta_enc` leaked path lengths; the invite link's
+   server field accepted userinfo and any scheme; `:` passed path
+   validation (NTFS streams); re-encryption overwrote the metadata's blob
+   binding. All fixed; `plugin/test/review6-*.test.ts` (17 tests), crypto
+   vectors regenerated for the padded metadata. Server half: see the
+   `review6_test.go` entry below once that report is in.
 2. **Human security review.** Hand `docs/SECURITY-REVIEW-GUIDE.md` to a
    specialist. When findings come back, fix them in the style of the
    existing review rounds: a failing test first (`security_test.go` for the

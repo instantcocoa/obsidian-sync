@@ -17,7 +17,7 @@ import { VaultCrypto, CryptoError, unwrapEpochKey, type FileMeta } from "./crypt
 import { fromB64, bytesEqual } from "./encoding";
 import type { FileStat, StateStore, VaultFS } from "./fs";
 import { mergeJson, mergeText } from "./merge";
-import { aliasesConfigDir, compileExclusions, conflictPath, fromLogical, isJsonPath, isSafeDevicePath, isSafeLogicalPath, isTextPath, toLogical, CONFIG_TOKEN, logicalAliasesConfigDir } from "./paths";
+import { aliasesConfigDir, compileExclusions, conflictPath, fromLogical, isJsonPath, isSafeDevicePath, isSafeLogicalPath, isTextPath, toLogical, logicalAliasesConfigDir, isConfigLogical } from "./paths";
 import { NetworkError, Client, HttpError, type Feed, type OpInput, type OpResult, type WireOp } from "./transport";
 
 // ---------- types ----------
@@ -398,7 +398,7 @@ export class Engine {
       // The dot-only scan covers root-level dot entries (config dir, .trash…),
       // which is also exactly what listDot() returns, so "missing" below is
       // judged against the same universe.
-      const inDotScope = (logical: string) => logical.startsWith(CONFIG_TOKEN) || logical.startsWith(".");
+      const inDotScope = (logical: string) => isConfigLogical(logical) || logical.startsWith(".");
       const all = opts.onlyDot && this.fs.listDot ? await this.fs.listDot() : await this.fs.list();
       const seen = new Set<string>();
       let n = 0;
@@ -983,7 +983,7 @@ export class Engine {
       return;
     }
     if (st && localEdited) {
-      if (!e && this.cfg.adoptConfig && logical.startsWith(CONFIG_TOKEN)) {
+      if (!e && this.cfg.adoptConfig && isConfigLogical(logical)) {
         // A device that has never synced this config file (typically one that
         // just joined) is adopting the vault's configuration: its own copy is
         // Obsidian's defaults, not an edit worth preserving. Remote wins.
@@ -1018,11 +1018,11 @@ export class Engine {
     const blobId = op.blob_id!;
     let plain: Uint8Array;
     try {
-      plain = await this.vc.decryptBlob(blobId, await this.fetchBlob(blobId, blobs));
+      plain = await this.vc.decryptBlob(blobId, await this.fetchBlob(blobId, blobs), { maxPlain: meta.size });
     } catch (e) {
       if (e instanceof CryptoError && /epoch/.test(e.message)) {
         await this.refreshKeys();
-        plain = await this.vc.decryptBlob(blobId, await this.fetchBlob(blobId, blobs));
+        plain = await this.vc.decryptBlob(blobId, await this.fetchBlob(blobId, blobs), { maxPlain: meta.size });
       } else throw e;
     }
     // The metadata's size is authenticated; the blob's identity is a keyed
@@ -1092,9 +1092,9 @@ export class Engine {
       try {
         const [base, remote] = await Promise.all([
           this.fetchBlob(e.hash).then((b) => this.vc.decryptBlob(e.hash!, b)),
-          this.fetchBlob(head.blob_id, blobs).then((b) => this.vc.decryptBlob(head.blob_id!, b)),
+          this.fetchBlob(head.blob_id, blobs).then((b) => this.vc.decryptBlob(head.blob_id!, b, { maxPlain: meta.size })),
         ]);
-        const m = isJsonPath(logical) && logical.startsWith(CONFIG_TOKEN) ? mergeJson(base, local, remote) : mergeText(base, local, remote);
+        const m = isJsonPath(logical) && isConfigLogical(logical) ? mergeJson(base, local, remote) : mergeText(base, local, remote);
         if (m.ok && m.merged) {
           const mergedHash = await this.vc.blobId(m.merged);
           const mtime = Date.now();
@@ -1213,6 +1213,15 @@ export class Engine {
       }
     } else if (r.conflict) {
       const meta = await this.vc.decryptMeta(r.conflict.path_id, fromB64(r.conflict.meta_enc));
+      // The head the server hands back gets the same checks as a pulled op:
+      // its metadata must be ours by path and must name the blob the row
+      // carries. Otherwise skip and report, exactly as applyBatch would.
+      if (meta.path !== p.logical || (meta.blob !== undefined && meta.blob !== r.conflict.blob_id)) {
+        this.log("error", `conflict head for ${p.logical} is inconsistent (path ${meta.path}, blob ${meta.blob ?? "null"} vs ${r.conflict.blob_id ?? "null"}); not resolving against it`);
+        this.hooks.onSkipped?.(p.logical, "the server's record of this change is inconsistent");
+        this.dirty.delete(p.logical);
+        return;
+      }
       if (p.bytes) {
         // The bytes we pushed were read at scan time; if the file moved on
         // since (a keystroke saved during the round trip), resolving with

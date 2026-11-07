@@ -23,6 +23,7 @@ import {
   syncIdentityKeys,
   type Identity,
   type Session,
+  ensureOwnName,
 } from "../core/admin";
 import { ObsidianFS, ObsidianStateStore } from "./obsidian-fs";
 import { ConfigHooks } from "./hooks";
@@ -290,6 +291,12 @@ export default class ObsyncPlugin extends Plugin {
     }
     const identity = this.settings.identity;
     this.session = openSession(identity);
+    // A name row from 0.1.0, or from before the name key, does not prove
+    // this device holds the keys; rewrite it so another device's rotation
+    // does not revoke this one. One roster fetch; never blocks the start.
+    void ensureOwnName(this.session)
+      .then((did) => did && console.info("obsync: rewrote this device's name row in the current format"))
+      .catch((e) => console.warn("obsync: could not refresh this device's name row", e));
     const fs = new ObsidianFS(this.app);
     const store = new ObsidianStateStore(this.app, `${this.manifest.dir ?? this.app.vault.configDir + "/plugins/" + this.manifest.id}/state.json`);
     this.engine = new Engine(
@@ -600,10 +607,28 @@ export default class ObsyncPlugin extends Plugin {
     await setRecoveryPassphrase(this.need(), passphrase);
   }
 
+  /**
+   * A rotation is about to lock out devices that never proved they hold the
+   * keys. Say which, and let the person stop it: one of them may be their
+   * own old device that has not started since it was enrolled by 0.1.0.
+   */
+  private confirmUnproven(ids: string[], names: string[]): Promise<boolean> {
+    return ConfirmModal.ask(
+      this.app,
+      `Also revoke ${ids.length} unproven device${ids.length > 1 ? "s" : ""}?`,
+      [
+        "These devices never proved they hold the vault keys, so the new keys cannot be handed to them; continuing locks them out:",
+        ...ids.map((id, i) => `• ${names[i]} (${id.slice(0, 8)}…)`),
+        "If one is yours, open Obsidian on it once so it can prove itself, then run this again. Otherwise continue.",
+      ],
+      "Revoke and continue",
+    );
+  }
+
   /** Remove a device: rotate keys and re-encrypt (also used by the in-Obsidian tests). */
   async removeDeviceById(id: string, onProgress?: (done: number) => void): Promise<void> {
     const s = this.need();
-    await removeDevice(s, id, (done) => onProgress?.(done), (ids) => new Notice(`obsync: ${ids.length} device(s) that never proved they hold the keys were revoked with this rotation.`, 15_000));
+    await removeDevice(s, id, (done) => onProgress?.(done), (ids, names) => this.confirmUnproven(ids, names));
     this.settings.identity = s.identity;
     await this.saveSettings();
   }
@@ -694,7 +719,7 @@ export default class ObsyncPlugin extends Plugin {
     return this.guard(async () => {
       if (!(await ConfirmModal.ask(this.app, "Rotate vault keys?", "New data uses a fresh key and all existing data is re-encrypted. Nothing is removed.", "Rotate"))) return;
       const s = this.need();
-      await removeDevice(s, "", (done) => this.statusEl.setText(`obsync re-encrypting ${done}`));
+      await removeDevice(s, "", (done) => this.statusEl.setText(`obsync re-encrypting ${done}`), (ids, names) => this.confirmUnproven(ids, names));
       this.settings.identity = s.identity;
       await this.saveSettings();
       new Notice("obsync: keys rotated.");

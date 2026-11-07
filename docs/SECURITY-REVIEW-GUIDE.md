@@ -155,15 +155,27 @@ applies to disk. The validation is the only thing between a malicious op
 and the local filesystem.
 
 - `isSafeLogicalPath`: rejects empty, `.` and `..` segments, leading `/`,
-  backslashes, control characters, trailing dot or space, Windows 8.3 short
-  names, Windows reserved device names, components over 255 bytes, and
-  `$CONFIG` anywhere but the first segment. Try to get past it with
+  backslashes, control characters, the Windows-forbidden `: < > " | ? *`
+  (sixth review: `::$DATA` named the file itself on NTFS and escaped its
+  exclusion), trailing dot or space, Windows 8.3 short names, Windows
+  reserved device names, components over 255 bytes, and `$CONFIG` anywhere
+  but the first segment. Try to get past it with
   Unicode normalisation tricks, overlong encodings, case folding, combining
   marks, or a path that is safe on Linux and dangerous on Windows or macOS
   (case-insensitive and normalising filesystems).
-- `aliasesConfigDir` with `fold()` blocks writes that alias the config
-  directory under a different case or with combining marks. Check it against
-  the real config directory name being user-settable.
+- `fold()` (NFKC, both case directions, marks stripped) is applied at every
+  remote-string-versus-local-name comparison: `aliasesConfigDir`,
+  `compileExclusions`, `ConfigHooks.afterApply`, and the fold-clash refusal
+  in both filesystems' write paths. The sixth review found it applied to the
+  first of these only (`/obsync/i` does not match `obſync`, APFS does).
+  Check for any comparison site still using `toLowerCase()` or a bare `i`
+  flag, and whether NTFS folds U+017F and U+212A the way APFS does.
+- `decryptBlob(id, blob, { maxPlain })`: the engine passes the authenticated
+  `meta.size`; the deflate stream is cancelled one chunk past it (sixth
+  review: a 64 KiB ciphertext inflated to 64 MiB on every device before any
+  check, and the crash came before the cursor advanced). Look for any other
+  allocation a single hostile op controls: parallel prefetch of a batch,
+  `siblingFor`'s directory scans, metadata size.
 - `pathId(meta.path) === op.path_id`: the decrypted path must match the id
   the op is keyed by, so a holder of `K_e` cannot write under a path the
   server would attribute to another id. Confirm this is checked before any

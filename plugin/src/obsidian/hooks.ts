@@ -5,6 +5,7 @@
  * sync.
  */
 import { App, Notice, Platform } from "obsidian";
+import { fold } from "../core/paths";
 
 type AppInternals = App & {
   plugins?: {
@@ -49,21 +50,25 @@ export class ConfigHooks {
   afterApply(path: string, _kind: "put" | "delete"): void {
     const cfg = this.app.vault.configDir + "/";
     if (!path.startsWith(cfg)) return;
-    const rel = path.slice(cfg.length);
-    const m = /^plugins\/([^/]+)\/(main\.js|manifest\.json|styles\.css)$/.exec(rel);
-    if (m) {
-      if (m[1] !== this.selfId) this.schedulePluginReload(m[1]);
+    // The segments are compared folded, the way the volume folds names: on
+    // APFS "pluginſ/x/main.js" is plugins/x/main.js, and code that arrived
+    // under that spelling must raise the same reload and the same notice.
+    // The plugin id itself is kept as spelled; Obsidian keys plugins by it.
+    const segs = path.slice(cfg.length).split("/");
+    const f = segs.map(fold);
+    if (f.length === 3 && f[0] === "plugins" && (f[2] === "main.js" || f[2] === "manifest.json" || f[2] === "styles.css")) {
+      if (fold(segs[1]) !== fold(this.selfId)) this.schedulePluginReload(segs[1]);
       return;
     }
-    if (rel === "community-plugins.json") {
+    if (f.length === 1 && f[0] === "community-plugins.json") {
       void this.reconcileEnabledPlugins();
       return;
     }
-    if (rel.startsWith("snippets/") || rel === "appearance.json" || rel.startsWith("themes/")) {
+    if (f[0] === "snippets" || f[0] === "themes" || (f.length === 1 && f[0] === "appearance.json")) {
       this.scheduleCssReload();
       return;
     }
-    if (/^(app|hotkeys|core-plugins|graph|types|command-palette|daily-notes|templates)\.json$/.test(rel) || /^plugins\/[^/]+\/data\.json$/.test(rel)) {
+    if ((f.length === 1 && /^(app|hotkeys|core-plugins|graph|types|command-palette|daily-notes|templates)\.json$/.test(f[0])) || (f.length === 3 && f[0] === "plugins" && f[2] === "data.json")) {
       this.noticeRestartOnce();
     }
   }

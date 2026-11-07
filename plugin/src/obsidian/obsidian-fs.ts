@@ -12,7 +12,7 @@
  * Obsidian notices.
  */
 import { App, TFile, TFolder, normalizePath } from "obsidian";
-import { isSafeDevicePath } from "../core/paths";
+import { isSafeDevicePath, foldClash } from "../core/paths";
 import type { FileStat, VaultFS, StateStore } from "../core/fs";
 
 type AdapterExt = App["vault"]["adapter"] & {
@@ -167,32 +167,42 @@ export class ObsidianFS implements VaultFS {
     return this.caseInsensitive;
   }
 
-  /** The entry in `path`'s folder that equals `path` ignoring case, as the file system spells it, or null. */
+  /**
+   * An existing entry (file or folder, at any depth of `path`) that this
+   * volume treats as one of `path`'s segments although it is spelled
+   * differently, as the file system spells it, or null. Folded the way the
+   * volume folds (`fold`), not just by case: "obſync" is obsync on APFS.
+   */
   private async spelledAs(path: string): Promise<string | null> {
-    const i = path.lastIndexOf("/");
-    const dir = i < 0 ? "" : path.slice(0, i);
-    try {
-      const want = path.toLowerCase();
-      for (const f of (await this.app.vault.adapter.list(dir)).files) {
-        const p = normalizePath(f);
-        if (p.toLowerCase() === want) return p;
+    const segs = path.split("/");
+    let parent = "";
+    for (const seg of segs) {
+      let l: { files: string[]; folders: string[] };
+      try {
+        l = await this.app.vault.adapter.list(parent);
+      } catch {
+        return null; // the folder is missing, so nothing below it can clash
       }
-    } catch {
-      /* folder missing */
+      for (const e of [...l.files, ...l.folders]) {
+        const p = normalizePath(e);
+        if (foldClash(p.slice(p.lastIndexOf("/") + 1), seg)) return p;
+      }
+      parent = parent ? `${parent}/${seg}` : seg;
     }
     return null;
   }
 
   /**
-   * A new file whose name differs only in case from an existing one cannot
-   * exist on a case-insensitive volume; writing it would silently replace
-   * the other file's bytes. Refuse, so the engine skips the op and reports
-   * it (a case-sensitive device keeps both; this one keeps the first).
+   * A new file whose name (or any folder on the way to it) the volume folds
+   * onto an existing, differently spelled entry would silently replace that
+   * entry's bytes, or land inside a folder the exclusions name under another
+   * spelling. Refuse, so the engine skips the op and reports it (a
+   * case-sensitive device keeps both; this one keeps the first).
    */
   private async refuseCaseClash(path: string): Promise<void> {
     if (!(await this.volumeIgnoresCase())) return;
     const other = await this.spelledAs(path);
-    if (other && other !== path) throw new Error(`"${other}" already exists and this volume ignores case`);
+    if (other) throw new Error(`"${other}" already exists and this volume treats part of "${path}" as the same name`);
   }
 
   private async exactName(path: string): Promise<boolean> {

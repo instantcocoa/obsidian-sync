@@ -57,6 +57,10 @@ const B = (b: Uint8Array): Uint8Array<ArrayBuffer> => b as Uint8Array<ArrayBuffe
 export const BLOB_VERSION = 0x01;
 export const BLOB_HEADER_LEN = 1 + 4 + 16 + 12;
 export const PAD_BLOCK = 4096;
+/** Encrypted metadata is padded to this many bytes so its length does not give away the path's. */
+export const META_PAD = 256;
+/** Largest plaintext decryptBlob will ever produce: the default server's MaxBlobSize. */
+export const MAX_PLAIN = 1 << 30;
 export const PBKDF2_ITERATIONS = 600_000;
 /**
  * The recovery passphrase alone opens the vault to whoever holds the
@@ -256,7 +260,16 @@ export class VaultCrypto {
   }
 
   /** Decrypts and verifies that the plaintext really has the claimed blob_id. */
-  async decryptBlob(blobId: string, blob: Uint8Array): Promise<Uint8Array> {
+  /**
+   * `maxPlain` bounds the plaintext this call will produce: callers that
+   * hold the op's authenticated metadata pass `meta.size`, so a compressed
+   * body that inflates past it is abandoned mid-stream instead of filling
+   * memory (deflate reaches 1000:1 on zeros; a member could post one such
+   * op and crash every device at every launch). Without it the bound is
+   * MAX_PLAIN, the largest blob a default server stores.
+   */
+  async decryptBlob(blobId: string, blob: Uint8Array, opts: { maxPlain?: number } = {}): Promise<Uint8Array> {
+    const limit = Math.min(opts.maxPlain ?? MAX_PLAIN, MAX_PLAIN);
     if (blob.length < BLOB_HEADER_LEN + 16 || blob[0] !== BLOB_VERSION) throw new CryptoError("bad blob header");
     const epoch = readU32le(blob, 1);
     const salt = blob.subarray(5, 21);
@@ -273,7 +286,10 @@ export class VaultCrypto {
     } else {
       body = bodyFull.subarray(1);
     }
-    const plaintext = flags & 1 ? await inflate(body) : body;
+    const plaintext = flags & 1 ? await inflate(body, limit) : body;
+    // Size before identity: the HMAC over a plaintext larger than the
+    // metadata admits is work for nothing (and the limit is the cheap check).
+    if (plaintext.length > limit) throw new CryptoError(`blob ${blobId} is ${plaintext.length} bytes, more than the ${limit} its metadata allows`);
     // Belt and braces: AEAD already bound the id, but a buggy writer could
     // have mislabelled the content. Never trust a mismatched blob.
     if ((await this.blobId(plaintext)) !== blobId) throw new CryptoError("blob_id mismatch after decrypt");
@@ -290,7 +306,13 @@ export class VaultCrypto {
     const epoch = opts.epoch ?? this.keyring.current;
     const nonce = (opts.rng ?? defaultRng)(12);
     const aad = concat(utf8("meta"), fromHex(pathId), u32le(epoch));
-    const ct = await gcmEncrypt(await this.metaKey(epoch), nonce, aad, utf8(JSON.stringify(meta)));
+    // Padded to a 256-byte multiple with trailing spaces (JSON.parse ignores
+    // them): the metadata's length otherwise reveals each path's exact
+    // length to whoever holds the server's disk.
+    const json = utf8(JSON.stringify(meta));
+    const pad = (META_PAD - (json.length % META_PAD)) % META_PAD;
+    const padded = pad ? concat(json, new Uint8Array(pad).fill(0x20)) : json;
+    const ct = await gcmEncrypt(await this.metaKey(epoch), nonce, aad, padded);
     return concat(u32le(epoch), nonce, ct);
   }
 
@@ -333,23 +355,53 @@ export class VaultCrypto {
     return concat(u32le(0), nonce, ct);
   }
 
-  /** The device's name, or null when the row does not authenticate as `deviceId`'s own. */
+  /**
+   * The device's name, or null when the row does not authenticate as
+   * `deviceId`'s own: name key, epoch field 0, and the device id in the AAD.
+   * This is what rotation trusts as proof that the device holds the keys,
+   * so the two older row formats (see `legacyName`) are not accepted here:
+   * neither binds the id, so the server could copy one onto a planted device.
+   */
   async verifyName(nameEnc: Uint8Array, deviceId: string): Promise<string | null> {
-    if (nameEnc.length < 16 + 16) return null;
-    const epoch = readU32le(nameEnc, 0);
-    const nonce = nameEnc.subarray(4, 16);
-    const ct = nameEnc.subarray(16);
+    if (nameEnc.length < 16 + 16 || readU32le(nameEnc, 0) !== 0) return null;
     try {
-      if (epoch === 0) return fromUtf8(await gcmDecrypt(await this.nameKey(), nonce, nameAad(deviceId), ct));
-      // Rows written by versions before the name key: epoch key, aad "name" only.
-      return fromUtf8(await gcmDecrypt(await this.metaKey(epoch), nonce, utf8("name"), ct));
+      return fromUtf8(await gcmDecrypt(await this.nameKey(), nameEnc.subarray(4, 16), nameAad(deviceId), nameEnc.subarray(16)));
     } catch {
       return null;
     }
   }
 
+  /**
+   * For display: the verified name, else the name as a 0.1.0 row spells it
+   * (name key, no device id in the AAD), else "(unreadable name)". A 0.1.0
+   * row is readable but is NOT proof of keys: without the id in its AAD the
+   * server could copy it onto a planted device, so `verifyName` (what
+   * rotation trusts) keeps refusing it. Every 0.1.1+ device rewrites its own
+   * row at start (`ensureOwnName`), so such rows disappear on upgrade.
+   */
   async decryptName(nameEnc: Uint8Array, deviceId: string): Promise<string> {
-    return (await this.verifyName(nameEnc, deviceId)) ?? "(unreadable name)";
+    const v = await this.verifyName(nameEnc, deviceId);
+    if (v !== null) return v;
+    return (await this.legacyName(nameEnc)) ?? "(unreadable name)";
+  }
+
+  /**
+   * The name an old-format row carries, or null. Readable, not proof. Two
+   * formats: 0.1.0 (name key, epoch field 0, AAD "name") and versions before
+   * the name key (epoch key named in the header, AAD "name"), the latter only
+   * while that epoch's key is still held.
+   */
+  async legacyName(nameEnc: Uint8Array): Promise<string | null> {
+    if (nameEnc.length < 16 + 16) return null;
+    const epoch = readU32le(nameEnc, 0);
+    const nonce = nameEnc.subarray(4, 16);
+    const ct = nameEnc.subarray(16);
+    try {
+      if (epoch === 0) return fromUtf8(await gcmDecrypt(await this.nameKey(), nonce, utf8("name"), ct));
+      return fromUtf8(await gcmDecrypt(await this.metaKey(epoch), nonce, utf8("name"), ct));
+    } catch {
+      return null;
+    }
   }
 
   private nameKeyP?: Promise<CryptoKey>;
@@ -464,7 +516,22 @@ export function buildInviteLink(server: string, token: string, inviteKey: Uint8A
 export function parseInviteLink(link: string): { server: string; token: string; inviteKey: Uint8Array } {
   const m = /^obsync:\/\/join#([^,]+),([^,]+),([A-Za-z0-9_-]+)$/.exec(link.trim());
   if (!m) throw new Error("not an obsync invite link");
-  return { server: decodeURIComponent(m[1]).replace(/\/+$/, ""), token: m[2], inviteKey: fromB64url(m[3]) };
+  const server = decodeURIComponent(m[1]).replace(/\/+$/, "");
+  // The server must be a bare http(s) origin (plus an optional path). The
+  // string is shown to the person before anything is sent, so a userinfo
+  // prefix ("https://sync.owner.example@evil.example") must not be able to
+  // dress the attacker's host up as the owner's, and no other scheme makes
+  // sense for a fetch target.
+  let u: URL;
+  try {
+    u = new URL(server);
+  } catch {
+    throw new Error("the invite link does not name a valid server");
+  }
+  if ((u.protocol !== "https:" && u.protocol !== "http:") || u.username || u.password || u.search || u.hash || !u.hostname) {
+    throw new Error("the invite link's server must be a plain http(s) address");
+  }
+  return { server, token: m[2], inviteKey: fromB64url(m[3]) };
 }
 
 /** See VaultCrypto.authToken. */
@@ -548,14 +615,28 @@ export async function openRecovery(passphrase: string, recoveryEnc: Uint8Array):
 
 // ---------- compression (optional, feature-detected) ----------
 
-async function pipe(data: Uint8Array, stream: { readable: ReadableStream; writable: WritableStream }): Promise<Uint8Array> {
+/**
+ * Run `data` through a transform stream and collect the output, giving up
+ * as soon as more than `limit` bytes have come out: the rest is never
+ * produced, so a decompression bomb costs one chunk past the limit, not
+ * its full size.
+ */
+async function pipe(data: Uint8Array, stream: { readable: ReadableStream; writable: WritableStream }, limit = Infinity): Promise<Uint8Array> {
   const w = stream.writable.getWriter();
   const done = w.write(B(data)).then(() => w.close());
+  // A failed write (the reader cancelled under it) must not become an unhandled rejection.
+  done.catch(() => {});
   const chunks: Uint8Array[] = [];
+  let total = 0;
   const r = stream.readable.getReader();
   for (;;) {
     const { value, done: d } = await r.read();
     if (d) break;
+    total += value.byteLength;
+    if (total > limit) {
+      await r.cancel().catch(() => {});
+      throw new CryptoError(`decompressed data exceeds ${limit} bytes`);
+    }
     chunks.push(value);
   }
   await done;
@@ -571,9 +652,9 @@ export async function deflate(data: Uint8Array): Promise<Uint8Array | null> {
   }
 }
 
-export async function inflate(data: Uint8Array): Promise<Uint8Array> {
+export async function inflate(data: Uint8Array, limit = MAX_PLAIN): Promise<Uint8Array> {
   if (typeof DecompressionStream === "undefined") throw new CryptoError("compressed blob but no DecompressionStream");
-  return pipe(data, new DecompressionStream("deflate-raw"));
+  return pipe(data, new DecompressionStream("deflate-raw"), limit);
 }
 
 export { bytesEqual };

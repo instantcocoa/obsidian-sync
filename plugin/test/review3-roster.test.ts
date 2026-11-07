@@ -78,7 +78,10 @@ describe("roster trust (names, planted devices)", () => {
     expect(roster.find((d) => d.id === planted.device_id)?.name).toBe("(unnamed)");
 
     let revoked: string[] = [];
-    const epoch = await rotate(sa, [], (ids) => (revoked = ids));
+    const epoch = await rotate(sa, [], (ids) => {
+      revoked = ids;
+      return true;
+    });
     expect(epoch).toBe(2);
     expect(revoked).toEqual([planted.device_id]);
 

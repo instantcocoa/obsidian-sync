@@ -4,6 +4,7 @@
  * plugin bundle.
  */
 import type { FileStat, StateStore, VaultFS } from "./fs";
+import { foldClash } from "./paths";
 import { promises as fsp, watch, type FSWatcher } from "node:fs";
 import * as nodePath from "node:path";
 
@@ -70,8 +71,48 @@ export class NodeFS implements VaultFS {
     return new Uint8Array(await fsp.readFile(this.abs(path)));
   }
 
+  /** Does the volume answer for any casing of a name? Probed once with the config dir, when it exists. */
+  private caseInsensitive: Promise<boolean> | null = null;
+  private volumeIgnoresCase(): Promise<boolean> {
+    if (!this.caseInsensitive) {
+      const swapped = this.configDir.replace(/[a-zA-Z]/g, (c) => (c === c.toLowerCase() ? c.toUpperCase() : c.toLowerCase()));
+      this.caseInsensitive =
+        swapped === this.configDir
+          ? Promise.resolve(false)
+          : fsp.access(this.abs(this.configDir)).then(
+              () => fsp.access(this.abs(swapped)).then(
+                () => true,
+                () => false,
+              ),
+              () => false,
+            );
+    }
+    return this.caseInsensitive;
+  }
+
+  /**
+   * On a case-insensitive volume, refuse to write under a name (or through a
+   * folder) that the volume folds onto an existing, differently spelled
+   * entry: the bytes would replace that entry's, or land inside a folder the
+   * exclusions name under another spelling ("obſync" is obsync on APFS).
+   * Same rule as ObsidianFS.refuseCaseClash; the engine skips and reports.
+   */
+  private async refuseFoldClash(path: string): Promise<void> {
+    if (!(await this.volumeIgnoresCase())) return;
+    const segs = (this.raw.get(path) ?? path).split("/");
+    let rel = "";
+    for (const seg of segs) {
+      const entries = await fsp.readdir(this.abs(rel)).catch(() => null);
+      if (!entries) return; // the folder is missing, so nothing below it can clash
+      const twin = entries.find((e) => foldClash(e.normalize("NFC"), seg.normalize("NFC")));
+      if (twin) throw new Error(`"${rel ? rel + "/" : ""}${twin}" already exists and this volume treats "${seg}" as the same name`);
+      rel = rel ? `${rel}/${seg}` : seg;
+    }
+  }
+
   async write(path: string, data: Uint8Array, mtime: number): Promise<void> {
     const abs = this.abs(path);
+    await this.refuseFoldClash(path);
     await fsp.mkdir(nodePath.dirname(abs), { recursive: true });
     const tmp = `${abs}.obsync-tmp`;
     await fsp.writeFile(tmp, data);

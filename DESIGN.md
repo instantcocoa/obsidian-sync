@@ -433,7 +433,13 @@ meta_enc = epoch(u32 LE) || nonce(12B)
            metadata names the blob it describes and the applier refuses an
            op whose row says otherwise, and a decrypted blob whose length is
            not `size`. Rows from older versions have no `blob` and are
-           accepted; re-encryption adds it.)
+           accepted; re-encryption adds it, and never replaces one that is
+           there. The JSON is padded with trailing spaces to a 256-byte
+           multiple before encryption so `meta_enc`'s length does not give
+           away the path's. On decryption `size` also bounds the body: a
+           deflate stream is cancelled one chunk past it, so a compressed
+           body that would inflate to gigabytes costs one chunk, and never
+           more than the server's largest blob when no size is known.)
 
 name_enc = 0x00000000 || nonce(12B)
            || AES-256-GCM(K_name, name, aad = "name" || device_id),  K_name = HKDF(K_id, "obsync/name/v1")
@@ -462,7 +468,8 @@ name_enc = 0x00000000 || nonce(12B)
 - `mtime` and `size` are inside `meta_enc`. The server sees only ciphertext
   lengths and op timing. Ciphertext length is a close proxy for size; the
   `pad` flag rounds bodies up to 4 KiB before encryption for users who want
-  that trade.
+  that trade. `meta_enc` itself is always padded to a 256-byte multiple, so
+  path lengths are not readable from the op table.
 - Device names are inside `name_enc`. The server and its logs know devices
   only by random ID.
 
@@ -556,6 +563,17 @@ server records which authenticated device wrote each keybox row. "Remove
 device" shows the roster with names decrypted before the user confirms, so a
 device that was enrolled with a leaked invite link is visible and removable.
 Nothing more is needed under the honest-server assumption.
+
+**Proof of keys at rotation.** The new epoch key is wrapped only to devices
+whose name row authenticates under the name key with the device's own id in
+the AAD (the format since 0.1.1); writing such a row needs the keys and the
+vault authority token. The two older row formats (0.1.0: no id in the AAD;
+before the name key: under an epoch key) are shown in the roster but are not
+proof, because without the id a server could copy one onto a planted device.
+Every device rewrites its own row at start when it is not in the current
+format, so honest old rows disappear on upgrade; and before a rotation
+revokes devices that still have no proof it names them and asks, so an
+owner's own not-yet-upgraded device is not locked out silently.
 
 ### 5.5 Recovery passphrase (optional)
 
@@ -665,7 +683,7 @@ not need to know it is happening. History does not carry over except through
 | --- | --- | --- | --- |
 | Reads server disk or backups | ciphertext, path and blob IDs, op timing, ciphertext sizes, device IDs, roster public keys | content, paths, names, mtimes, which human owns which device | padding flag for sizes; timing is inherent |
 | Steals a device token (proxy log, copied `data.json` with sealed keys) | read ciphertext and the op log; see which device is online | write anything: no ops, no blobs, no rotation, revocation, recovery, invites, keybox rows (its own included, once written), or a device name (names need authority and authenticate under the device's own id) | vault authority (§5.8) gates every write; revoke device → rotate |
-| Steals an unused invite link, or holds any member's keys | joins as a device with full read/write, **which means code execution on every device**: a synced `.obsidian/plugins/*/main.js` is reloaded, and `community-plugins.json` enables plugins, automatically (§7.3) | write outside the vault, under a path other than the one an op is keyed by, or with a blob other than the one its metadata names (§6.5 validation) | 24 h TTL, one-time; unexpected or unnamed device is flagged in the roster; remove + rotate; turn "sync config folder" off if vault members are not fully trusted |
+| Steals an unused invite link, or holds any member's keys | joins as a device with full read/write, **which means code execution on every device**: a synced `.obsidian/plugins/*/main.js` is reloaded, and `community-plugins.json` enables plugins, automatically (§7.3) | write outside the vault, under a path other than the one an op is keyed by, under a spelling the volume folds onto an excluded or existing name, or with a blob other than the one its metadata names (§6.5 validation); make a device inflate more than the metadata's `size` (§5.1) | 24 h TTL, one-time; unexpected or unnamed device is flagged in the roster; remove + rotate; turn "sync config folder" off if vault members are not fully trusted |
 | Holds the admin token (or the server's config) | create and delete vaults, install an authority hash, invite the *first* device into an empty vault | invite into a populated vault, so it cannot plant a key-less device for the owner's next rotation to wrap keys to; read or forge anything | invites into a populated vault need vault authority; rotation wraps only to devices whose name authenticates (proof they held the keys) and revokes the rest, reporting them |
 | Takes a device (phone with Obsidian) | everything that device has, including `K_id` and current keys | anything after rotation; anything at all after re-encryption, given the token is revoked | OS disk encryption; per-device key protection (§5.5a); remove + rotate from another device |
 | Guesses the recovery passphrase | one online attempt per request, rate-limited (behind a proxy with `--trust-proxy`, keyed on the address the proxy appended, not one the client wrote); the derived `rc_` token opens the join route only, never the vault's read routes | an offline attack: the server hands out only the KDF salt; the wrapped key is released only against the derived auth token | PBKDF2-600k plus the limiter; someone with the server's disk can still attack offline, so pick a long passphrase |
@@ -932,9 +950,20 @@ it. The same holds on the push side: a local edit whose server head cannot
 be read is reported and left for the next change rather than failing the
 whole push. Only transport failures abort a batch, because those are
 retried as a whole. Without this, a single bad op would stall every device
-forever. Exclusion patterns match case-insensitively and the config-dir
-alias check folds case and combining marks, because on macOS and Windows
-volumes `Workspace.json` and `plugins/Obsync/` are the excluded paths.
+forever. Exclusion patterns, the plugin-reload hook and the config-dir
+alias check all fold names the way a case-insensitive volume does (NFKC,
+both case directions, combining marks stripped): on macOS and Windows
+volumes `Workspace.json` and `plugins/Obsync/` are the excluded paths, and
+on APFS `obſync` (long s) is the obsync directory, which a bare
+case-insensitive regex would not match. A write whose name, or any folder
+on the way to it, the volume would fold onto a differently spelled existing
+entry is refused and reported rather than replacing that entry's bytes.
+Paths carrying `: < > " | ? *` are rejected outright (an NTFS `::$DATA`
+suffix names the file itself and would escape a per-file exclusion;
+Obsidian forbids these characters in names on every platform). The invite
+link's server field must be a plain http(s) address with no userinfo, query
+or fragment, so the confirmation dialog names the host that will be
+contacted.
 
 ### 6.8 Restored server
 

@@ -150,6 +150,24 @@ export async function listDevices(s: Session): Promise<(WireDevice & { name: str
 }
 
 /**
+ * Make sure this device's own name row proves it holds the keys: written
+ * with the vault's name key and this device's id in the AAD. Rows written by
+ * 0.1.0 (no id) or by versions before the name key (under an epoch key that
+ * re-encryption later prunes) do not, and the next rotation from another
+ * device would revoke this one as unproven. Rewrites the row when needed and
+ * returns whether it did. Cheap (one roster fetch) and safe to run at every
+ * start.
+ */
+export async function ensureOwnName(s: Session): Promise<boolean> {
+  const v = s.identity.vaultId;
+  const me = (await s.client.devices(v)).find((d) => d.id === s.identity.deviceId);
+  if (!me || me.revoked_at) return false;
+  if (me.name_enc && (await s.vc.verifyName(fromB64(me.name_enc), me.id)) !== null) return false;
+  await s.client.setDeviceName(v, await s.vc.encryptName(s.identity.deviceName, me.id));
+  return true;
+}
+
+/**
  * Rotate to a new epoch, optionally revoking devices (DESIGN.md §5.4).
  * Wraps the new key to every remaining live device and the recovery identity.
  * Returns the new epoch. Call `reencrypt` afterwards (resumable).
@@ -157,11 +175,19 @@ export async function listDevices(s: Session): Promise<(WireDevice & { name: str
  * A device receives the new key only if it proved it held the old ones: its
  * name must authenticate under its own id (names are written with vault
  * authority). A row planted through the admin token, or one that never
- * finished enrolling, has no such proof; it is revoked instead and reported
- * through `onRevokedUnproven`, so a stranger in the roster cannot be handed
- * `K_e ‖ K_id` by the owner's next rotation.
+ * finished enrolling, has no such proof; it is revoked instead, so a stranger
+ * in the roster cannot be handed `K_e ‖ K_id` by the owner's next rotation.
+ *
+ * `confirmUnproven` is asked before anything is posted when such devices
+ * exist, with their ids (and the names their rows carry, when readable). It
+ * returns whether to go ahead; a false answer cancels the rotation and
+ * nothing changes. An honest device can be in that list only if its name
+ * row predates the current format and it has not started since (every
+ * 0.1.1+ device rewrites its row at start, see `ensureOwnName`).
  */
-export async function rotate(s: Session, revoke: string[] = [], onRevokedUnproven?: (ids: string[]) => void): Promise<number> {
+export class RotationCancelled extends Error {}
+
+export async function rotate(s: Session, revoke: string[] = [], confirmUnproven?: (ids: string[], names: string[]) => boolean | Promise<boolean>): Promise<number> {
   const v = s.identity.vaultId;
   const info = await s.client.vault(v);
   const epoch = info.epoch + 1;
@@ -169,15 +195,17 @@ export async function rotate(s: Session, revoke: string[] = [], onRevokedUnprove
   const devices = await s.client.devices(v);
   const rows = [];
   const unproven: string[] = [];
+  const unprovenNames: string[] = [];
   for (const d of devices) {
     if (d.revoked_at || revoke.includes(d.id) || !d.pub_kex) continue;
     if (!d.recovery && d.id !== s.identity.deviceId && (!d.name_enc || (await s.vc.verifyName(fromB64(d.name_enc), d.id)) === null)) {
       unproven.push(d.id);
+      unprovenNames.push(d.name_enc ? (await s.vc.legacyName(fromB64(d.name_enc))) ?? "(unnamed)" : "(unnamed)");
       continue;
     }
     rows.push({ epoch, recipient_id: d.id, wrapped: await wrapEpochKey(fromB64(d.pub_kex), v, epoch, d.id, key, s.vc.keyring.kId) });
   }
-  if (unproven.length) onRevokedUnproven?.(unproven);
+  if (unproven.length && confirmUnproven && !(await confirmUnproven(unproven, unprovenNames))) throw new RotationCancelled("key rotation cancelled: unproven devices were not confirmed");
   await s.client.rotate(v, epoch, [...revoke, ...unproven], rows, await authTokenFor(key));
   s.vc.addEpoch(epoch, key);
   syncIdentityKeys(s);
@@ -217,7 +245,11 @@ export async function reencrypt(s: Session, onProgress?: (done: number, remainin
       for (const op of f.ops) {
         if (!want.has(op.seq)) continue;
         const meta = await s.vc.decryptMeta(op.path_id, fromB64(op.meta_enc));
-        meta.blob = op.blob_id; // rows from older versions gain the binding here
+        // Rows from older versions gain the blob binding here. A row that
+        // already carries one keeps it: the applier refuses an op whose
+        // authenticated metadata names another blob than the row, and
+        // re-encryption must not launder such a row into a consistent one.
+        if (meta.blob === undefined) meta.blob = op.blob_id;
         await s.client.patchMeta(v, op.seq, await s.vc.encryptMeta(op.path_id, meta, { epoch: target }), target);
         ops++;
       }
@@ -233,8 +265,8 @@ export async function reencrypt(s: Session, onProgress?: (done: number, remainin
 }
 
 /** Remove a device: rotate without it, then re-encrypt. */
-export async function removeDevice(s: Session, deviceId: string, onProgress?: (done: number, remaining: number) => void, onRevokedUnproven?: (ids: string[]) => void): Promise<void> {
-  await rotate(s, deviceId ? [deviceId] : [], onRevokedUnproven);
+export async function removeDevice(s: Session, deviceId: string, onProgress?: (done: number, remaining: number) => void, confirmUnproven?: (ids: string[], names: string[]) => boolean | Promise<boolean>): Promise<void> {
+  await rotate(s, deviceId ? [deviceId] : [], confirmUnproven);
   await reencrypt(s, onProgress);
 }
 

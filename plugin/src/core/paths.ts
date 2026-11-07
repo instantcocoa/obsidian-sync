@@ -51,8 +51,13 @@ export const DEFAULT_EXCLUSIONS = [
  */
 export function isSafeLogicalPath(p: string): boolean {
   if (!p || p.length > 4096 || p.startsWith("/") || p.endsWith("/")) return false;
+  // Backslashes, control characters, and the characters Windows forbids in
+  // names. Obsidian refuses all of them in a file name on every platform, so
+  // no honest op carries one; on NTFS a ":" names an alternate data stream
+  // ("workspace.json::$DATA" is workspace.json itself), which would slip a
+  // per-device file past its exclusion.
   // eslint-disable-next-line no-control-regex
-  if (/[\\\x00-\x1f\x7f]/.test(p)) return false;
+  if (/[\\\x00-\x1f\x7f:<>"|?*]/.test(p)) return false;
   const enc = new TextEncoder();
   const segs = p.split("/");
   for (let i = 0; i < segs.length; i++) {
@@ -98,8 +103,22 @@ export function logicalAliasesConfigDir(logical: string, configDir: string): boo
  * (ſ → s, K → k, ligatures), both case directions ("ı" upper-cases to "I"),
  * then strip combining marks ("İ" → "i̇" → "i").
  */
-function fold(s: string): string {
+export function fold(s: string): string {
   return s.normalize("NFKC").toUpperCase().toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+}
+
+/**
+ * Do two names land on the same entry of a case-insensitive, normalising
+ * volume although they are spelled differently? ("ob\u017fync" and "obsync" on
+ * APFS; "Note.md" and "note.md" on NTFS.) Equal spellings are not a clash.
+ */
+export function foldClash(a: string, b: string): boolean {
+  return a !== b && fold(a) === fold(b);
+}
+
+/** Is this logical path the config dir or inside it? ("$CONFIGx" is a plain folder.) */
+export function isConfigLogical(logical: string): boolean {
+  return logical === CONFIG_TOKEN || logical.startsWith(CONFIG_TOKEN + "/");
 }
 
 /** Same rules for a device path (no $CONFIG token allowed at all). */
@@ -110,7 +129,12 @@ export function isSafeDevicePath(p: string): boolean {
 export function compileExclusions(patterns: string[]): (logicalPath: string) => boolean {
   const res: RegExp[] = [];
   for (let raw of patterns) {
-    raw = raw.trim();
+    // Pattern and path are both folded the way a case-insensitive volume
+    // folds names (see `fold`): "obſync" is the obsync directory on APFS,
+    // and the regex `i` flag alone would not match it, so an exclusion a
+    // remote path could sidestep by respelling would be no exclusion.
+    // Over-matching an exclusion is harmless; under-matching is not.
+    raw = fold(raw.trim());
     if (!raw || raw.startsWith("#")) continue;
     let anchored = false;
     if (raw.startsWith("/")) {
@@ -142,7 +166,10 @@ export function compileExclusions(patterns: string[]): (logicalPath: string) => 
     // remote path can sidestep by changing case is no exclusion.
     res.push(new RegExp(prefix + re + (dirOnly ? suffix : "(?:/|$)"), "i"));
   }
-  return (p) => res.some((r) => r.test(p));
+  return (p) => {
+    const f = fold(p);
+    return res.some((r) => r.test(f));
+  };
 }
 
 /** Extensions we are willing to three-way merge (plus a UTF-8 validity check). */

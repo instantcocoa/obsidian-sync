@@ -2,6 +2,19 @@
 import { App, Modal, Notice, Setting } from "obsidian";
 import qrcode from "qrcode-generator";
 
+/** True when `url` is https or loopback, else after the person accepts an unencrypted connection. */
+export async function confirmPlainHttp(app: App, url: string): Promise<boolean> {
+  const u = url.trim();
+  if (!/^http:\/\//i.test(u)) return true;
+  if (/^http:\/\/(localhost|127\.0\.0\.1|\[::1\])(:|\/|$)/i.test(u)) return true;
+  return ConfirmModal.ask(
+    app,
+    "Use an unencrypted connection?",
+    "This server URL starts with http://, not https://. Your notes stay end-to-end encrypted, but the device token travels in the clear and anyone on the network path could use it to read the encrypted vault or post data. Only do this on a network you trust.",
+    "Use http anyway",
+  );
+}
+
 export class ConfirmModal extends Modal {
   private resolved = false;
   constructor(

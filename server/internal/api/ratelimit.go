@@ -37,24 +37,39 @@ func (l *limiter) key(r *http.Request) string {
 		// fresh fake first entry per request would give a fresh bucket.
 		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
 			parts := strings.Split(xff, ",")
-			return normalizeIP(strings.TrimSpace(parts[len(parts)-1]))
+			return bucketKey(normalizeIP(strings.TrimSpace(parts[len(parts)-1])))
 		}
 	}
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
-		return r.RemoteAddr
+		return bucketKey(normalizeIP(r.RemoteAddr))
 	}
-	return host
+	return bucketKey(normalizeIP(host))
 }
+
+// bucketKey is the address an IPv4 client is limited by, and the /64 for
+// IPv6: a host owns at least a /64 and could otherwise present 2^64 fresh
+// addresses, one bucket each, never throttled.
+func bucketKey(a string) string {
+	ip := net.ParseIP(a)
+	if ip == nil || ip.To4() != nil {
+		return a
+	}
+	return ip.Mask(net.CIDRMask(64, 128)).String() + "/64"
+}
+
+// maxBuckets bounds the limiter's memory: past it, addresses the map has
+// never seen are refused until the next sweep frees room (fail closed).
+const maxBuckets = 100_000
 
 // take consumes one token for the key; false means "rate limited".
 func (l *limiter) take(key string) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	now := time.Now()
-	if now.Sub(l.lastGC) > 10*time.Minute {
+	if now.Sub(l.lastGC) > 10*time.Minute || len(l.buckets) >= maxBuckets {
 		for k, b := range l.buckets {
-			if now.Sub(b.last) > 10*time.Minute {
+			if now.Sub(b.last) > 10*time.Minute || (len(l.buckets) >= maxBuckets && now.Sub(b.last) > time.Minute) {
 				delete(l.buckets, k)
 			}
 		}
@@ -62,6 +77,9 @@ func (l *limiter) take(key string) bool {
 	}
 	b, ok := l.buckets[key]
 	if !ok {
+		if len(l.buckets) >= maxBuckets {
+			return false
+		}
 		b = &bucket{tokens: l.burst, last: now}
 		l.buckets[key] = b
 	}

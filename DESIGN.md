@@ -490,6 +490,12 @@ being online:
 
 The link is as sensitive as the vault for 24 hours or until used, whichever
 comes first. Send it over a channel you already trust and then discard it.
+A rotation ends every unused invite of the vault, so "I think a link
+leaked" has the same answer as "I think a device is compromised": rotate.
+The invite modal also shows the link as a QR code encoding
+`obsidian://obsync-join?link=…`; the plugin names the server and asks
+before joining, and never joins over an existing vault, since any app can
+open such a URL.
 
 ### 5.4 Keybox and rotation
 
@@ -951,6 +957,16 @@ pull plus the usual push finish the job. Nothing is written to disk by the recon
 outcome goes through §6.5 and §6.6, so the "nothing is lost" guarantee
 holds across a restore. `plugin/test/conflict-recovery.test.ts` rows 21 and
 22 exercise both the simple case and the concurrent one.
+
+When the restored server reports an older epoch than the device holds, the
+device makes that epoch current again (its authority hash and keybox are
+the old epoch's) but keeps the newer keys: they still open anything written
+under them, and enrolment only offers the server the epochs it knows. The
+plugin shows the regression as an error notice the user must read, because
+a lying server could say the same thing to make every device write new
+content under a key a removed member still holds; the notice says what is
+and is not expected and tells the user to rotate from a trusted device if
+no backup was restored.
 
 ### 6.7 Mobile
 

@@ -103,6 +103,12 @@ export interface EngineHooks {
   confirmMassDelete?: (paths: string[]) => Promise<boolean>;
   /** Keys changed (rotation seen); persist them. */
   onKeysChanged?: () => void;
+  /**
+   * The server's epoch went backwards. Expected only after a server restore
+   * from a pre-rotation backup (§6.8); a lying server could say it too, so
+   * the user must see it, not just the console.
+   */
+  onEpochRegressed?: (from: number, to: number) => void;
 }
 
 const DEFAULTS = {
@@ -694,12 +700,15 @@ export class Engine {
         // are the old epoch's, and refreshKeys just re-learned that key from
         // the restored keybox, so everything we encrypt or sign from now on
         // uses it again. A later rotation moves forward as usual.
-        this.log("warn", `vault epoch went backwards (${this.vc.keyring.current} -> ${epoch}); using the restored epoch key`);
+        const from = this.vc.keyring.current;
+        this.log("error", `vault epoch went backwards (${from} -> ${epoch}); using the restored epoch key`);
         this.vc.keyring.current = epoch;
-        // Keys for epochs the server no longer knows would only be offered to
-        // the next device we invite, which the server would then refuse.
-        for (const e of [...this.vc.keyring.epochs.keys()]) if (e > epoch) this.vc.keyring.epochs.delete(e);
+        // The newer keys stay in the keyring: they still open any blob written
+        // under them that the restore left behind, and enrolment only offers
+        // the server epochs it knows (finishEnrol filters), so keeping them
+        // costs nothing. Dropping them would make a regression silent and final.
         this.hooks.onKeysChanged?.();
+        this.hooks.onEpochRegressed?.(from, epoch);
       }
       this.state.epoch = epoch;
     }

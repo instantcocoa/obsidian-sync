@@ -83,6 +83,9 @@ async function finishEnrol(server: string, vaultId: string, deviceName: string, 
   const s = openSession(identity, fetchImpl);
   const rows = [];
   for (const [epoch, key] of keyring.epochs) {
+    // Only epochs the server knows: an inviter that kept keys from before a
+    // server restore (§6.8) would otherwise offer rows the server refuses.
+    if (epoch > red.epoch) continue;
     rows.push({ epoch, recipient_id: red.device_id, wrapped: await wrapEpochKey(kp.pub, vaultId, epoch, red.device_id, key, keyring.kId) });
   }
   await s.client.putKeybox(vaultId, rows);
@@ -90,7 +93,7 @@ async function finishEnrol(server: string, vaultId: string, deviceName: string, 
   // it; every later device derives the same token and gets a no-op, or a
   // 409 if its keyring is behind the server's epoch (refreshKeys catches up).
   try {
-    await s.client.registerAuth(vaultId, await s.vc.authToken(Math.max(...keyring.epochs.keys())));
+    await s.client.registerAuth(vaultId, await s.vc.authToken(red.epoch));
   } catch (e) {
     // 409: already set (every device after the first). 401: this vault has
     // more than one device and no authority yet (pre-§5.8 database); the

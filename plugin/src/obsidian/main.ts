@@ -27,7 +27,7 @@ import {
 import { ObsidianFS, ObsidianStateStore } from "./obsidian-fs";
 import { ConfigHooks } from "./hooks";
 import { ObsyncSettingTab } from "./settings";
-import { ConfirmModal, ListModal, PromptModal, ShowSecretModal, InviteModal } from "./modals";
+import { ConfirmModal, ListModal, PromptModal, ShowSecretModal, InviteModal, confirmPlainHttp } from "./modals";
 import { deriveWrapKeyFromPin, newWrapKey, open as openKeystore, seal as sealKeystore, type ProtectionMethod, type SealedKeystore } from "../core/keystore";
 import { fromB64, randomBytes } from "../core/encoding";
 import { promptTouchId, safeStorageAvailable, safeUnwrap, safeWrap, touchIdAvailable } from "./protection";
@@ -307,6 +307,11 @@ export default class ObsyncPlugin extends Plugin {
         },
         onStatus: (s) => this.renderStatus(s),
         afterApply: (p, k) => this.hooks.afterApply(p, k),
+        onEpochRegressed: (from, to) =>
+          new Notice(
+            `obsync: the server's key epoch went backwards (${from} → ${to}). That is expected only if the server was just restored from a backup taken before a key rotation. If you did not restore a backup, stop syncing on every device and rotate the vault keys from one you trust.`,
+            60000,
+          ),
         onConflict: (p, sib) => this.routineNotice(`obsync: conflict on ${p}. Your version was saved as ${sib}.`, 10000),
         onSkipped: (p, why) => new Notice(`obsync: could not apply the latest version of ${p} (${why}). Your local copy was kept and sync continues; the next change to that file on any device will fix it.`, 12000),
         confirmMassDelete: (paths) =>
@@ -392,7 +397,7 @@ export default class ObsyncPlugin extends Plugin {
       return;
     }
     const ok = await ConfirmModal.ask(this.app, `Join the vault on ${server}?`, "This device will download the vault into the current folder and start syncing. Continue only if you generated this invite yourself.", "Join");
-    if (!ok) return;
+    if (!ok || !(await confirmPlainHttp(this.app, server))) return;
     await this.guard(() => this.joinWithLink(link));
   }
 

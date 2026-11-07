@@ -17,6 +17,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -46,6 +47,14 @@ func Open(path string) (*Store, error) {
 	if err := s.migrate(); err != nil {
 		db.Close()
 		return nil, err
+	}
+	// The database holds recovery_enc and its salt, every token hash, the
+	// keybox and the ciphertext index: nothing another local user should read.
+	// SQLite creates it, and its -wal and -shm siblings, with the process umask.
+	for _, f := range []string{path, path + "-wal", path + "-shm"} {
+		if err := os.Chmod(f, 0o600); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return nil, err
+		}
 	}
 	return s, nil
 }
@@ -673,6 +682,12 @@ func (s *Store) Rotate(ctx context.Context, vault, author string, epoch int64, r
 	return s.writeTx(ctx, func(tx *sql.Tx) error {
 		var cur int64
 		if err := tx.QueryRowContext(ctx, `SELECT epoch FROM vaults WHERE id=?`, vault).Scan(&cur); err != nil {
+			return err
+		}
+		// An unused invite minted before this rotation carries the keys being
+		// retired (and K_id) and would still enrol a device afterwards; the
+		// documented answer to a leaked link is "rotate", so rotation ends them.
+		if _, err := tx.ExecContext(ctx, `UPDATE invites SET used_at=?, keybox_enc=X'' WHERE vault_id=? AND used_at IS NULL`, now(), vault); err != nil {
 			return err
 		}
 		if epoch != cur+1 {

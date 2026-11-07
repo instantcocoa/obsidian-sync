@@ -1,8 +1,9 @@
 /** The settings tab: enrolment when not joined, status and options when joined. */
+import { parseInviteLink } from "../core/crypto";
 import { Notice, PluginSettingTab, Setting } from "obsidian";
 import type ObsyncPlugin from "./main";
 import { DEFAULT_EXCLUSIONS } from "../core/paths";
-import { ConfirmModal, PromptModal } from "./modals";
+import { ConfirmModal, PromptModal, confirmPlainHttp } from "./modals";
 
 export class ObsyncSettingTab extends PluginSettingTab {
   constructor(private plugin: ObsyncPlugin) {
@@ -43,7 +44,16 @@ export class ObsyncSettingTab extends PluginSettingTab {
         b
           .setButtonText("Join")
           .setCta()
-          .onClick(() => this.run(() => this.plugin.joinWithLink(link))),
+          .onClick(async () => {
+            // The link names the server; an http:// one needs the same consent as the other entry points.
+            let server = "";
+            try {
+              server = parseInviteLink(link).server;
+            } catch {
+              /* joinWithLink reports the malformed link */
+            }
+            if (!server || (await this.plainHttpOk(server))) await this.run(() => this.plugin.joinWithLink(link));
+          }),
       );
 
     new Setting(el)
@@ -271,15 +281,8 @@ export class ObsyncSettingTab extends PluginSettingTab {
    * Plain http is fine on localhost or a private network you trust; over the
    * internet it hands your device token to every network in between. Ask.
    */
-  private async plainHttpOk(url: string): Promise<boolean> {
-    if (!/^http:\/\//i.test(url.trim())) return true;
-    if (/^http:\/\/(localhost|127\.0\.0\.1|\[::1\])(:|\/|$)/i.test(url.trim())) return true;
-    return ConfirmModal.ask(
-      this.app,
-      "Use an unencrypted connection?",
-      "This server URL starts with http://, not https://. Your notes stay end-to-end encrypted, but the device token travels in the clear and anyone on the network path could use it to read the encrypted vault or post data. Only do this on a network you trust.",
-      "Use http anyway",
-    );
+  private plainHttpOk(url: string): Promise<boolean> {
+    return confirmPlainHttp(this.app, url);
   }
 
   private async run(fn: () => Promise<unknown>): Promise<void> {

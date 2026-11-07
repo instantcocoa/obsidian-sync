@@ -22,15 +22,19 @@ go build -o obsync ./cmd/obsync
 ```
 
 On first start an admin token is generated and saved to `DIR/admin-token`
-(or pass `--admin-token` / `OBSYNC_ADMIN_TOKEN`). Mobile Obsidian needs a
-publicly trusted certificate, so use `--acme-domain` or put Caddy/Traefik in
-front.
+(or pass `OBSYNC_ADMIN_TOKEN`; `--admin-token` works too but shows in `ps`
+to every local user). Everything under `DIR` is created private to the
+server's user (umask 077; the database, its WAL and the blobs are 0600), and
+the server should run as its own user. Mobile Obsidian needs a publicly
+trusted certificate, so use `--acme-domain` or put Caddy/Traefik in front.
 
 Unauthenticated routes (invite redemption and recovery join) and
 failed token checks are rate-limited per client IP: `--auth-rate N` requests
 per minute (default 10, burst 2N; `-1` disables, for tests). Behind a reverse
-proxy pass `--trust-proxy` so the limiter keys on `X-Forwarded-For`; without
-it every client would share the proxy's address.
+proxy pass `--trust-proxy` so the limiter keys on the last `X-Forwarded-For`
+entry, the one your proxy appended (it assumes exactly one trusted hop);
+without it every client would share the proxy's address. IPv6 clients are
+keyed by their /64, and the limiter holds at most 100,000 buckets.
 
 ## Backup and restore
 

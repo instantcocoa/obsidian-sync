@@ -211,7 +211,8 @@ and the local filesystem.
 
 ### G. Supply chain and build
 
-- Plugin runtime dependency: only `node-diff3`. Dev dependencies: esbuild,
+- Plugin runtime dependencies: `node-diff3` (merge) and `qrcode-generator`
+  (the invite QR; MIT, no dependencies, bundled). Dev dependencies: esbuild,
   vitest, TypeScript, Playwright (tests only). Server: `coder/websocket`,
   `golang.org/x/crypto`, `modernc.org/sqlite`. Review the lockfiles for
   anything unexpected, and the esbuild config (`platform: browser`,

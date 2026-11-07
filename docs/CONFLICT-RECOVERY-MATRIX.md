@@ -87,7 +87,7 @@ divergence before every reconciliation).
   run (install, join, sync both ways, attachments, backgrounding). iOS is
   covered on physical devices, see the iOS section below.
 
-## macOS (plugin/test/obsidian-macos.test.ts, real Obsidian 1.14.5; Intel EC2 Mac on macOS 15.8, and Apple silicon on GitHub's macos-14 runner in CI)
+## macOS (plugin/test/obsidian-macos.test.ts, real Obsidian 1.14.5; Intel EC2 Mac on macOS 15.8, and Apple silicon on GitHub's macos-15 runner (macos-14 until GitHub retired that label on 2026-11-07) in CI)
 
 | # | Situation | Outcome |
 | --- | --- | --- |

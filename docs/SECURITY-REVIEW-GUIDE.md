@@ -77,7 +77,7 @@ The codebase is small. Everything security-relevant is in these files
 - Invite: P-256 ECDH with an ephemeral key, HKDF info `obsync/wrap/v1`,
   wrapping `K_e ‖ K_id`. The invite link carries a one-time server token and
   a secret; check what a link leaks and what an expired or used link can
-  still do. 24 h TTL, single use.
+  still do. 1 h TTL, single use.
 - Recovery passphrase: PBKDF2-SHA-256, 600,000 iterations, 16-byte salt,
   64-byte output split into a wrap key and an auth token. The server returns
   only the salt without authentication, and the wrapped key only against the

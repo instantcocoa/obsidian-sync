@@ -38,7 +38,7 @@ type Store struct {
 }
 
 func Open(path string) (*Store, error) {
-	dsn := "file:" + path + "?_pragma=journal_mode(WAL)&_pragma=busy_timeout(10000)&_pragma=foreign_keys(1)&_pragma=synchronous(NORMAL)&_txlock=immediate"
+	dsn := "file:" + path + "?_pragma=journal_mode(WAL)&_pragma=busy_timeout(10000)&_pragma=foreign_keys(1)&_pragma=synchronous(FULL)&_txlock=immediate"
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, err
@@ -321,6 +321,29 @@ func (s *Store) deviceLiveTx(ctx context.Context, tx *sql.Tx, device, vault stri
 	return n == 1
 }
 
+// Actor is the device behind a write, re-checked inside the write
+// transaction. The handler authenticated it before reading the body; a
+// device revoked, or an authority token retired by a rotation, while a long
+// request was still being read must not land that write afterwards.
+type Actor struct {
+	Device string
+	Auth   string
+}
+
+func (s *Store) actorLiveTx(ctx context.Context, tx *sql.Tx, vault string, by Actor) error {
+	if !s.deviceLiveTx(ctx, tx, by.Device, vault) {
+		return fmt.Errorf("%w: device revoked", ErrForbidden)
+	}
+	var cur []byte
+	if err := tx.QueryRowContext(ctx, `SELECT auth_hash FROM vaults WHERE id=?`, vault).Scan(&cur); err != nil {
+		return err
+	}
+	if len(cur) > 0 && subtle.ConstantTimeCompare(cur, HashToken(by.Auth)) != 1 {
+		return fmt.Errorf("%w: vault authority changed", ErrForbidden)
+	}
+	return nil
+}
+
 // SetVaultAuth installs or replaces the authority hash unconditionally. For
 // the administrator: migrating a vault created before §5.8 existed (the
 // token is shown in the plugin's settings on any device holding the keys),
@@ -505,15 +528,24 @@ func (s *Store) LiveDeviceCount(ctx context.Context, vault string) (int, error) 
 }
 
 // SetDeviceName lets a device (re)name itself once it holds the vault keys.
-func (s *Store) SetDeviceName(ctx context.Context, device string, nameEnc []byte) error {
+func (s *Store) SetDeviceName(ctx context.Context, vault string, by Actor, nameEnc []byte) error {
 	if len(nameEnc) == 0 || len(nameEnc) > MaxOpaque {
 		return fmt.Errorf("%w: bad name_enc", ErrBadRequest)
 	}
 	return s.writeTx(ctx, func(tx *sql.Tx) error {
-		_, err := tx.ExecContext(ctx, `UPDATE devices SET name_enc=? WHERE id=?`, nameEnc, device)
+		if err := s.actorLiveTx(ctx, tx, vault, by); err != nil {
+			return err
+		}
+		_, err := tx.ExecContext(ctx, `UPDATE devices SET name_enc=? WHERE id=? AND vault_id=?`, nameEnc, by.Device, vault)
 		return err
 	})
 }
+
+// validPubKex is the shape every enrolment path requires of a device's
+// key-exchange public key: an uncompressed P-256 point, 65 bytes. The server
+// never uses it, but it stores it for every member to download, so it must
+// not be a 60 KiB blob a stranger with an invite link planted.
+func validPubKex(pubKex []byte) bool { return len(pubKex) == 65 }
 
 func (s *Store) ListDevices(ctx context.Context, vault string) ([]Device, error) {
 	rows, err := s.db.QueryContext(ctx,
@@ -572,8 +604,11 @@ type Redeemed struct {
 
 // RedeemInvite consumes a one-time invite and enrols a device.
 func (s *Store) RedeemInvite(ctx context.Context, token string, pubKex, nameEnc []byte) (*Redeemed, error) {
-	if len(pubKex) == 0 {
-		return nil, fmt.Errorf("%w: pub_kex required", ErrBadRequest)
+	if !validPubKex(pubKex) {
+		return nil, fmt.Errorf("%w: pub_kex must be a 65-byte P-256 point", ErrBadRequest)
+	}
+	if len(nameEnc) > MaxOpaque {
+		return nil, fmt.Errorf("%w: name_enc too large", ErrBadRequest)
 	}
 	hash := HashToken(token)
 	out := &Redeemed{}
@@ -707,11 +742,15 @@ func (s *Store) PutKeybox(ctx context.Context, vault, author string, rows []Keyb
 // Rotate advances the vault to epoch, revokes the listed devices, and stores
 // the new epoch's keybox rows. The keybox must cover every device that will
 // remain live (including a recovery identity), so nobody is locked out.
-func (s *Store) Rotate(ctx context.Context, vault, author string, epoch int64, revoke []string, rows []KeyboxRow, authNext string) error {
+func (s *Store) Rotate(ctx context.Context, vault string, by Actor, epoch int64, revoke []string, rows []KeyboxRow, authNext string) error {
+	author := by.Device
 	if !validAuthToken(authNext) {
 		return fmt.Errorf("%w: auth_next (vault authority token for the new epoch) required", ErrBadRequest)
 	}
 	return s.writeTx(ctx, func(tx *sql.Tx) error {
+		if err := s.actorLiveTx(ctx, tx, vault, by); err != nil {
+			return err
+		}
 		var cur int64
 		if err := tx.QueryRowContext(ctx, `SELECT epoch FROM vaults WHERE id=?`, vault).Scan(&cur); err != nil {
 			return err
@@ -753,7 +792,9 @@ func (s *Store) Rotate(ctx context.Context, vault, author string, epoch int64, r
 			liveIDs = append(liveIDs, id)
 		}
 		live.Close()
+		liveSet := map[string]bool{}
 		for _, id := range liveIDs {
+			liveSet[id] = true
 			if revoked[id] {
 				continue
 			}
@@ -764,6 +805,12 @@ func (s *Store) Rotate(ctx context.Context, vault, author string, epoch int64, r
 		for id := range covered {
 			if revoked[id] {
 				return fmt.Errorf("%w: keybox addresses revoked device %s", ErrBadRequest, id)
+			}
+			// Same rule as PutKeybox: rows only for live devices of this vault.
+			// A row for an unknown id or a device revoked by an earlier
+			// rotation is dead storage and breaks "keybox matches roster".
+			if !liveSet[id] {
+				return fmt.Errorf("%w: keybox addresses %s, which is not a live device of this vault", ErrBadRequest, id)
 			}
 		}
 		for id := range revoked {
@@ -800,12 +847,15 @@ type RecoveryInfo struct {
 // SetRecovery installs (or replaces) the recovery identity: a pseudo-device
 // whose private key is stored passphrase-wrapped, plus an auth token derived
 // client-side from the same passphrase.
-func (s *Store) SetRecovery(ctx context.Context, vault string, pubKex, recoveryEnc, salt []byte, authToken string) (string, error) {
-	if len(pubKex) == 0 || len(recoveryEnc) == 0 || len(salt) < 8 || len(salt) > 64 || !strings.HasPrefix(authToken, "rc_") {
-		return "", fmt.Errorf("%w: pub_kex, recovery_enc, salt and rc_ auth required", ErrBadRequest)
+func (s *Store) SetRecovery(ctx context.Context, vault string, by Actor, pubKex, recoveryEnc, salt []byte, authToken string) (string, error) {
+	if !validPubKex(pubKex) || len(recoveryEnc) == 0 || len(recoveryEnc) > MaxOpaque || len(salt) < 8 || len(salt) > 64 || !strings.HasPrefix(authToken, "rc_") {
+		return "", fmt.Errorf("%w: pub_kex (65 bytes), recovery_enc, salt and rc_ auth required", ErrBadRequest)
 	}
 	id := randomHex(16)
 	err := s.writeTx(ctx, func(tx *sql.Tx) error {
+		if err := s.actorLiveTx(ctx, tx, vault, by); err != nil {
+			return err
+		}
 		if _, err := tx.ExecContext(ctx, `UPDATE devices SET revoked_at=?, token_hash=NULL WHERE vault_id=? AND recovery=1 AND revoked_at IS NULL`, now(), vault); err != nil {
 			return err
 		}
@@ -833,8 +883,11 @@ func (s *Store) GetRecovery(ctx context.Context, vault string) (*RecoveryInfo, e
 // passphrase (by presenting the derived auth token). It returns the keybox
 // rows addressed to the recovery identity so the joiner can unwrap them.
 func (s *Store) RecoveryJoin(ctx context.Context, vault, authToken string, pubKex, nameEnc []byte) (*Redeemed, []KeyboxRow, []byte, error) {
-	if len(pubKex) == 0 {
-		return nil, nil, nil, fmt.Errorf("%w: pub_kex required", ErrBadRequest)
+	if !validPubKex(pubKex) {
+		return nil, nil, nil, fmt.Errorf("%w: pub_kex must be a 65-byte P-256 point", ErrBadRequest)
+	}
+	if len(nameEnc) > MaxOpaque {
+		return nil, nil, nil, fmt.Errorf("%w: name_enc too large", ErrBadRequest)
 	}
 	out := &Redeemed{VaultID: vault}
 	var recID string
@@ -889,8 +942,11 @@ func (s *Store) GetBlob(ctx context.Context, vault, id string) (*BlobInfo, error
 //
 // `replace` lets a key holder overwrite an existing record at the same epoch
 // (repairing a blob whose stored bytes turned out to be undecryptable).
-func (s *Store) UpsertBlob(ctx context.Context, vault, id string, epoch, ctSize int64, replace bool) (stored bool, err error) {
+func (s *Store) UpsertBlob(ctx context.Context, vault, id string, by Actor, epoch, ctSize int64, replace bool) (stored bool, err error) {
 	err = s.writeTx(ctx, func(tx *sql.Tx) error {
+		if err := s.actorLiveTx(ctx, tx, vault, by); err != nil {
+			return err
+		}
 		var cur sql.NullInt64
 		if err := tx.QueryRowContext(ctx, `SELECT epoch FROM blobs WHERE vault_id=? AND blob_id=?`, vault, id).Scan(&cur); err != nil && !errors.Is(err, sql.ErrNoRows) {
 			return err
@@ -902,11 +958,22 @@ func (s *Store) UpsertBlob(ctx context.Context, vault, id string, epoch, ctSize 
 		stored = true
 		_, err := tx.ExecContext(ctx,
 			`INSERT INTO blobs(vault_id, blob_id, epoch, ct_size, created_at) VALUES(?,?,?,?,?)
-			 ON CONFLICT(vault_id, blob_id) DO UPDATE SET epoch=excluded.epoch, ct_size=excluded.ct_size`,
+			 ON CONFLICT(vault_id, blob_id) DO UPDATE SET epoch=excluded.epoch, ct_size=excluded.ct_size, created_at=excluded.created_at`,
 			vault, id, epoch, ctSize, now())
 		return err
 	})
 	return stored, err
+}
+
+// DropOrphanBlob removes a blob's index row because its file is gone (a GC
+// that raced a re-upload, or a crash between the two). With the row gone the
+// client's next missing check asks for the bytes again, which is the only
+// way back from "index says present, file missing".
+func (s *Store) DropOrphanBlob(ctx context.Context, vault, id string) error {
+	return s.writeTx(ctx, func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx, `DELETE FROM blobs WHERE vault_id=? AND blob_id=?`, vault, id)
+		return err
+	})
 }
 
 func (s *Store) MissingBlobs(ctx context.Context, vault string, ids []string) ([]string, error) {
@@ -1027,7 +1094,8 @@ func (s *Store) validateOp(o Op) error {
 // AppendOps applies a batch with per-op compare-and-swap on the path head.
 // Accepted ops are committed even if others in the batch conflict. Returns
 // the results in input order and the vault seq after the batch.
-func (s *Store) AppendOps(ctx context.Context, vault, device string, ops []Op) ([]OpResult, int64, error) {
+func (s *Store) AppendOps(ctx context.Context, vault string, by Actor, ops []Op) ([]OpResult, int64, error) {
+	device := by.Device
 	results := make([]OpResult, len(ops))
 	var finalSeq int64
 	err := s.writeTx(ctx, func(tx *sql.Tx) error {
@@ -1036,6 +1104,9 @@ func (s *Store) AppendOps(ctx context.Context, vault, device string, ops []Op) (
 			if errors.Is(err, sql.ErrNoRows) {
 				return ErrNotFound
 			}
+			return err
+		}
+		if err := s.actorLiveTx(ctx, tx, vault, by); err != nil {
 			return err
 		}
 		for i, o := range ops {
@@ -1168,11 +1239,14 @@ func (s *Store) OpsBelowMetaEpoch(ctx context.Context, vault string, epoch int64
 }
 
 // PatchMeta replaces an op's encrypted metadata with a higher-epoch version.
-func (s *Store) PatchMeta(ctx context.Context, vault string, seq int64, metaEnc []byte, metaEpoch int64) error {
+func (s *Store) PatchMeta(ctx context.Context, vault string, by Actor, seq int64, metaEnc []byte, metaEpoch int64) error {
 	if len(metaEnc) == 0 || len(metaEnc) > MaxMetaEnc {
 		return fmt.Errorf("%w: meta_enc required", ErrBadRequest)
 	}
 	return s.writeTx(ctx, func(tx *sql.Tx) error {
+		if err := s.actorLiveTx(ctx, tx, vault, by); err != nil {
+			return err
+		}
 		var cur, vaultEpoch int64
 		if err := tx.QueryRowContext(ctx, `SELECT epoch FROM vaults WHERE id=?`, vault).Scan(&vaultEpoch); err != nil {
 			return err
@@ -1198,8 +1272,12 @@ func (s *Store) PatchMeta(ctx context.Context, vault string, seq int64, metaEnc 
 // it differs from the current head and its blob still exists. It needs no
 // keys: metadata and blob references are copied verbatim. Returns the number
 // of ops emitted and the paths skipped because their blob was collected.
-func (s *Store) Restore(ctx context.Context, vault, device string, at int64) (emitted int, skipped []string, err error) {
+func (s *Store) Restore(ctx context.Context, vault string, by Actor, at int64) (emitted int, skipped []string, err error) {
+	device := by.Device
 	err = s.writeTx(ctx, func(tx *sql.Tx) error {
+		if err := s.actorLiveTx(ctx, tx, vault, by); err != nil {
+			return err
+		}
 		var seq int64
 		if err := tx.QueryRowContext(ctx, `SELECT seq FROM vaults WHERE id=?`, vault).Scan(&seq); err != nil {
 			return err

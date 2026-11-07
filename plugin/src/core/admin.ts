@@ -90,13 +90,15 @@ async function finishEnrol(server: string, vaultId: string, deviceName: string, 
   await s.client.putKeybox(vaultId, rows);
   // Register the vault authority hash. Only the first device actually sets
   // it; every later device derives the same token and gets a no-op, or a
-  // 409 if its keyring is behind the server's epoch (refreshKeys catches up).
+  // 401 (409 from servers before 0.1.5) if its keyring is behind the
+  // server's epoch (refreshKeys catches up).
   try {
     await s.client.registerAuth(vaultId, await s.vc.authToken(red.epoch));
   } catch (e) {
-    // 409: already set (every device after the first). 401: this vault has
-    // more than one device and no authority yet (pre-§5.8 database); the
-    // admin installs it, see `obsync vault auth`. Either way enrolment is done.
+    // 401/409: a different token is already set (every device after the
+    // first, when its keyring is behind), or this vault has more than one
+    // device and no authority yet (pre-§5.8 database; the admin installs it,
+    // see `obsync vault auth`). Either way enrolment is done.
     if (!(e instanceof HttpError && (e.status === 409 || e.status === 401))) throw e;
   }
   try {

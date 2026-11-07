@@ -306,7 +306,7 @@ blobs    (vault_id, blob_id, epoch, ct_size, created_at, last_ref_at)
 | `PATCH` | `/v1/vaults/{v}/devices/me` | Set the calling device's `name_enc` (after enrolment, once it holds the keys; needs vault authority). |
 | `GET` | `/v1/vaults/{v}/keybox` | All keybox rows addressed to the calling device. |
 | `POST` | `/v1/vaults/{v}/keybox` | Rows addressed to the caller itself, or (insert-only) to a recovery identity. Never to another device. |
-| `POST` | `/v1/vaults/{v}/auth` | Register the vault authority hash (§5.8) on first enrolment. Idempotent for the same token, 409 for a different one. |
+| `POST` | `/v1/vaults/{v}/auth` | Register the vault authority hash (§5.8) on first enrolment. Idempotent for the same token; a different one is a failed authentication (401, rate-limited), not a distinguishable 409. |
 | `POST` | `/v1/vaults/{v}/rotate` | Atomically: store keybox rows for epoch+1, bump `vault.epoch`, revoke listed devices, install `auth_next` (§5.4, §5.8). Vault authority required. |
 | `PUT` | `/v1/vaults/{v}/recovery` | Install or replace the recovery identity (§5.5). Vault authority required. |
 | `GET` | `/v1/vaults/{v}/recovery` | No auth: `{device_id, pub_kex, salt}`. Only the KDF salt, nothing attackable offline. |
@@ -377,7 +377,7 @@ with 2× free disk.
   can derive. So a token leaked through a proxy log or a copied `data.json`
   with sealed keys can read ciphertext and append ops as that device, and
   nothing more.
-- Invite tokens are one-time with a short TTL (default 24 h). The invite link
+- Invite tokens are one-time with a short TTL (default 1 h). The invite link
   the user pastes is `obsync://join#<server>,<invite>,<I>`; `I` is the invite
   key (§5.3). Everything after `#` is a fragment and never reaches the server
   in a request line or log.
@@ -495,7 +495,7 @@ being online:
    unless it is the first device), then stores `K_id`, the epoch keys, its
    private key and token in plugin data.
 
-The link is as sensitive as the vault for 24 hours or until used, whichever
+The link is as sensitive as the vault for an hour or until used, whichever
 comes first. Send it over a channel you already trust and then discard it.
 A rotation ends every unused invite of the vault, so "I think a link
 leaked" has the same answer as "I think a device is compromised": rotate.
@@ -683,8 +683,8 @@ not need to know it is happening. History does not carry over except through
 | --- | --- | --- | --- |
 | Reads server disk or backups | ciphertext, path and blob IDs, op timing, ciphertext sizes, device IDs, roster public keys | content, paths, names, mtimes, which human owns which device | padding flag for sizes; timing is inherent |
 | Steals a device token (proxy log, copied `data.json` with sealed keys) | read ciphertext and the op log; see which device is online | write anything: no ops, no blobs, no rotation, revocation, recovery, invites, keybox rows (its own included, once written), or a device name (names need authority and authenticate under the device's own id) | vault authority (§5.8) gates every write; revoke device → rotate |
-| Steals an unused invite link, or holds any member's keys | joins as a device with full read/write, **which means code execution on every device**: a synced `.obsidian/plugins/*/main.js` is reloaded, and `community-plugins.json` enables plugins, automatically (§7.3) | write outside the vault, under a path other than the one an op is keyed by, under a spelling the volume folds onto an excluded or existing name, or with a blob other than the one its metadata names (§6.5 validation); make a device inflate more than the metadata's `size` (§5.1) | 24 h TTL, one-time; unexpected or unnamed device is flagged in the roster; remove + rotate; turn "sync config folder" off if vault members are not fully trusted |
-| Holds the admin token (or the server's config) | create and delete vaults, install an authority hash, invite the *first* device into an empty vault | invite into a populated vault, so it cannot plant a key-less device for the owner's next rotation to wrap keys to; read or forge anything | invites into a populated vault need vault authority; rotation wraps only to devices whose name authenticates (proof they held the keys) and revokes the rest, reporting them |
+| Steals an unused invite link, or holds any member's keys | joins as a device with full read/write, **which means code execution on every device**: a synced `.obsidian/plugins/*/main.js` is reloaded, and `community-plugins.json` enables plugins, automatically (§7.3) | write outside the vault, under a path other than the one an op is keyed by, under a spelling the volume folds onto an excluded or existing name, or with a blob other than the one its metadata names (§6.5 validation); make a device inflate more than the metadata's `size` (§5.1) | 1 h TTL, one-time; unexpected or unnamed device is flagged in the roster; remove + rotate; turn "sync config folder" off if vault members are not fully trusted |
+| Holds the admin token (or the server's config) | create and list vaults, install an authority hash, invite the *first* device into an empty vault (there is no delete route and no admin way to revoke a device: a vault whose first invite was redeemed by a stranger is frozen with `obsync vault auth` and abandoned) | invite into a populated vault, so it cannot plant a key-less device for the owner's next rotation to wrap keys to; read or forge anything | invites into a populated vault need vault authority; rotation wraps only to devices whose name authenticates (proof they held the keys) and revokes the rest, reporting them |
 | Takes a device (phone with Obsidian) | everything that device has, including `K_id` and current keys | anything after rotation; anything at all after re-encryption, given the token is revoked | OS disk encryption; per-device key protection (§5.5a); remove + rotate from another device |
 | Guesses the recovery passphrase | one online attempt per request, rate-limited (behind a proxy with `--trust-proxy`, keyed on the address the proxy appended, not one the client wrote); the derived `rc_` token opens the join route only, never the vault's read routes | an offline attack: the server hands out only the KDF salt; the wrapped key is released only against the derived auth token | PBKDF2-600k plus the limiter; someone with the server's disk can still attack offline, so pick a long passphrase |
 | Server operator (honest but curious) | the "reads server disk" row, live, plus which device is online when | content, paths, names, mtimes; cannot alter any ciphertext, and cannot re-point an op at another stored blob (the metadata names its blob and size; the applier refuses a mismatch) | by assumption (§4.6) they do not tamper; curiosity gains nothing beyond metadata. A tampering server could still withhold ops or roll the epoch back (§6.8 detects a rewound log) |
@@ -718,6 +718,14 @@ Accepted residual exposure:
 6. **An actively malicious server is out of scope.** If that ever changes,
    the fix is a per-device running hash over the op log exchanged through
    the keybox channel; the formats here do not preclude it.
+
+**Writes re-check the writer.** Authentication and authority are checked
+when a request arrives, before its body is read; an upload can take minutes.
+Every write transaction (`ops`, `blobs`, `meta`, `restore`, `recovery`,
+`rotate`, `devices/me`) therefore re-checks, inside the transaction, that the
+device is still live and that the authority token it presented is still the
+vault's. A device revoked, or an authority retired by a rotation, while its
+request was in flight gets 403 and lands nothing.
 
 ### 5.8 Vault authority token
 

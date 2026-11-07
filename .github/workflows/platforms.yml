@@ -8,6 +8,10 @@ on:
   pull_request:
   workflow_dispatch:
 
+# Nothing here writes to the repository; the default token must not be able to.
+permissions:
+  contents: read
+
 env:
   OBSIDIAN_VERSION: 1.14.5
 

@@ -12,7 +12,6 @@ import (
 	"hash/fnv"
 	"io"
 	"log/slog"
-	"net"
 	"net/http"
 	"os"
 	"strconv"
@@ -70,6 +69,22 @@ func (s *Server) blobLock(id string) *sync.Mutex {
 	h := fnv.New32a()
 	h.Write([]byte(id))
 	return &s.blobLocks[h.Sum32()%uint32(len(s.blobLocks))]
+}
+
+// dropOrphan removes a blob index row whose file is missing, under the
+// per-blob lock so it cannot cross an upload of the same id.
+func (s *Server) dropOrphan(ctx context.Context, vault, id string) {
+	lk := s.blobLock(id)
+	lk.Lock()
+	defer lk.Unlock()
+	if s.blobs.Exists(vault, id) {
+		return // re-uploaded meanwhile
+	}
+	if err := s.st.DropOrphanBlob(ctx, vault, id); err != nil {
+		s.log.Warn("drop orphan blob row", "vault", vault, "blob", id, "err", err)
+	} else {
+		s.log.Warn("blob file missing; index row dropped so it can be re-uploaded", "vault", vault, "blob", id)
+	}
 }
 
 func New(cfg Config, st *store.Store, blobs *blobstore.FS) *Server {
@@ -230,16 +245,17 @@ func (s *Server) limited(next http.HandlerFunc) http.HandlerFunc {
 // the proxy-appended hop under --trust-proxy, else the peer address.
 func (s *Server) clientIP(r *http.Request) string {
 	if s.cfg.TrustProxy {
-		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-			parts := strings.Split(xff, ",")
-			return normalizeIP(strings.TrimSpace(parts[len(parts)-1]))
+		if ip := proxiedClient(r); ip != "" {
+			return ip
 		}
 	}
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil {
-		return normalizeIP(r.RemoteAddr)
-	}
-	return normalizeIP(host)
+	return peerIP(r)
+}
+
+// actor is the authenticated device and the authority token it presented,
+// for the store to re-check inside the write transaction.
+func actor(r *http.Request) store.Actor {
+	return store.Actor{Device: dev(r).ID, Auth: vaultAuth(r)}
 }
 
 // event writes one security-relevant line: who (device or admin, address),
@@ -456,7 +472,8 @@ func (s *Server) createInvite(w http.ResponseWriter, r *http.Request) {
 	// The admin bearer may mint an invite only for an empty vault (the first
 	// device's own enrolment). On a populated vault an admin-minted invite would
 	// plant a key-less device that the owner's next rotation could wrap keys to;
-	// the admin reaches nothing beyond deletion, by design.
+	// the admin reaches no vault content and no device, by design (there is
+	// no delete route either; see server/README.md).
 	if dev(r) == nil {
 		n, err := s.st.LiveDeviceCount(r.Context(), r.PathValue("v"))
 		if err != nil {
@@ -513,7 +530,7 @@ func (s *Server) setDeviceName(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "name_enc required")
 		return
 	}
-	if err := s.st.SetDeviceName(r.Context(), dev(r).ID, body.NameEnc); err != nil {
+	if err := s.st.SetDeviceName(r.Context(), r.PathValue("v"), actor(r), body.NameEnc); err != nil {
 		s.fail(w, err)
 		return
 	}
@@ -580,6 +597,13 @@ func (s *Server) registerAuth(w http.ResponseWriter, r *http.Request) {
 	} else {
 		err = s.st.SetVaultAuth(r.Context(), r.PathValue("v"), body.Auth)
 	}
+	if errors.Is(err, store.ErrConflict) {
+		// A token that does not match the installed one is a wrong guess at
+		// the authority token, charged like one: otherwise this route is an
+		// unthrottled equality oracle the authority middleware is not.
+		s.failAuth(w, r, "vault authority already set")
+		return
+	}
 	if err != nil {
 		s.fail(w, err)
 		return
@@ -600,7 +624,7 @@ func (s *Server) rotate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	v := r.PathValue("v")
-	if err := s.st.Rotate(r.Context(), v, dev(r).ID, body.Epoch, body.Revoke, body.Keybox, body.AuthNext); err != nil {
+	if err := s.st.Rotate(r.Context(), v, actor(r), body.Epoch, body.Revoke, body.Keybox, body.AuthNext); err != nil {
 		s.fail(w, err)
 		return
 	}
@@ -625,7 +649,7 @@ func (s *Server) setRecovery(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "bad body")
 		return
 	}
-	id, err := s.st.SetRecovery(r.Context(), r.PathValue("v"), body.PubKex, body.RecoveryEnc, body.Salt, body.Auth)
+	id, err := s.st.SetRecovery(r.Context(), r.PathValue("v"), actor(r), body.PubKex, body.RecoveryEnc, body.Salt, body.Auth)
 	if err != nil {
 		s.fail(w, err)
 		return
@@ -850,7 +874,12 @@ func (s *Server) live(w http.ResponseWriter, r *http.Request) {
 				c.Close(websocket.StatusPolicyViolation, "device revoked")
 				return
 			}
-			if err := wsjson.Write(ctx, c, s.hub.Current(v)); err != nil {
+			// Bounded like the heartbeat: a peer that stops reading must not
+			// park this handler in a write nothing times out.
+			wctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+			err := wsjson.Write(wctx, c, s.hub.Current(v))
+			cancel()
+			if err != nil {
 				return
 			}
 		case <-ping.C:
@@ -893,6 +922,22 @@ func (s *Server) blobsMissing(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		s.fail(w, err)
 		return
+	}
+	// The index is not the truth about the bytes: a row whose file is gone
+	// must read as missing, or no client ever re-uploads it.
+	present := map[string]bool{}
+	for _, id := range missing {
+		present[id] = false
+	}
+	for _, id := range ids {
+		if _, ok := present[id]; ok {
+			continue
+		}
+		if !s.blobs.Exists(r.PathValue("v"), id) {
+			s.dropOrphan(r.Context(), r.PathValue("v"), id)
+			missing = append(missing, id)
+			present[id] = false
+		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"missing": missing})
 }
@@ -979,7 +1024,7 @@ func (s *Server) putBlob(w http.ResponseWriter, r *http.Request) {
 	lk := s.blobLock(id)
 	lk.Lock()
 	defer lk.Unlock()
-	stored, err := s.st.UpsertBlob(r.Context(), v, id, epoch, n, replace)
+	stored, err := s.st.UpsertBlob(r.Context(), v, id, actor(r), epoch, n, replace)
 	if err != nil {
 		s.blobs.Delete(v, stage)
 		s.fail(w, err)
@@ -1011,6 +1056,10 @@ func (s *Server) getBlob(w http.ResponseWriter, r *http.Request) {
 	}
 	f, err := s.blobs.Open(v, id)
 	if err != nil {
+		// Index says present, file is gone (a GC that raced a re-upload, a
+		// crash between the two steps). Drop the row so the uploader's next
+		// missing check asks for the bytes again instead of trusting us.
+		s.dropOrphan(r.Context(), v, id)
 		writeErr(w, http.StatusNotFound, "blob data missing")
 		return
 	}
@@ -1034,7 +1083,7 @@ func (s *Server) postOps(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	v := r.PathValue("v")
-	results, seq, err := s.st.AppendOps(r.Context(), v, dev(r).ID, ops)
+	results, seq, err := s.st.AppendOps(r.Context(), v, actor(r), ops)
 	if err != nil {
 		s.fail(w, err)
 		return
@@ -1092,7 +1141,7 @@ func (s *Server) patchMeta(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "bad body")
 		return
 	}
-	if err := s.st.PatchMeta(r.Context(), r.PathValue("v"), seq, body.MetaEnc, body.MetaEpoch); err != nil {
+	if err := s.st.PatchMeta(r.Context(), r.PathValue("v"), actor(r), seq, body.MetaEnc, body.MetaEpoch); err != nil {
 		s.fail(w, err)
 		return
 	}
@@ -1122,7 +1171,7 @@ func (s *Server) restore(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	v := r.PathValue("v")
-	n, skipped, err := s.st.Restore(r.Context(), v, dev(r).ID, body.At)
+	n, skipped, err := s.st.Restore(r.Context(), v, actor(r), body.At)
 	if err != nil {
 		s.fail(w, err)
 		return
@@ -1159,17 +1208,27 @@ func (s *Server) GC(ctx context.Context, retention time.Duration) (int, error) {
 			return removed, err
 		}
 		for _, id := range dead {
+			// Row and file go under the same per-blob lock putBlob holds for
+			// index-update + promote, so a re-upload cannot land between them
+			// and lose its file to this delete.
+			lk := s.blobLock(id)
+			lk.Lock()
 			gone, err := s.st.DeleteDeadBlob(ctx, v.ID, id, cutoff)
+			if err == nil && gone {
+				if derr := s.blobs.Delete(v.ID, id); derr != nil {
+					s.log.Warn("gc: delete blob file", "vault", v.ID, "blob", id, "err", derr)
+				}
+				removed++
+			}
+			lk.Unlock()
 			if err != nil {
 				return removed, err
 			}
-			if !gone {
-				continue // referenced again since the listing
-			}
-			if err := s.blobs.Delete(v.ID, id); err != nil {
-				s.log.Warn("gc: delete blob file", "vault", v.ID, "blob", id, "err", err)
-			}
-			removed++
+		}
+		if n, err := s.blobs.SweepStale(v.ID, time.Hour); err != nil {
+			s.log.Warn("gc: sweep stale uploads", "vault", v.ID, "err", err)
+		} else if n > 0 {
+			s.log.Info("gc: removed abandoned upload files", "vault", v.ID, "n", n)
 		}
 		if err := s.st.PruneKeybox(ctx, v.ID); err != nil {
 			return removed, err

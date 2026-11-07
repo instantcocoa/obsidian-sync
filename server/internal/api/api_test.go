@@ -199,7 +199,7 @@ func (e *env) setup() (vault string, a, b device) {
 	authTok[vault] = newAuthTok()
 	e.do("POST", "/v1/vaults/"+vault+"/auth", a.token, map[string]any{"auth": authTok[vault]}, nil).expect(t, 204)
 	e.do("POST", "/v1/vaults/"+vault+"/auth", a.token, map[string]any{"auth": authTok[vault]}, nil).expect(t, 204) // idempotent
-	e.do("POST", "/v1/vaults/"+vault+"/auth", a.token, map[string]any{"auth": newAuthTok()}, nil).expect(t, 409)   // cannot be replaced
+	e.do("POST", "/v1/vaults/"+vault+"/auth", a.token, map[string]any{"auth": newAuthTok()}, nil).expect(t, 401)   // cannot be replaced; charged as a failed guess
 
 	// Device A invites B (needs authority: a stolen token alone cannot add devices).
 	e.do("POST", "/v1/vaults/"+vault+"/invites", a.token, map[string]any{"keybox_enc": randBytes(64)}, nil).expect(t, 401)

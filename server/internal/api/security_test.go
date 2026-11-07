@@ -101,7 +101,7 @@ func TestTokenOnlyAttackerCannotDestroyOrEscalate(t *testing.T) {
 	e.do("PUT", base+"/recovery", b.token, map[string]any{"pub_kex": randBytes(65), "recovery_enc": randBytes(80), "salt": randBytes(16), "auth": "rc_mine"}, nil).expect(t, 401)
 	e.do("PATCH", base+"/ops/1/meta", b.token, map[string]any{"meta_enc": randBytes(40), "meta_epoch": 1}, nil).expect(t, 401)
 	e.do("POST", base+"/invites", b.token, map[string]any{"keybox_enc": randBytes(8)}, nil).expect(t, 401)
-	e.do("POST", base+"/auth", b.token, map[string]any{"auth": newAuthTok()}, nil).expect(t, 409)
+	e.do("POST", base+"/auth", b.token, map[string]any{"auth": newAuthTok()}, nil).expect(t, 401) // a wrong authority token, charged as one
 	// Ciphertext cannot be replaced in place without the keys, even with a higher epoch header.
 	// (First rotate legitimately so epoch 2 exists.)
 	next := newAuthTok()
@@ -187,7 +187,7 @@ func TestAuthorityClaimRules(t *testing.T) {
 	}
 	e.do("POST", base+"/ops", a.token, []opIn{put("x.md", nil, 0)}, map[string]string{"X-Obsync-Vault-Auth": tok}).expect(t, 200)
 	// A member cannot replace it; the admin can.
-	e.do("POST", base+"/auth", b.token, map[string]any{"auth": newAuthTok()}, nil).expect(t, 409)
+	e.do("POST", base+"/auth", b.token, map[string]any{"auth": newAuthTok()}, nil).expect(t, 401) // a wrong authority token, charged as one
 	e.do("POST", base+"/auth", adminTok, map[string]any{"auth": newAuthTok()}, nil).expect(t, 204)
 	e.do("POST", base+"/ops", a.token, []opIn{put("y.md", nil, 0)}, map[string]string{"X-Obsync-Vault-Auth": tok}).expect(t, 401)
 	// A single-device vault: the first device claims it itself.

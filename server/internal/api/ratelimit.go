@@ -32,19 +32,44 @@ func newLimiter(perMinute, burst int, trustXFF bool) *limiter {
 
 func (l *limiter) key(r *http.Request) string {
 	if l.trustXFF {
-		// A trusted proxy appends the address it saw to X-Forwarded-For; every
-		// earlier entry is whatever the client wrote. Key on the last one, or a
-		// fresh fake first entry per request would give a fresh bucket.
-		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-			parts := strings.Split(xff, ",")
-			return bucketKey(normalizeIP(strings.TrimSpace(parts[len(parts)-1])))
+		if ip := proxiedClient(r); ip != "" {
+			return bucketKey(ip)
 		}
 	}
+	return bucketKey(peerIP(r))
+}
+
+// peerIP is the TCP peer's address, without port, zone or brackets.
+func peerIP(r *http.Request) string {
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
-		return bucketKey(normalizeIP(r.RemoteAddr))
+		return normalizeIP(r.RemoteAddr)
 	}
-	return bucketKey(normalizeIP(host))
+	return normalizeIP(host)
+}
+
+// proxiedClient is the client address the trusted proxy recorded, or "" when
+// the request carries none the server can trust. A proxy appends the address
+// it saw to X-Forwarded-For; every earlier entry is whatever the client
+// wrote. The header may arrive as several lines (HAProxy adds its own line
+// rather than appending to the client's), and RFC 9110 says the lines are
+// one list, so they are joined before the last entry is taken; reading only
+// the first line would hand the client the choice of bucket. An entry that is
+// not an address is treated as absent rather than minted into a bucket.
+func proxiedClient(r *http.Request) string {
+	all := strings.Join(r.Header.Values("X-Forwarded-For"), ",")
+	parts := strings.Split(all, ",")
+	for i := len(parts) - 1; i >= 0; i-- {
+		p := strings.TrimSpace(parts[i])
+		if p == "" {
+			continue
+		}
+		if ip := normalizeIP(p); net.ParseIP(ip) != nil {
+			return ip
+		}
+		return ""
+	}
+	return ""
 }
 
 // bucketKey is the address an IPv4 client is limited by, and the /64 for

@@ -197,8 +197,22 @@ Obsidian; everything found is fixed and merged:
    server field accepted userinfo and any scheme; `:` passed path
    validation (NTFS streams); re-encryption overwrote the metadata's blob
    binding. All fixed; `plugin/test/review6-*.test.ts` (17 tests), crypto
-   vectors regenerated for the padded metadata. Server half: see the
-   `review6_test.go` entry below once that report is in.
+   vectors regenerated for the padded metadata. Server half (graded 4/5):
+   `--trust-proxy` read only the first `X-Forwarded-For` line, so a proxy
+   that adds its own line let the client pick its limiter bucket and forge
+   the logged address; enrolment stored uncapped `name_enc` and unchecked
+   `pub_kex`; a write whose device was revoked while its body was still
+   being read was committed afterwards (every write transaction now re-checks
+   the device and the authority token: `store.Actor`); GC deleted the blob
+   file outside the per-blob lock and could orphan a re-upload (locked now,
+   and an orphaned index row self-heals on GET or missing-check); `POST
+   /auth` answered 409 as an unthrottled equality oracle (401 via the
+   failed-auth limiter now; the plugin already tolerated both); rotation
+   stored keybox rows for non-devices; the live socket's hint write had no
+   deadline; `synchronous=NORMAL` and no directory fsync; stale upload files
+   never swept; doc drift (TTL 1 h, no delete route, `obsync.db`);
+   `platforms.yml` had no `permissions:` block. All fixed;
+   `server/internal/api/review6_test.go`. Released as 0.1.5.
 2. **Human security review.** Hand `docs/SECURITY-REVIEW-GUIDE.md` to a
    specialist. When findings come back, fix them in the style of the
    existing review rounds: a failing test first (`security_test.go` for the

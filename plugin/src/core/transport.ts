@@ -210,7 +210,7 @@ export class Client {
     return this.json("POST", `/v1/vaults/${vaultId}/invites`, { keybox_enc: b64(keyboxEnc), ttl_seconds: ttlSeconds ?? 0 }, { authority: Boolean(this.opts.vaultAuth) });
   }
 
-  /** Register the vault authority hash (first enrolment); a 409 means it is already set. */
+  /** Register the vault authority hash (first enrolment); 401 (or 409 from servers before 0.1.5) means a different one is already set. */
   async registerAuth(vaultId: string, auth: string): Promise<void> {
     await this.json("POST", `/v1/vaults/${vaultId}/auth`, { auth });
   }

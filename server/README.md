@@ -44,17 +44,21 @@ A vault can hold at most 20 unused invites; a rotation ends them all.
 Unauthenticated routes (invite redemption and recovery join) and
 failed token checks are rate-limited per client IP: `--auth-rate N` requests
 per minute (default 10, burst 2N; `-1` disables, for tests). Behind a reverse
-proxy pass `--trust-proxy` so the limiter keys on the last `X-Forwarded-For`
-entry, the one your proxy appended (it assumes exactly one trusted hop);
-without it every client would share the proxy's address. IPv6 clients are
-keyed by their /64, and the limiter holds at most 100,000 buckets.
+proxy pass `--trust-proxy` so the limiter and the security log key on the
+last `X-Forwarded-For` entry, the one your proxy appended (it assumes exactly
+one trusted hop); without it every client would share the proxy's address.
+All `X-Forwarded-For` lines are read as one list, so a proxy that adds its
+own line (HAProxy's default) is handled the same as one that appends to the
+client's; an entry that is not an IP address is ignored and the peer address
+is used. IPv6 clients are keyed by their /64, and the limiter holds at most
+100,000 buckets.
 
 ## Backup and restore
 
-Everything lives under `--data`: `db.sqlite` (op log, heads, devices,
+Everything lives under `--data`: `obsync.db` (op log, heads, devices,
 keybox) and `blobs/` (encrypted content, content-addressed). Back up both
 together, with the server stopped or with SQLite's online backup
-(`sqlite3 db.sqlite ".backup /path/db.sqlite"`) followed by a copy of
+(`sqlite3 obsync.db ".backup /path/obsync.db"`) followed by a copy of
 `blobs/`. The server holds no keys, so a backup is ciphertext and can sit
 anywhere.
 
@@ -118,7 +122,7 @@ hex chars.
 | `PATCH` | `/v1/vaults/{v}/devices/me` | `{name_enc}` rename the calling device |
 | `GET` | `/v1/vaults/{v}/keybox` | rows addressed to the caller, epochs ≥ `min_epoch` |
 | `POST` | `/v1/vaults/{v}/keybox` | `{keybox:[{epoch, recipient_id, wrapped}]}` for epochs ≤ current; recipient must be the caller, or a recovery identity (insert-only, **authority**) |
-| `POST` | `/v1/vaults/{v}/auth` | `{auth:"va_…"}`. Device: installs the hash only on first enrolment (the caller is the vault's sole device); 204 when equal, 409 when different, 401 otherwise. Admin: installs or replaces it unconditionally (migration, reset). |
+| `POST` | `/v1/vaults/{v}/auth` | `{auth:"va_…"}`. Device: installs the hash only on first enrolment (the caller is the vault's sole device); 204 when equal, 401 when different (charged to the failed-authentication limiter like any wrong authority token), 401 otherwise. Admin: installs or replaces it unconditionally (migration, reset). |
 | `POST` | `/v1/vaults/{v}/rotate` | **authority**. `{epoch: cur+1, revoke:[ids], keybox:[rows], auth_next:"va_…"}`; atomic; must cover every remaining device |
 | `PUT` | `/v1/vaults/{v}/recovery` | **authority**. `{pub_kex, recovery_enc, salt, auth:"rc_…"}` |
 | `GET` | `/v1/vaults/{v}/recovery` | no auth → `{device_id, pub_kex, salt}` (salt only; nothing to attack offline) |

@@ -6,6 +6,7 @@
  * post-write hooks. Keys and the device token live in this plugin's
  * data.json, which the default exclusions keep out of sync.
  */
+import { parseInviteLink } from "../core/crypto";
 import { Notice, Plugin, Platform } from "obsidian";
 import { Engine, type EngineConfig, type Status } from "../core/engine";
 import type { VaultInfo } from "../core/transport";
@@ -26,7 +27,7 @@ import {
 import { ObsidianFS, ObsidianStateStore } from "./obsidian-fs";
 import { ConfigHooks } from "./hooks";
 import { ObsyncSettingTab } from "./settings";
-import { ConfirmModal, ListModal, PromptModal, ShowSecretModal } from "./modals";
+import { ConfirmModal, ListModal, PromptModal, ShowSecretModal, InviteModal } from "./modals";
 import { deriveWrapKeyFromPin, newWrapKey, open as openKeystore, seal as sealKeystore, type ProtectionMethod, type SealedKeystore } from "../core/keystore";
 import { fromB64, randomBytes } from "../core/encoding";
 import { promptTouchId, safeStorageAvailable, safeUnwrap, safeWrap, touchIdAvailable } from "./protection";
@@ -51,10 +52,14 @@ interface Settings {
   compress: boolean;
   pad: boolean;
   debounceMs: number;
+  /** Show notices for routine sync events (conflicts resolved, synced plugins enabled, settings arriving). Errors and anything that needs a decision are always shown. */
+  syncNotices: boolean;
 }
 
 /** Where an unloading instance leaves its engine's stop promise for the next one (see onunload). */
 const STOPPING = "__obsyncStopping";
+/** The obsidian:// action a scanned invite QR opens. */
+const JOIN_ACTION = "obsync-join";
 type HandoffGlobal = { [STOPPING]?: Promise<void> };
 
 const DEFAULT_SETTINGS: Settings = {
@@ -67,6 +72,7 @@ const DEFAULT_SETTINGS: Settings = {
   compress: false,
   pad: false,
   debounceMs: 1500,
+  syncNotices: true,
 };
 
 /**
@@ -101,7 +107,7 @@ export default class ObsyncPlugin extends Plugin {
 
   override async onload(): Promise<void> {
     await this.loadSettings();
-    this.hooks = new ConfigHooks(this.app, this.manifest.id);
+    this.hooks = new ConfigHooks(this.app, this.manifest.id, (msg, ms) => this.routineNotice(msg, ms));
     this.statusEl = this.addStatusBarItem();
     this.statusEl.setText("obsync: off");
     this.settingTab = new ObsyncSettingTab(this);
@@ -119,6 +125,8 @@ export default class ObsyncPlugin extends Plugin {
     this.addCommand({ id: "reupload", name: "Re-upload current file to the server", callback: () => this.cmdReupload() });
     this.addCommand({ id: "apply-held-deletes", name: "Apply held deletions", callback: () => this.engine?.applyHeldDeletes() });
     this.addCommand({ id: "unlock", name: "Unlock vault keys", callback: () => void this.unlock() });
+    // A scanned invite QR (or a tapped obsidian:// link) lands here.
+    this.registerObsidianProtocolHandler(JOIN_ACTION, (params) => void this.joinFromProtocol(String(params.link ?? "")));
 
     // Lifecycle: flush edits when a file is opened/closed, resync on resume and reconnect.
     this.registerEvent(this.app.workspace.on("file-open", () => this.engine?.kick(300)));
@@ -299,7 +307,7 @@ export default class ObsyncPlugin extends Plugin {
         },
         onStatus: (s) => this.renderStatus(s),
         afterApply: (p, k) => this.hooks.afterApply(p, k),
-        onConflict: (p, sib) => new Notice(`obsync: conflict on ${p}. Your version was saved as ${sib}.`, 10000),
+        onConflict: (p, sib) => this.routineNotice(`obsync: conflict on ${p}. Your version was saved as ${sib}.`, 10000),
         onSkipped: (p, why) => new Notice(`obsync: could not apply the latest version of ${p} (${why}). Your local copy was kept and sync continues; the next change to that file on any device will fix it.`, 12000),
         confirmMassDelete: (paths) =>
           ConfirmModal.ask(
@@ -349,12 +357,43 @@ export default class ObsyncPlugin extends Plugin {
     this.removedNoticed = false;
     await this.saveSettings();
     await this.restartEngine();
-    new Notice(`obsync: ${what}. Initial sync running.`);
+    this.routineNotice(`obsync: ${what}. Initial sync running.`);
+  }
+
+  /** A notice about a routine sync event; silenced by the "Sync notices" setting. Errors and decisions use `new Notice` directly. */
+  routineNotice(msg: string, ms?: number): void {
+    if (this.settings.syncNotices) new Notice(msg, ms);
   }
 
   async joinWithLink(link: string): Promise<void> {
     if (!link) throw new Error("paste an invite link first");
     await this.adopt(await joinWithLink(link, this.settings.deviceName), "joined the vault");
+  }
+
+  /**
+   * `obsidian://obsync-join?link=…` from a scanned QR or a tapped link. Any
+   * app or web page can open such a URL, so it never joins by itself: it
+   * asks, names the server, and refuses while this device is in a vault.
+   */
+  async joinFromProtocol(link: string): Promise<void> {
+    if (!link.startsWith("obsync://join#")) {
+      new Notice("obsync: that is not an invite link.");
+      return;
+    }
+    if (this.settings.identity || this.settings.sealed) {
+      new Notice("obsync: this device is already in a vault. Leave it first to join another.", 8000);
+      return;
+    }
+    let server: string;
+    try {
+      server = parseInviteLink(link).server;
+    } catch {
+      new Notice("obsync: that invite link is malformed.");
+      return;
+    }
+    const ok = await ConfirmModal.ask(this.app, `Join the vault on ${server}?`, "This device will download the vault into the current folder and start syncing. Continue only if you generated this invite yourself.", "Join");
+    if (!ok) return;
+    await this.guard(() => this.joinWithLink(link));
   }
 
   async joinWithPassphrase(server: string, vaultId: string, passphrase: string): Promise<void> {
@@ -469,7 +508,7 @@ export default class ObsyncPlugin extends Plugin {
   cmdInvite(): Promise<void> {
     return this.guard(async () => {
       const link = await this.inviteLink();
-      new ShowSecretModal(this.app, "Invite link", link, "Valid for 24 hours, single use. It contains the vault keys: send it over a channel you trust and delete it afterwards.").open();
+      new InviteModal(this.app, link, `obsidian://${JOIN_ACTION}?link=${encodeURIComponent(link)}`).open();
     });
   }
 

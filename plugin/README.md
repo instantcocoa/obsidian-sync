@@ -28,11 +28,15 @@ Pairs with the `obsync` server in `../server`. Design and rationale are in
    and in conflict file names, and can be renamed later), then **Create a new
    vault → Create…** with the server URL and the admin token. The vault keys
    are generated on this device; the server never sees them.
-4. On the first device: **Generate invite link**. On every other device:
-   install the plugin the same way, open its settings, paste the link into
-   **Join with invite link** and press **Join**. A notice confirms the join
-   and the status bar shows `obsync ✓`. The link is single-use and expires in
-   24 hours.
+4. On the first device: **Generate invite link**. It shows a QR code and
+   the link. On every other device, install the plugin the same way, then
+   either scan the QR code with the device's camera (it opens Obsidian,
+   which asks before joining) or open the plugin's settings, paste the link
+   into **Join with invite link** and press **Join**. A notice confirms the
+   join and the status bar shows `obsync ✓`. The link is single-use and
+   expires in 24 hours. Notices about routine sync events (a conflict
+   resolved, a synced plugin enabled) can be turned off under **Sync
+   notices**; errors and decisions are always shown.
 5. Optional but recommended: **Set recovery passphrase** so a new device can
    join with only the server URL, the vault id and the passphrase if you lose
    every other device. The vault id is shown under **Status** with a Copy

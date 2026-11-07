@@ -41,6 +41,8 @@ export class ConfigHooks {
   constructor(
     private app: App,
     private selfId: string,
+    /** How routine notices are shown; the plugin silences them when "Sync notices" is off. */
+    private notify: (msg: string, ms?: number) => void = (msg, ms) => void new Notice(msg, ms),
   ) {}
 
   /** Called by the engine after it wrote or removed `path` (device path). */
@@ -89,7 +91,7 @@ export class ConfigHooks {
         if (running(p, id)) {
           await p.disablePlugin(id);
           await p.enablePlugin(id);
-          new Notice(`obsync: reloaded plugin ${id}`);
+          this.notify(`obsync: reloaded plugin ${id}`);
           continue;
         }
         // Seen on Android: community-plugins.json arrives before the plugin's
@@ -126,7 +128,7 @@ export class ConfigHooks {
     if (Platform.isMobile && m.isDesktopOnly) {
       if (!this.noticedDesktopOnly.has(id)) {
         this.noticedDesktopOnly.add(id);
-        new Notice(`obsync: plugin "${id}" is enabled in the vault but is desktop-only, so it was not enabled on this device.`, 10000);
+        this.notify(`obsync: plugin "${id}" is enabled in the vault but is desktop-only, so it was not enabled on this device.`, 10000);
       }
       return false;
     }
@@ -135,7 +137,7 @@ export class ConfigHooks {
     // and reloads see it as running (the synced list already says so).
     p.enabledPlugins.add(id);
     // Code from another device just started running here. Say so.
-    new Notice(`obsync: enabled plugin "${id}" because it is enabled in the vault`);
+    this.notify(`obsync: enabled plugin "${id}" because it is enabled in the vault`);
     return true;
   }
 
@@ -175,6 +177,6 @@ export class ConfigHooks {
   private noticeRestartOnce(): void {
     if (this.noticedRestart) return;
     this.noticedRestart = true;
-    new Notice("obsync: settings changed on another device. Reload Obsidian to apply all of them.", 8000);
+    this.notify("obsync: settings changed on another device. Reload Obsidian to apply all of them.", 8000);
   }
 }

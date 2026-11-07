@@ -1,5 +1,6 @@
 /** Small modals used by settings and commands. No framework, plain Obsidian API. */
 import { App, Modal, Notice, Setting } from "obsidian";
+import qrcode from "qrcode-generator";
 
 export class ConfirmModal extends Modal {
   private resolved = false;
@@ -152,6 +153,52 @@ export class ListModal extends Modal {
         });
       }
     }
+  }
+  override onClose(): void {
+    this.contentEl.empty();
+  }
+}
+
+/**
+ * The invite link as a QR code plus the text. The QR encodes an
+ * `obsidian://obsync-join?link=…` URL, which a phone's camera opens in
+ * Obsidian (the OS knows `obsidian://`, not `obsync://`); the plugin there
+ * asks before joining. Same link, same single use, same 24 hours.
+ */
+export class InviteModal extends Modal {
+  constructor(
+    app: App,
+    private link: string,
+    private scanUrl: string,
+  ) {
+    super(app);
+  }
+  override onOpen(): void {
+    this.titleEl.setText("Invite another device");
+    this.contentEl.createEl("p", {
+      text: "On the other device, install obsync first, then scan this with its camera, or copy the link and paste it into Settings → obsync → Join. Valid for 24 hours, single use. It contains the vault keys: show or send it only where you would a password.",
+    });
+    const qr = qrcode(0, "M");
+    qr.addData(this.scanUrl);
+    qr.make();
+    const img = this.contentEl.createEl("img", { attr: { src: qr.createDataURL(6, 8), alt: "QR code of the invite link" } });
+    img.style.display = "block";
+    img.style.margin = "0 auto 1em";
+    img.style.maxWidth = "min(100%, 320px)";
+    img.style.imageRendering = "pixelated";
+    const ta = this.contentEl.createEl("textarea", { text: this.link });
+    ta.readOnly = true;
+    ta.style.width = "100%";
+    ta.style.height = "6em";
+    new Setting(this.contentEl).addButton((b) =>
+      b
+        .setButtonText("Copy link")
+        .setCta()
+        .onClick(async () => {
+          await navigator.clipboard.writeText(this.link);
+          new Notice("Copied");
+        }),
+    );
   }
   override onClose(): void {
     this.contentEl.empty();

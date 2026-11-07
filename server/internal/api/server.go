@@ -245,7 +245,13 @@ func (s *Server) clientIP(r *http.Request) string {
 // event writes one security-relevant line: who (device or admin, address),
 // what (name), on which vault, with what outcome. Never a token.
 func (s *Server) event(r *http.Request, name string, kv ...any) {
-	args := append([]any{"event", name, "ip", s.clientIP(r), "vault", r.PathValue("v"), "by", callerID(r), "route", r.Method + " " + r.URL.Path}, kv...)
+	by := "-"
+	if d := dev(r); d != nil {
+		by = d.ID
+	} else if s.isAdmin(bearer(r)) {
+		by = "admin"
+	}
+	args := append([]any{"event", name, "ip", s.clientIP(r), "vault", r.PathValue("v"), "by", by, "route", r.Method + " " + r.URL.Path}, kv...)
 	s.log.Info("security", args...)
 }
 

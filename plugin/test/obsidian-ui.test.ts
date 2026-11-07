@@ -160,7 +160,8 @@ describe.skipIf(!OBSIDIAN_BIN)("real Obsidian, settings UI onboarding, rate limi
     // Wrong PIN: still locked, a notice explains.
     await (await a.locator('.modal input[type="password"]')).fill("wrong-pin");
     await a.clickModalButton("Unlock");
-    expect(await a.waitFor(() => /wrong PIN/.test(document.querySelector(".notice")?.textContent ?? ""), 10_000)).toBe(true);
+    // Other notices may be up (a device joined, keys sealed): look at all of them.
+    expect(await a.waitFor(() => Array.from(document.querySelectorAll(".notice")).some((n) => /wrong PIN/.test(n.textContent ?? "")), 10_000)).toBe(true);
     expect(await a.eval((plugin) => plugin.locked)).toBe(true);
     // Right PIN via the "Unlock vault keys" command path.
     await a.eval((plugin) => void plugin.unlock());

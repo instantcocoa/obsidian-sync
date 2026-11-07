@@ -48,9 +48,17 @@ describe.skipIf(!OBSIDIAN_BIN)("inside real Obsidian", () => {
     const idB = await b.eval((plugin) => plugin.settings.identity);
     expect(idB.vaultId).toBe(vaultId);
     expect(idB.deviceId).not.toBe(idA.deviceId);
-    // Keys live only in the plugin's own data.json.
+    // Keys live only in the plugin's own data.json, and where the OS keychain
+    // is real (macOS, Windows) they are sealed there by default at enrolment;
+    // on a headless Linux box there is no keychain, so they are in the clear.
     const dataA = JSON.parse(await fsp.readFile(join(a.vault, ".obsidian/plugins/obsync/data.json"), "utf8"));
-    expect(dataA.identity.keyring.k_id).toMatch(/^[0-9a-f]{64}$/);
+    if (dataA.sealed) {
+      expect(dataA.identity).toBeNull();
+      expect(dataA.sealed.method).toBe("safe");
+      expect(JSON.stringify(dataA)).not.toMatch(/"k_id"/);
+    } else {
+      expect(dataA.identity.keyring.k_id).toMatch(/^[0-9a-f]{64}$/);
+    }
     // Status bar shows a state.
     expect(await a.waitFor(() => /obsync/.test(document.querySelector(".status-bar")?.textContent ?? ""))).toBe(true);
     // The live WebSocket channel is up on both sides (otherwise propagation would fall back to 60 s polling).

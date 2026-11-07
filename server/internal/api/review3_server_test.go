@@ -33,7 +33,7 @@ func TestZzXFFFirstHopSpoofBypassesLimiter(t *testing.T) {
 		t.Fatal(err)
 	}
 	bs, _ := blobstore.New(dir + "/blobs")
-	srv := api.New(api.Config{AdminToken: adminTok, TrustProxy: true, AuthRatePerMinute: 1, AuthBurst: 2}, st, bs)
+	srv := api.New(api.Config{AdminToken: adminTok, TrustedProxies: []string{"127.0.0.0/8", "::1/128"}, AuthRatePerMinute: 1, AuthBurst: 2}, st, bs)
 	ts := httptest.NewServer(srv)
 	t.Cleanup(func() { ts.Close(); st.Close() })
 
@@ -70,7 +70,7 @@ func TestZzRecoveryTokenActsAsDeviceToken(t *testing.T) {
 	e.upload(vault, a, bid, blob(1, "ciphertext")).expect(t, 201)
 	e.ops(vault, a, put("secret.md", str(bid), 0))
 	rc := "rc_" + hex.EncodeToString(randBytes(32))
-	e.do("PUT", base+"/recovery", a.token, map[string]any{"pub_kex": randBytes(65), "recovery_enc": randBytes(80), "salt": randBytes(16), "auth": rc}, authHdr(vault)).expect(t, 201)
+	e.do("PUT", base+"/recovery", a.token, map[string]any{"pub_kex": testPubKex(), "recovery_enc": randBytes(80), "salt": randBytes(16), "auth": rc}, authHdr(vault)).expect(t, 201)
 
 	var devs struct{ Devices []store.Device }
 	e.do("GET", base+"/devices", a.token, nil, nil).expect(t, 200).json(t, &devs)

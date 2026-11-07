@@ -81,6 +81,47 @@ func (f *FS) Exists(vault, id string) bool {
 	return err == nil && st.Mode().IsRegular()
 }
 
+// Orphans lists final blob files (64 hex characters) older than `age`; the
+// caller checks each against the index and removes those with no row.
+func (f *FS) Orphans(vault string, age time.Duration) ([]string, error) {
+	root := filepath.Join(f.root, vault)
+	cutoff := time.Now().Add(-age)
+	var out []string
+	err := filepath.WalkDir(root, func(p string, d os.DirEntry, err error) error {
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				return nil
+			}
+			return err
+		}
+		if d.IsDir() || !isHexID(d.Name()) {
+			return nil
+		}
+		info, err := d.Info()
+		if err != nil || info.ModTime().After(cutoff) {
+			return nil
+		}
+		out = append(out, d.Name())
+		return nil
+	})
+	if errors.Is(err, os.ErrNotExist) {
+		err = nil
+	}
+	return out, err
+}
+
+func isHexID(s string) bool {
+	if len(s) != 64 {
+		return false
+	}
+	for _, c := range s {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
 // SweepStale removes staging and temp files of interrupted uploads older
 // than `age` (names "<id>-stage-<nonce>" from putBlob and ".tmp-<id>-*" from
 // Put). Nothing else matches those names, so a live upload younger than

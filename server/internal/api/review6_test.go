@@ -26,6 +26,15 @@ import (
 	"obsync/internal/store"
 )
 
+// trustedLoopback is the --trust-proxy value that treats the test client
+// (loopback) as the proxy, or none.
+func trustedLoopback(on bool) []string {
+	if on {
+		return []string{"127.0.0.0/8", "::1/128"}
+	}
+	return nil
+}
+
 // rateEnv is newEnv with a real limiter (60/min, burst 5) and optional
 // --trust-proxy, and it keeps the blobstore handle for GC interleavings.
 func rateEnv(t *testing.T, trustProxy bool) (*env, *blobstore.FS) {
@@ -39,7 +48,7 @@ func rateEnv(t *testing.T, trustProxy bool) (*env, *blobstore.FS) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv := api.New(api.Config{AdminToken: adminTok, InviteTTL: time.Hour, MaxWait: 5 * time.Second, AuthRatePerMinute: 60, AuthBurst: 5, TrustProxy: trustProxy}, st, bs)
+	srv := api.New(api.Config{AdminToken: adminTok, InviteTTL: time.Hour, MaxWait: 5 * time.Second, AuthRatePerMinute: 60, AuthBurst: 5, TrustedProxies: trustedLoopback(trustProxy)}, st, bs)
 	ts := httptest.NewServer(srv)
 	t.Cleanup(func() { ts.Close(); st.Close() })
 	return &env{t: t, ts: ts, srv: srv, st: st}, bs
@@ -279,7 +288,7 @@ func TestZzInviteRedemptionRaceIsSingleUse(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			c := e.do("POST", "/v1/invites/"+inv.Token, "", map[string]any{"pub_kex": randBytes(65)}, nil).code
+			c := e.do("POST", "/v1/invites/"+inv.Token, "", map[string]any{"pub_kex": testPubKex()}, nil).code
 			mu.Lock()
 			codes[c]++
 			mu.Unlock()
@@ -304,7 +313,7 @@ func TestZzRouteTokenClasses(t *testing.T) {
 	var inv store.Invite
 	e.do("POST", base+"/invites", a.token, map[string]any{"keybox_enc": randBytes(64)}, authHdr(vault)).expect(t, 201).json(t, &inv)
 	recAuth := "rc_" + hex.EncodeToString(randBytes(16))
-	e.do("PUT", base+"/recovery", a.token, map[string]any{"pub_kex": randBytes(65), "recovery_enc": randBytes(80), "salt": randBytes(16), "auth": recAuth}, authHdr(vault)).expect(t, 201)
+	e.do("PUT", base+"/recovery", a.token, map[string]any{"pub_kex": testPubKex(), "recovery_enc": randBytes(80), "salt": randBytes(16), "auth": recAuth}, authHdr(vault)).expect(t, 201)
 
 	bid := hexID("x")
 	deviceRoutes := []struct{ m, p string }{
@@ -344,12 +353,12 @@ func TestZzRouteTokenClasses(t *testing.T) {
 	}
 	// Recovery join with a device token or the admin token as the rc_ bearer.
 	for _, tok := range []string{a.token, adminTok, inv.Token} {
-		if c := e.do("POST", base+"/recovery/join", tok, map[string]any{"pub_kex": randBytes(65)}, nil).code; c != 401 {
+		if c := e.do("POST", base+"/recovery/join", tok, map[string]any{"pub_kex": testPubKex()}, nil).code; c != 401 {
 			t.Errorf("recovery/join with %.6s… → %d", tok, c)
 		}
 	}
 	// The invite still redeems afterwards (none of the above consumed it).
-	e.do("POST", "/v1/invites/"+inv.Token, "", map[string]any{"pub_kex": randBytes(65)}, nil).expect(t, 201)
+	e.do("POST", "/v1/invites/"+inv.Token, "", map[string]any{"pub_kex": testPubKex()}, nil).expect(t, 201)
 }
 
 // ---------------------------------------------------------------------------

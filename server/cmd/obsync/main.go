@@ -121,7 +121,7 @@ func serve(args []string) error {
 	maxBlob := fs.Int64("max-blob-mb", 1024, "maximum blob size in MiB")
 	retention := fs.Duration("retention", 90*24*time.Hour, "keep superseded blobs for this long before GC")
 	gcEvery := fs.Duration("gc-interval", 24*time.Hour, "how often to run GC (0 disables)")
-	trustProxy := fs.Bool("trust-proxy", false, "use X-Forwarded-For for rate limiting (only behind a proxy you control)")
+	trustProxy := fs.String("trust-proxy", "", "comma-separated CIDRs (or addresses) of reverse proxies whose X-Forwarded-For is trusted; empty: none")
 	authRate := fs.Int("auth-rate", 10, "max unauthenticated/failed-auth requests per minute per IP (burst 2x)")
 	fs.Parse(args)
 
@@ -135,7 +135,7 @@ func serve(args []string) error {
 		return err
 	}
 	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
-	srv := api.New(api.Config{AdminToken: tok, MaxBlobSize: *maxBlob << 20, Logger: log, TrustProxy: *trustProxy, AuthRatePerMinute: *authRate, AuthBurst: *authRate * 2}, st, bs)
+	srv := api.New(api.Config{AdminToken: tok, MaxBlobSize: *maxBlob << 20, Logger: log, TrustedProxies: strings.Split(*trustProxy, ","), AuthRatePerMinute: *authRate, AuthBurst: *authRate * 2}, st, bs)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()

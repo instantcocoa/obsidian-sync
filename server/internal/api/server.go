@@ -12,6 +12,7 @@ import (
 	"hash/fnv"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"strconv"
@@ -44,17 +45,21 @@ type Config struct {
 	// Zero means the default (10/min, burst 20). Negative disables (tests).
 	AuthRatePerMinute int
 	AuthBurst         int
-	// TrustProxy uses X-Forwarded-For for the client IP. Only enable behind a proxy you control.
-	TrustProxy bool
+	// TrustedProxies lists the reverse proxies (CIDRs or addresses) whose
+	// X-Forwarded-For is believed, for requests that arrive from them. Empty:
+	// the TCP peer is the client. A bad entry makes New panic: a server that
+	// silently trusted the wrong thing would be worse than one that did not start.
+	TrustedProxies []string
 }
 
 type Server struct {
-	cfg   Config
-	st    *store.Store
-	blobs *blobstore.FS
-	hub   *Hub
-	mux   *http.ServeMux
-	log   *slog.Logger
+	trusted []*net.IPNet // proxies whose X-Forwarded-For is believed
+	cfg     Config
+	st      *store.Store
+	blobs   *blobstore.FS
+	hub     *Hub
+	mux     *http.ServeMux
+	log     *slog.Logger
 	// blobLocks serialises index-update + file-promote per blob so two
 	// concurrent uploads at different epochs cannot leave the index and the
 	// file disagreeing. Striped to bound memory.
@@ -88,6 +93,10 @@ func (s *Server) dropOrphan(ctx context.Context, vault, id string) {
 }
 
 func New(cfg Config, st *store.Store, blobs *blobstore.FS) *Server {
+	trusted, err := parseCIDRs(cfg.TrustedProxies)
+	if err != nil {
+		panic(err)
+	}
 	if cfg.MaxBlobSize == 0 {
 		cfg.MaxBlobSize = 1 << 30
 	}
@@ -113,9 +122,10 @@ func New(cfg Config, st *store.Store, blobs *blobstore.FS) *Server {
 		burst = 20
 	}
 	s := &Server{cfg: cfg, st: st, blobs: blobs, hub: NewHub(), mux: http.NewServeMux(), log: cfg.Logger}
+	s.trusted = trusted
 	if rate > 0 {
-		s.unauth = newLimiter(rate, burst, cfg.TrustProxy)
-		s.authFail = newLimiter(rate, burst, cfg.TrustProxy)
+		s.unauth = newLimiter(rate, burst, s.trusted)
+		s.authFail = newLimiter(rate, burst, s.trusted)
 	}
 	s.routes()
 	return s
@@ -244,7 +254,7 @@ func (s *Server) limited(next http.HandlerFunc) http.HandlerFunc {
 // clientIP is the address the request is attributed to in the event log:
 // the proxy-appended hop under --trust-proxy, else the peer address.
 func (s *Server) clientIP(r *http.Request) string {
-	if s.cfg.TrustProxy {
+	if fromTrustedProxy(r, s.trusted) {
 		if ip := proxiedClient(r); ip != "" {
 			return ip
 		}
@@ -388,7 +398,11 @@ func (s *Server) fail(w http.ResponseWriter, err error) {
 	case errors.Is(err, store.ErrBadRequest):
 		writeErr(w, http.StatusBadRequest, err.Error())
 	case errors.Is(err, store.ErrForbidden):
-		writeErr(w, http.StatusUnauthorized, "forbidden")
+		// The reason travels with the 401: the plugin tells "vault authority
+		// changed" (another device rotated while this request was in flight;
+		// re-sync and retry) from "device revoked" (leave or re-join) by the
+		// body, exactly as it does for the authority middleware's 401.
+		writeErr(w, http.StatusUnauthorized, err.Error())
 	default:
 		s.log.Error("internal error", "err", err)
 		writeErr(w, http.StatusInternalServerError, "internal error")
@@ -485,7 +499,11 @@ func (s *Server) createInvite(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	inv, err := s.st.CreateInvite(r.Context(), r.PathValue("v"), callerID(r), body.KeyboxEnc, ttl)
+	var by store.Actor
+	if dev(r) != nil {
+		by = actor(r)
+	}
+	inv, err := s.st.CreateInvite(r.Context(), r.PathValue("v"), by, body.KeyboxEnc, ttl)
 	if err != nil {
 		s.fail(w, err)
 		return
@@ -1024,18 +1042,31 @@ func (s *Server) putBlob(w http.ResponseWriter, r *http.Request) {
 	lk := s.blobLock(id)
 	lk.Lock()
 	defer lk.Unlock()
-	stored, err := s.st.UpsertBlob(r.Context(), v, id, actor(r), epoch, n, replace)
-	if err != nil {
+	// Order matters across a crash: the file first, the index row after. A
+	// row ahead of its file (epoch 2 recorded, epoch-1 bytes on disk) would
+	// drop the blob out of the re-encryption listing while every device
+	// prunes the only key that reads it; a file ahead of its row is merely
+	// re-encrypted again. The decision whether this epoch may land is taken
+	// from the index before the rename, under the same lock putBlob and GC
+	// share, and the writer's liveness is checked before the bytes replace
+	// anything (UpsertBlob re-checks inside its transaction).
+	if cur, err := s.st.GetBlob(r.Context(), v, id); err == nil && (cur.Epoch > epoch || (cur.Epoch == epoch && !replace)) {
+		s.blobs.Delete(v, stage)
+		w.Header().Set("X-Blob-Epoch", strconv.FormatInt(cur.Epoch, 10))
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	if live, err := s.st.CheckVaultAuth(r.Context(), v, vaultAuth(r)); err != nil || !live || !s.st.DeviceLive(r.Context(), dev(r).ID) {
+		s.blobs.Delete(v, stage)
+		s.fail(w, fmt.Errorf("%w: device revoked or vault authority changed", store.ErrForbidden))
+		return
+	}
+	if err := s.blobs.Promote(v, stage, id); err != nil {
 		s.blobs.Delete(v, stage)
 		s.fail(w, err)
 		return
 	}
-	if !stored {
-		s.blobs.Delete(v, stage)
-		w.WriteHeader(http.StatusOK)
-		return
-	}
-	if err := s.blobs.Promote(v, stage, id); err != nil {
+	if _, err := s.st.UpsertBlob(r.Context(), v, id, actor(r), epoch, n, replace); err != nil {
 		s.fail(w, err)
 		return
 	}
@@ -1223,6 +1254,24 @@ func (s *Server) GC(ctx context.Context, retention time.Duration) (int, error) {
 			lk.Unlock()
 			if err != nil {
 				return removed, err
+			}
+		}
+		// Files with no index row (a crash between the rename and the row,
+		// or GC's own crash between row and file in the other direction) are
+		// invisible to every client; after an hour nothing legitimate is
+		// still between those two steps.
+		if ids, err := s.blobs.Orphans(v.ID, time.Hour); err != nil {
+			s.log.Warn("gc: list orphan files", "vault", v.ID, "err", err)
+		} else {
+			for _, id := range ids {
+				lk := s.blobLock(id)
+				lk.Lock()
+				if _, err := s.st.GetBlob(ctx, v.ID, id); errors.Is(err, store.ErrNotFound) {
+					if derr := s.blobs.Delete(v.ID, id); derr == nil {
+						removed++
+					}
+				}
+				lk.Unlock()
 			}
 		}
 		if n, err := s.blobs.SweepStale(v.ID, time.Hour); err != nil {

@@ -1,8 +1,10 @@
 package api
 
 import (
+	"fmt"
 	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -11,14 +13,15 @@ import (
 // limiter is a per-key token bucket used to slow brute force on the
 // unauthenticated routes (invite redemption, recovery lookup and join) and
 // on failed device authentication. Keys are client IPs; behind a proxy set
-// --trust-proxy so X-Forwarded-For is used.
+// --trust-proxy to the proxy's address range so X-Forwarded-For is used for
+// requests that arrive from it.
 type limiter struct {
-	mu       sync.Mutex
-	buckets  map[string]*bucket
-	rate     float64 // tokens per second
-	burst    float64
-	lastGC   time.Time
-	trustXFF bool
+	mu      sync.Mutex
+	buckets map[string]*bucket
+	rate    float64 // tokens per second
+	burst   float64
+	lastGC  time.Time
+	trusted []*net.IPNet
 }
 
 type bucket struct {
@@ -26,12 +29,64 @@ type bucket struct {
 	last   time.Time
 }
 
-func newLimiter(perMinute, burst int, trustXFF bool) *limiter {
-	return &limiter{buckets: map[string]*bucket{}, rate: float64(perMinute) / 60, burst: float64(burst), lastGC: time.Now(), trustXFF: trustXFF}
+func newLimiter(perMinute, burst int, trusted []*net.IPNet) *limiter {
+	return &limiter{buckets: map[string]*bucket{}, rate: float64(perMinute) / 60, burst: float64(burst), lastGC: time.Now(), trusted: trusted}
+}
+
+// parseCIDRs parses the --trust-proxy value: comma-separated CIDRs, a bare
+// address meaning that host only. An unparsable entry is an error, never a
+// silently wider trust.
+func parseCIDRs(list []string) ([]*net.IPNet, error) {
+	var out []*net.IPNet
+	for _, raw := range list {
+		for _, item := range strings.Split(raw, ",") {
+			item = strings.TrimSpace(item)
+			if item == "" {
+				continue
+			}
+			if !strings.Contains(item, "/") {
+				ip := net.ParseIP(item)
+				if ip == nil {
+					return nil, fmt.Errorf("trust-proxy: %q is not an address or CIDR", item)
+				}
+				bits := 32
+				if ip.To4() == nil {
+					bits = 128
+				}
+				item = ip.String() + "/" + strconv.Itoa(bits)
+			}
+			_, n, err := net.ParseCIDR(item)
+			if err != nil {
+				return nil, fmt.Errorf("trust-proxy: %w", err)
+			}
+			out = append(out, n)
+		}
+	}
+	return out, nil
+}
+
+// fromTrustedProxy reports whether the TCP peer is one of the configured
+// proxies. Only then is X-Forwarded-For worth reading: any other peer wrote
+// it itself. (A boolean "trust the header" let anyone who could reach the
+// listener directly, past the proxy, choose its own limiter bucket.)
+func fromTrustedProxy(r *http.Request, trusted []*net.IPNet) bool {
+	if len(trusted) == 0 {
+		return false
+	}
+	ip := net.ParseIP(peerIP(r))
+	if ip == nil {
+		return false
+	}
+	for _, n := range trusted {
+		if n.Contains(ip) {
+			return true
+		}
+	}
+	return false
 }
 
 func (l *limiter) key(r *http.Request) string {
-	if l.trustXFF {
+	if fromTrustedProxy(r, l.trusted) {
 		if ip := proxiedClient(r); ip != "" {
 			return bucketKey(ip)
 		}

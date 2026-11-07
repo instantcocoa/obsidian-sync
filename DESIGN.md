@@ -722,10 +722,17 @@ Accepted residual exposure:
 **Writes re-check the writer.** Authentication and authority are checked
 when a request arrives, before its body is read; an upload can take minutes.
 Every write transaction (`ops`, `blobs`, `meta`, `restore`, `recovery`,
-`rotate`, `devices/me`) therefore re-checks, inside the transaction, that the
-device is still live and that the authority token it presented is still the
-vault's. A device revoked, or an authority retired by a rotation, while its
-request was in flight gets 403 and lands nothing.
+`rotate`, `devices/me`, `invites`) therefore re-checks, inside the
+transaction, that the device is still live and that the authority token it
+presented is still the vault's. A device revoked, or an authority retired by
+a rotation, while its request was in flight gets a 401 whose body says
+which ("device revoked" or "vault authority changed") and lands nothing; the
+plugin re-syncs on the latter, exactly as for the authority middleware's
+401, and treats only the former as removal. A blob upload promotes its file
+before it records the index row, so a crash between the two leaves a file
+ahead of its row (re-encrypted again next pass) and never a row ahead of
+its file (which would drop the blob from the re-encryption listing while
+every device prunes the key that reads it).
 
 ### 5.8 Vault authority token
 

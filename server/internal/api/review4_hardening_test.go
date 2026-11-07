@@ -105,7 +105,7 @@ func TestZzRotationLeavesOutstandingInvitesRedeemable(t *testing.T) {
 	e.do("POST", base+"/rotate", a.token, map[string]any{"epoch": 2, "revoke": []string{}, "keybox": rows, "auth_next": next}, authHdr(vault)).expect(t, 200)
 	authTok[vault] = next
 
-	r := e.do("POST", "/v1/invites/"+inv.Token, "", map[string]any{"pub_kex": randBytes(65), "name_enc": randBytes(20)}, nil)
+	r := e.do("POST", "/v1/invites/"+inv.Token, "", map[string]any{"pub_kex": testPubKex(), "name_enc": randBytes(20)}, nil)
 	if r.code == 201 {
 		t.Fatalf("an invite minted before the rotation still enrols a device after it (201): rotation should expire every unused invite of the vault")
 	}

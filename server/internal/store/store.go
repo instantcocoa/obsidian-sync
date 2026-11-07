@@ -9,6 +9,7 @@ package store
 import (
 	"bytes"
 	"context"
+	"crypto/ecdh"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
@@ -545,7 +546,16 @@ func (s *Store) SetDeviceName(ctx context.Context, vault string, by Actor, nameE
 // key-exchange public key: an uncompressed P-256 point, 65 bytes. The server
 // never uses it, but it stores it for every member to download, so it must
 // not be a 60 KiB blob a stranger with an invite link planted.
-func validPubKex(pubKex []byte) bool { return len(pubKex) == 65 }
+func validPubKex(pubKex []byte) bool {
+	if len(pubKex) != 65 {
+		return false
+	}
+	// A 65-byte string that is not a point on the curve would be stored, and
+	// the owner's next rotation would throw importing it with no hint which
+	// device; the curve check costs one call here.
+	_, err := ecdh.P256().NewPublicKey(pubKex)
+	return err == nil
+}
 
 func (s *Store) ListDevices(ctx context.Context, vault string) ([]Device, error) {
 	rows, err := s.db.QueryContext(ctx,
@@ -574,10 +584,26 @@ type Invite struct {
 	ExpiresAt int64  `json:"expires_at"`
 }
 
-func (s *Store) CreateInvite(ctx context.Context, vault, createdBy string, keyboxEnc []byte, ttl time.Duration) (*Invite, error) {
+// CreateInvite mints a one-time invite. `by` is the inviting device, or an
+// empty Actor for the admin's first-device invite into an empty vault (the
+// handler has already checked that case). A device is re-checked inside the
+// transaction like every other writer: an invite minted by a device whose
+// revocation landed while its request was in flight would outlive the
+// rotation (rotation ends only the invites that exist when it runs) and
+// enrol a fresh device after its creator was removed.
+func (s *Store) CreateInvite(ctx context.Context, vault string, by Actor, keyboxEnc []byte, ttl time.Duration) (*Invite, error) {
 	token, hash := NewToken("in_")
 	inv := &Invite{Token: token, ExpiresAt: now() + ttl.Milliseconds()}
+	createdBy := by.Device
+	if createdBy == "" {
+		createdBy = "admin"
+	}
 	err := s.writeTx(ctx, func(tx *sql.Tx) error {
+		if by.Device != "" {
+			if err := s.actorLiveTx(ctx, tx, vault, by); err != nil {
+				return err
+			}
+		}
 		// A member can mint invites freely, each with a 1 MiB keybox; bound
 		// the unused ones so a trusted party cannot fill the disk with them.
 		var open int

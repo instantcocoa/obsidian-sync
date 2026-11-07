@@ -9,6 +9,7 @@ package api_test
 import (
 	"bytes"
 	"context"
+	"crypto/ecdh"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/binary"
@@ -121,6 +122,15 @@ func (r resp) expect(t *testing.T, code int) resp {
 
 // ---- fake crypto helpers ----
 
+// testPubKex is a fresh uncompressed P-256 point: enrolment checks the curve.
+func testPubKex() []byte {
+	k, err := ecdh.P256().GenerateKey(rand.Reader)
+	if err != nil {
+		panic(err)
+	}
+	return k.PublicKey().Bytes()
+}
+
 func randBytes(n int) []byte {
 	b := make([]byte, n)
 	rand.Read(b)
@@ -191,7 +201,7 @@ func (e *env) setup() (vault string, a, b device) {
 	var inv store.Invite
 	e.do("POST", "/v1/vaults/"+vault+"/invites", adminTok, map[string]any{"keybox_enc": randBytes(64)}, nil).expect(t, 201).json(t, &inv)
 	var red store.Redeemed
-	e.do("POST", "/v1/invites/"+inv.Token, "", map[string]any{"pub_kex": randBytes(65), "name_enc": randBytes(20)}, nil).expect(t, 201).json(t, &red)
+	e.do("POST", "/v1/invites/"+inv.Token, "", map[string]any{"pub_kex": testPubKex(), "name_enc": randBytes(20)}, nil).expect(t, 201).json(t, &red)
 	a = device{red.DeviceID, red.DeviceToken}
 	// Self-enrol keybox row for epoch 1, and register the vault authority
 	// token (derived from the epoch key; a token-only attacker cannot).
@@ -204,12 +214,12 @@ func (e *env) setup() (vault string, a, b device) {
 	// Device A invites B (needs authority: a stolen token alone cannot add devices).
 	e.do("POST", "/v1/vaults/"+vault+"/invites", a.token, map[string]any{"keybox_enc": randBytes(64)}, nil).expect(t, 401)
 	e.do("POST", "/v1/vaults/"+vault+"/invites", a.token, map[string]any{"keybox_enc": randBytes(64)}, authHdr(vault)).expect(t, 201).json(t, &inv)
-	e.do("POST", "/v1/invites/"+inv.Token, "", map[string]any{"pub_kex": randBytes(65), "name_enc": randBytes(20)}, nil).expect(t, 201).json(t, &red)
+	e.do("POST", "/v1/invites/"+inv.Token, "", map[string]any{"pub_kex": testPubKex(), "name_enc": randBytes(20)}, nil).expect(t, 201).json(t, &red)
 	b = device{red.DeviceID, red.DeviceToken}
 	e.do("POST", "/v1/vaults/"+vault+"/keybox", b.token, map[string]any{"keybox": []store.KeyboxRow{{Epoch: 1, RecipientID: b.id, Wrapped: randBytes(100)}}}, nil).expect(t, 204)
 
 	// Invite is one-time.
-	e.do("POST", "/v1/invites/"+inv.Token, "", map[string]any{"pub_kex": randBytes(65)}, nil).expect(t, 401)
+	e.do("POST", "/v1/invites/"+inv.Token, "", map[string]any{"pub_kex": testPubKex()}, nil).expect(t, 401)
 	return
 }
 
@@ -509,8 +519,8 @@ func TestRotateReencryptAndRecovery(t *testing.T) {
 		DeviceID string `json:"device_id"`
 	}
 	recSalt := randBytes(16)
-	e.do("PUT", base+"/recovery", a.token, map[string]any{"pub_kex": randBytes(65), "recovery_enc": randBytes(80), "salt": recSalt, "auth": recAuth}, nil).expect(t, 401) // authority required
-	e.do("PUT", base+"/recovery", a.token, map[string]any{"pub_kex": randBytes(65), "recovery_enc": randBytes(80), "salt": recSalt, "auth": recAuth}, authHdr(vault)).expect(t, 201).json(t, &rec)
+	e.do("PUT", base+"/recovery", a.token, map[string]any{"pub_kex": testPubKex(), "recovery_enc": randBytes(80), "salt": recSalt, "auth": recAuth}, nil).expect(t, 401) // authority required
+	e.do("PUT", base+"/recovery", a.token, map[string]any{"pub_kex": testPubKex(), "recovery_enc": randBytes(80), "salt": recSalt, "auth": recAuth}, authHdr(vault)).expect(t, 201).json(t, &rec)
 	e.do("POST", base+"/keybox", a.token, map[string]any{"keybox": []store.KeyboxRow{{Epoch: 1, RecipientID: rec.DeviceID, Wrapped: randBytes(100)}}}, nil).expect(t, 401) // rows for another identity need authority
 	e.do("POST", base+"/keybox", a.token, map[string]any{"keybox": []store.KeyboxRow{{Epoch: 1, RecipientID: rec.DeviceID, Wrapped: randBytes(100)}}}, authHdr(vault)).expect(t, 204)
 
@@ -610,14 +620,14 @@ func TestRotateReencryptAndRecovery(t *testing.T) {
 	if info.DeviceID != rec.DeviceID || !bytes.Equal(info.Salt, recSalt) || bytes.Contains(r.body, []byte("recovery_enc")) {
 		t.Fatalf("recovery info: %+v %s", info, r.body)
 	}
-	e.do("POST", base+"/recovery/join", "rc_wrong", map[string]any{"pub_kex": randBytes(65)}, nil).expect(t, 401)
+	e.do("POST", base+"/recovery/join", "rc_wrong", map[string]any{"pub_kex": testPubKex()}, nil).expect(t, 401)
 	var joined struct {
 		DeviceToken string            `json:"device_token"`
 		Epoch       int64             `json:"epoch"`
 		Keybox      []store.KeyboxRow `json:"keybox"`
 		RecoveryEnc []byte            `json:"recovery_enc"`
 	}
-	e.do("POST", base+"/recovery/join", recAuth, map[string]any{"pub_kex": randBytes(65), "name_enc": randBytes(10)}, nil).expect(t, 201).json(t, &joined)
+	e.do("POST", base+"/recovery/join", recAuth, map[string]any{"pub_kex": testPubKex(), "name_enc": randBytes(10)}, nil).expect(t, 201).json(t, &joined)
 	if joined.Epoch != 2 || len(joined.Keybox) != 1 || joined.Keybox[0].Epoch != 2 || joined.Keybox[0].RecipientID != rec.DeviceID || len(joined.RecoveryEnc) != 80 {
 		t.Fatalf("recovery join: %+v", joined)
 	}

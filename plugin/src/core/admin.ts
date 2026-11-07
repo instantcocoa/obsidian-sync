@@ -205,7 +205,18 @@ export async function rotate(s: Session, revoke: string[] = [], confirmUnproven?
       unprovenNames.push(d.name_enc ? (await s.vc.legacyName(fromB64(d.name_enc))) ?? "(unnamed)" : "(unnamed)");
       continue;
     }
-    rows.push({ epoch, recipient_id: d.id, wrapped: await wrapEpochKey(fromB64(d.pub_kex), v, epoch, d.id, key, s.vc.keyring.kId) });
+    let wrapped: Uint8Array;
+    try {
+      wrapped = await wrapEpochKey(fromB64(d.pub_kex), v, epoch, d.id, key, s.vc.keyring.kId);
+    } catch {
+      // A row whose key does not import (not a P-256 point) can never
+      // receive a wrapped key; treat it like any other device without proof
+      // rather than aborting the whole rotation with no hint which row.
+      unproven.push(d.id);
+      unprovenNames.push(((d.name_enc && (await s.vc.decryptName(fromB64(d.name_enc), d.id))) || "(unnamed)") + " [unusable key]");
+      continue;
+    }
+    rows.push({ epoch, recipient_id: d.id, wrapped });
   }
   if (unproven.length && confirmUnproven && !(await confirmUnproven(unproven, unprovenNames))) throw new RotationCancelled("key rotation cancelled: unproven devices were not confirmed");
   await s.client.rotate(v, epoch, [...revoke, ...unproven], rows, await authTokenFor(key));

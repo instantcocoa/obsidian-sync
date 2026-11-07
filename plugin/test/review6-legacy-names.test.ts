@@ -163,4 +163,17 @@ describe("legacy name rows: readable, not proof, and rewritten by their owner", 
     await rotate(planted.s, [], (_ids, n) => ((names = n), true));
     expect(names).toEqual(["(unnamed)"]);
   });
+
+  it("a device whose pub_kex does not import is treated as unproven, not as a rotation failure (seventh review)", async () => {
+    const kr = newKeyring();
+    const vc = new VaultCrypto(kr);
+    const rows = await roster(vc, await vc.encryptName("laptop", OTHER));
+    rows[1].pub_kex = b64(new Uint8Array(65).fill(0xff)); // 65 bytes, not a point on the curve
+    const owner = await fakeSession(vc, ME, rows);
+    let asked: { ids: string[]; names: string[] } | null = null;
+    await rotate(owner.s, [], (ids, names) => ((asked = { ids, names }), true));
+    expect(asked).toEqual({ ids: [OTHER], names: ["laptop [unusable key]"] });
+    expect(owner.posted().revoke).toEqual([OTHER]);
+    expect(owner.posted().recipients).toEqual([ME]);
+  });
 });

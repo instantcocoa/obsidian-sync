@@ -44,9 +44,12 @@ A vault can hold at most 20 unused invites; a rotation ends them all.
 Unauthenticated routes (invite redemption and recovery join) and
 failed token checks are rate-limited per client IP: `--auth-rate N` requests
 per minute (default 10, burst 2N; `-1` disables, for tests). Behind a reverse
-proxy pass `--trust-proxy` so the limiter and the security log key on the
-last `X-Forwarded-For` entry, the one your proxy appended (it assumes exactly
-one trusted hop); without it every client would share the proxy's address.
+proxy pass `--trust-proxy CIDR[,CIDR]` (the proxy's own addresses) so the
+limiter and the security log key on the last `X-Forwarded-For` entry, the one
+your proxy appended, for requests that arrive from those addresses; requests
+from any other peer are keyed on the peer itself, so nothing that reaches the
+listener directly can pick its own bucket. Without the flag every client
+behind a proxy would share the proxy's address.
 All `X-Forwarded-For` lines are read as one list, so a proxy that adds its
 own line (HAProxy's default) is handled the same as one that appends to the
 client's; an entry that is not an IP address is ignored and the peer address
@@ -72,7 +75,7 @@ a conflict copy rather than overwritten. See `DESIGN.md` §6.8.
 ```sh
 ./obsync vault create --data /var/lib/obsync   # prints the vault id
 ./obsync vault list   --data /var/lib/obsync
-./obsync gc           --data /var/lib/obsync --retention 2160h   # also runs daily inside `serve`
+./obsync gc           --data /var/lib/obsync --retention 2160h   # also runs daily inside `serve`; run the CLI only while `serve` is stopped (the two processes do not share the per-blob locks)
 ```
 
 ## Test

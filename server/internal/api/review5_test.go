@@ -92,8 +92,8 @@ func TestZzEventLogHoldsNoSecretsAndOneLinePerEvent(t *testing.T) {
 	invTok := "in_" + hex.EncodeToString(randBytes(32))
 	rcTok := "rc_" + hex.EncodeToString(randBytes(32))
 	e.do("GET", "/v1/vaults/"+v.ID, devTok, nil, nil).expect(t, 401)                                                       // auth.failed
-	e.do("POST", "/v1/invites/"+invTok, "", map[string]any{"pub_kex": randBytes(65)}, nil).expect(t, 401)                  // invite.redeem.failed
-	e.do("POST", "/v1/vaults/evil%0Ainjected=1%20x/recovery/join", rcTok, map[string]any{"pub_kex": randBytes(65)}, nil)   // recovery.join.failed, vault id with a newline
+	e.do("POST", "/v1/invites/"+invTok, "", map[string]any{"pub_kex": testPubKex()}, nil).expect(t, 401)                   // invite.redeem.failed
+	e.do("POST", "/v1/vaults/evil%0Ainjected=1%20x/recovery/join", rcTok, map[string]any{"pub_kex": testPubKex()}, nil)    // recovery.join.failed, vault id with a newline
 	e.do("POST", "/v1/vaults/"+v.ID+"/invites", adminTok, map[string]any{"keybox_enc": randBytes(64)}, nil).expect(t, 201) // invite.created by admin
 
 	out := log.String()

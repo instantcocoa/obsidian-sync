@@ -92,13 +92,13 @@ func TestTokenOnlyAttackerCannotDestroyOrEscalate(t *testing.T) {
 	var rec struct {
 		DeviceID string `json:"device_id"`
 	}
-	e.do("PUT", base+"/recovery", a.token, map[string]any{"pub_kex": randBytes(65), "recovery_enc": randBytes(80), "salt": randBytes(16), "auth": recAuth}, authHdr(vault)).expect(t, 201).json(t, &rec)
+	e.do("PUT", base+"/recovery", a.token, map[string]any{"pub_kex": testPubKex(), "recovery_enc": randBytes(80), "salt": randBytes(16), "auth": recAuth}, authHdr(vault)).expect(t, 201).json(t, &rec)
 
 	// b's token is the attacker's. Everything destructive is refused.
 	rows := []store.KeyboxRow{{Epoch: 2, RecipientID: b.id, Wrapped: randBytes(100)}}
 	e.do("POST", base+"/rotate", b.token, map[string]any{"epoch": 2, "revoke": []string{a.id}, "keybox": rows, "auth_next": newAuthTok()}, nil).expect(t, 401)
 	e.do("POST", base+"/rotate", b.token, map[string]any{"epoch": 2, "revoke": []string{a.id}, "keybox": rows, "auth_next": newAuthTok()}, map[string]string{"X-Obsync-Vault-Auth": newAuthTok()}).expect(t, 401)
-	e.do("PUT", base+"/recovery", b.token, map[string]any{"pub_kex": randBytes(65), "recovery_enc": randBytes(80), "salt": randBytes(16), "auth": "rc_mine"}, nil).expect(t, 401)
+	e.do("PUT", base+"/recovery", b.token, map[string]any{"pub_kex": testPubKex(), "recovery_enc": randBytes(80), "salt": randBytes(16), "auth": "rc_mine"}, nil).expect(t, 401)
 	e.do("PATCH", base+"/ops/1/meta", b.token, map[string]any{"meta_enc": randBytes(40), "meta_epoch": 1}, nil).expect(t, 401)
 	e.do("POST", base+"/invites", b.token, map[string]any{"keybox_enc": randBytes(8)}, nil).expect(t, 401)
 	e.do("POST", base+"/auth", b.token, map[string]any{"auth": newAuthTok()}, nil).expect(t, 401) // a wrong authority token, charged as one
@@ -155,12 +155,12 @@ func TestAuthorityClaimRules(t *testing.T) {
 	// second device of this pre-§5.8 vault is enrolled through the store, the
 	// way such a database would already exist on disk.
 	enrol := func() device {
-		inv, err := e.st.CreateInvite(context.Background(), v.ID, "admin", randBytes(64), time.Hour)
+		inv, err := e.st.CreateInvite(context.Background(), v.ID, store.Actor{}, randBytes(64), time.Hour)
 		if err != nil {
 			t.Fatal(err)
 		}
 		var red store.Redeemed
-		e.do("POST", "/v1/invites/"+inv.Token, "", map[string]any{"pub_kex": randBytes(65)}, nil).expect(t, 201).json(t, &red)
+		e.do("POST", "/v1/invites/"+inv.Token, "", map[string]any{"pub_kex": testPubKex()}, nil).expect(t, 201).json(t, &red)
 		return device{red.DeviceID, red.DeviceToken}
 	}
 	a := enrol()
@@ -196,13 +196,13 @@ func TestAuthorityClaimRules(t *testing.T) {
 	var inv store.Invite
 	e.do("POST", "/v1/vaults/"+v2.ID+"/invites", adminTok, map[string]any{"keybox_enc": randBytes(64)}, nil).expect(t, 201).json(t, &inv)
 	var red store.Redeemed
-	e.do("POST", "/v1/invites/"+inv.Token, "", map[string]any{"pub_kex": randBytes(65)}, nil).expect(t, 201).json(t, &red)
+	e.do("POST", "/v1/invites/"+inv.Token, "", map[string]any{"pub_kex": testPubKex()}, nil).expect(t, 201).json(t, &red)
 	e.do("POST", "/v1/vaults/"+v2.ID+"/auth", red.DeviceToken, map[string]any{"auth": newAuthTok()}, nil).expect(t, 204)
 	// A legacy single-device vault that already holds data is not claimable by its token either.
 	var v3 store.Vault
 	e.do("POST", "/v1/vaults", adminTok, nil, nil).expect(t, 201).json(t, &v3)
 	e.do("POST", "/v1/vaults/"+v3.ID+"/invites", adminTok, map[string]any{"keybox_enc": randBytes(64)}, nil).expect(t, 201).json(t, &inv)
-	e.do("POST", "/v1/invites/"+inv.Token, "", map[string]any{"pub_kex": randBytes(65)}, nil).expect(t, 201).json(t, &red)
+	e.do("POST", "/v1/invites/"+inv.Token, "", map[string]any{"pub_kex": testPubKex()}, nil).expect(t, 201).json(t, &red)
 	legacyTok := newAuthTok()
 	e.do("POST", "/v1/vaults/"+v3.ID+"/auth", adminTok, map[string]any{"auth": legacyTok}, nil).expect(t, 204) // simulate: data was written under an admin-installed token…
 	e.do("POST", "/v1/vaults/"+v3.ID+"/ops", red.DeviceToken, []opIn{put("old.md", nil, 0)}, map[string]string{"X-Obsync-Vault-Auth": legacyTok}).expect(t, 200)
@@ -284,9 +284,9 @@ func TestInviteLifecycle(t *testing.T) {
 	// TTL is capped by the server's InviteTTL and a short one is honoured.
 	e.do("POST", "/v1/vaults/"+vault+"/invites", a.token, map[string]any{"keybox_enc": randBytes(8), "ttl_seconds": 1}, authHdr(vault)).expect(t, 201).json(t, &inv)
 	time.Sleep(1100 * time.Millisecond)
-	e.do("POST", "/v1/invites/"+inv.Token, "", map[string]any{"pub_kex": randBytes(65)}, nil).expect(t, 401)
+	e.do("POST", "/v1/invites/"+inv.Token, "", map[string]any{"pub_kex": testPubKex()}, nil).expect(t, 401)
 	// Unknown token, missing pub_kex, empty keybox.
-	e.do("POST", "/v1/invites/in_nope", "", map[string]any{"pub_kex": randBytes(65)}, nil).expect(t, 401)
+	e.do("POST", "/v1/invites/in_nope", "", map[string]any{"pub_kex": testPubKex()}, nil).expect(t, 401)
 	e.do("POST", "/v1/vaults/"+vault+"/invites", a.token, map[string]any{"keybox_enc": randBytes(8)}, authHdr(vault)).expect(t, 201).json(t, &inv)
 	e.do("POST", "/v1/invites/"+inv.Token, "", map[string]any{"pub_kex": []byte{}}, nil).expect(t, 400)
 	e.do("POST", "/v1/vaults/"+vault+"/invites", a.token, map[string]any{"keybox_enc": []byte{}}, authHdr(vault)).expect(t, 400)
@@ -295,11 +295,11 @@ func TestInviteLifecycle(t *testing.T) {
 	e.do("POST", "/v1/vaults/"+v2+"/invites", a.token, map[string]any{"keybox_enc": randBytes(8)}, authHdr(v2)).expect(t, 403)
 	// The invite keybox is wiped after redemption even if the row lingers.
 	var red store.Redeemed
-	e.do("POST", "/v1/invites/"+inv.Token, "", map[string]any{"pub_kex": randBytes(65)}, nil).expect(t, 201).json(t, &red)
+	e.do("POST", "/v1/invites/"+inv.Token, "", map[string]any{"pub_kex": testPubKex()}, nil).expect(t, 201).json(t, &red)
 	if len(red.KeyboxEnc) == 0 {
 		t.Fatal("redeem should return the keybox")
 	}
-	e.do("POST", "/v1/invites/"+inv.Token, "", map[string]any{"pub_kex": randBytes(65)}, nil).expect(t, 401)
+	e.do("POST", "/v1/invites/"+inv.Token, "", map[string]any{"pub_kex": testPubKex()}, nil).expect(t, 401)
 }
 
 func TestInputValidation(t *testing.T) {
@@ -385,7 +385,7 @@ func TestRateLimiting(t *testing.T) {
 	// Invite guessing.
 	codes := []int{}
 	for i := 0; i < 8; i++ {
-		codes = append(codes, e.do("POST", "/v1/invites/in_guess"+fmt.Sprint(i), "", map[string]any{"pub_kex": randBytes(65)}, nil).code)
+		codes = append(codes, e.do("POST", "/v1/invites/in_guess"+fmt.Sprint(i), "", map[string]any{"pub_kex": testPubKex()}, nil).code)
 	}
 	if codes[len(codes)-1] != 429 {
 		t.Fatalf("invite guessing not throttled: %v", codes)
@@ -396,7 +396,7 @@ func TestRateLimiting(t *testing.T) {
 	if c := e.do("GET", "/v1/vaults/"+vault+"/recovery", "", nil, nil).code; c == 429 {
 		t.Fatal("recovery salt lookup should not share the throttle bucket")
 	}
-	if e.do("POST", "/v1/vaults/"+vault+"/recovery/join", "rc_guess", map[string]any{"pub_kex": randBytes(65)}, nil).code != 429 {
+	if e.do("POST", "/v1/vaults/"+vault+"/recovery/join", "rc_guess", map[string]any{"pub_kex": testPubKex()}, nil).code != 429 {
 		t.Fatal("recovery join should be throttled with the same bucket")
 	}
 	// Failed device-token guessing is throttled; a valid token still works
@@ -417,7 +417,7 @@ func TestRateLimiting(t *testing.T) {
 		t.Fatal("admin guessing not throttled")
 	}
 	// Retry-After is advertised.
-	if r := e.do("POST", "/v1/invites/in_x", "", map[string]any{"pub_kex": randBytes(65)}, nil); r.hdr.Get("Retry-After") == "" {
+	if r := e.do("POST", "/v1/invites/in_x", "", map[string]any{"pub_kex": testPubKex()}, nil); r.hdr.Get("Retry-After") == "" {
 		t.Fatal("429 without Retry-After")
 	}
 }

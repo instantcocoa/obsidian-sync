@@ -210,8 +210,14 @@ Plain `http://` worked from the Android app: its WebView serves Obsidian
 from `http://localhost`, so a cleartext server is neither blocked nor
 mixed content. Use HTTPS (`--acme-domain` or a proxy) for anything that
 leaves your network all the same; the device token travels in the clear
-otherwise. Not run: iOS, a physical phone, HTTPS from a phone. Treat the
-first install on your own device as a test and keep a backup.
+otherwise. iOS followed on real hardware: an iPhone 13 Pro and an iPad Pro
+ran twenty scenarios against a server with a Let's Encrypt certificate,
+with Obsidian on Linux joining the same vault (`test/ios-devices.test.ts`,
+`test/linux-joins.test.ts`, `../docs/IOS-DEVICE-TESTING.md`). Two things
+to know on iOS: Obsidian asks "Trust author and enable plugins" once per
+vault when the plugin arrives from outside the app, and sync runs only
+while Obsidian is in the foreground, as iOS suspends it otherwise. Treat
+the first install on your own device as a test and keep a backup.
 
 ## Development
 
@@ -268,8 +274,8 @@ Three layers of tests:
   the only `require`s are `obsidian` and one `os.hostname()` behind
   `Platform.isMobile` and a `try`, Node globals appear only behind feature
   checks, I/O and crypto are `fetch`, `WebSocket` and WebCrypto. This is the
-  part of iOS/Android support provable without a device; the Android
-  emulator run is described under "Mobile status".
+  part of iOS/Android support provable without a device; the Android and
+  iOS device runs are described under "Mobile status".
 - **Mobile hooks and adapters** (`test/hooks-mobile.test.ts`,
   `test/obsidian-fs-write.test.ts`, `test/state-store.test.ts`): what the
   Android run found, pinned against a stub of the `obsidian` package

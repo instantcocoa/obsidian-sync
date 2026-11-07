@@ -81,9 +81,25 @@ export function aliasesConfigDir(devPath: string, configDir: string): boolean {
   return first !== configDir && fold(first) === fold(configDir);
 }
 
-/** Lower-case and strip combining marks, so "İ" (U+0130 → "i̇") folds to "i" like a case-insensitive file system might. */
+/**
+ * A *logical* path (what an op carries) names the config directory only
+ * through the `$CONFIG` token. One whose first segment is the directory's
+ * real name, in any spelling a case-insensitive or normalising volume would
+ * treat as the same, is a second route into `.obsidian` that bypasses the
+ * `$CONFIG` exclusions and the plugin-folder protection.
+ */
+export function logicalAliasesConfigDir(logical: string, configDir: string): boolean {
+  const first = logical.split("/")[0];
+  return first !== CONFIG_TOKEN && fold(first) === fold(configDir);
+}
+
+/**
+ * Fold the way a case-insensitive, normalising file system might: NFKC first
+ * (ſ → s, K → k, ligatures), both case directions ("ı" upper-cases to "I"),
+ * then strip combining marks ("İ" → "i̇" → "i").
+ */
 function fold(s: string): string {
-  return s.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+  return s.normalize("NFKC").toUpperCase().toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
 }
 
 /** Same rules for a device path (no $CONFIG token allowed at all). */

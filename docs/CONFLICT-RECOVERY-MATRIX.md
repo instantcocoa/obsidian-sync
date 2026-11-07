@@ -82,11 +82,9 @@ divergence before every reconciliation).
 
 ## Not covered by a test here
 
-- iOS on a device: needs an iPhone and a Mac with Xcode. The plugin core
-  is proven inside a real WebKit engine in CI (`plugin/test/webkit.test.ts`),
-  and Android is covered on an emulator (twelve scenarios) and on a
-  physical Pixel 7 (install, join, sync both ways, attachments,
-  backgrounding).
+- Android beyond the emulator's twelve scenarios and the physical Pixel 7
+  run (install, join, sync both ways, attachments, backgrounding). iOS is
+  covered on physical devices, see the iOS section below.
 
 ## macOS (plugin/test/obsidian-macos.test.ts, real Obsidian 1.14.5; Intel EC2 Mac on macOS 15.8, and Apple silicon on GitHub's macos-14 runner in CI)
 
@@ -129,3 +127,47 @@ new engine could come up and never start.
   (`main.js` and `manifest.json` from different versions): the files are
   independent and would merge or sibling individually; §7.3 atomicity covers
   a single device's reload, not two devices racing an update.
+
+## iOS (plugin/test/ios-devices.test.ts, real Obsidian 1.15 on a physical iPhone 13 Pro, iOS 26.6, and iPad Pro 10.5", iPadOS 17.7; server on EC2 over HTTPS with a Let's Encrypt certificate; a Node engine on the Mac as the third device)
+
+Driven over USB from a Mac with devicectl and pymobiledevice3, no
+jailbreak, no UI automation (`docs/IOS-DEVICE-TESTING.md`). In-app edits
+go through `obsidian://new`, which uses Obsidian's own vault API. Twenty
+scenarios, all green on 2026-11-07 (run 7):
+
+| # | Situation | Outcome |
+| --- | --- | --- |
+| I1 | Join over HTTPS with a pre-enrolled identity; seed note and 8 MB binary | Both devices hold the seed within 8 s; roster shows mac, iphone, ipad |
+| I2 | Note typed on the iPhone (vault API) | On the iPad and the Mac in 7 s |
+| I3 | Note written while the iPad app was closed | Pushed on the next launch |
+| I4 | Same new note on Mac, iPhone, iPad at once | One head, one copy per losing device, all three versions on all three devices |
+| I5 | Different paragraphs edited on all three while the apps were closed | One clean merge, identical everywhere, no copy |
+| I6 | Delete and rename on the Mac | Applied on both devices |
+| I7 | iPhone writes while the server is down | Lands on the Mac and the iPad after the server returns |
+| I8 | Force quit of the iPhone app seconds into a 12 MB download | File bit-exact on relaunch, on both devices |
+| I9 | iPhone in the background (Safari in front) while the Mac writes | Caught up on return |
+| I10 | Accented folder and file from the Mac; an NFD-spelled file written on the iPad | One spelling per file everywhere |
+| I11 | `app.json` changed on the Mac | Applied in both devices' `.obsidian` |
+| I12 | Server restored from a backup taken before notes from the iPhone and the Mac | All three devices notice; both notes come back, no copies; later writes flow |
+| I13 | iPad removed (rotation + re-encryption), then re-joined with a new invite | Removed iPad receives nothing; iPhone continues; re-joined iPad catches up |
+| I14 | Community plugin added on the Mac | Files and the enabled list arrive on the iPhone |
+| I15 | Same line edited in-app on the iPhone and the iPad at the same moment | One head plus one copy, both versions kept everywhere |
+| I16 | Renamed on the Mac while the iPad edited it at the old name | Both files on all three |
+| I17 | 1 MB binary edited on both devices at once | Head and copy bit-exact on all three |
+| I18 | Folder deleted on the Mac while the iPhone edited a note inside | Edited note survives everywhere, the other note is gone everywhere |
+| I19 | Ten rapid alternating in-app appends from both devices | Every appended line present; head plus one copy |
+| I20 | Byte-for-byte comparison | 25 files identical on the Mac, the iPhone and the iPad |
+
+Then `plugin/test/linux-joins.test.ts`: real Obsidian 1.14.5 on Linux
+(NixOS EC2 workstation, Xvfb) pasted the invite the run left into the
+settings tab, received the vault with its conflict copies and the 12 MB
+attachment, verified the three-way merged note, and wrote a note that
+reached both devices: four platforms in one vault.
+
+Driver problems this run found (not product bugs): WebCrypto refuses more
+than 64 KB of random bytes per call; devicectl's app-container file domain
+refuses App Store apps; `+` in an Obsidian URI is literal; iOS suspends the
+app when the screen locks; sorting before NFC normalisation reorders
+accented names. One product observation: Obsidian asks "Trust author and
+enable plugins" once per vault when the plugin arrives from outside the
+app, and the screen must stay on for sync to run, as on any phone.

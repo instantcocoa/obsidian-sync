@@ -7,6 +7,7 @@
 package store
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -437,6 +438,13 @@ func (s *Store) AuthDevice(ctx context.Context, token string) (*Device, error) {
 	if d.RevokedAt != nil {
 		return nil, ErrForbidden
 	}
+	// The recovery identity's token is the passphrase-derived rc_ token: it
+	// is a bearer for POST /recovery/join only, never a device on read routes
+	// (a passphrase holder reads the vault by enrolling, visibly, not by
+	// borrowing the pseudo-device's row).
+	if rec == 1 {
+		return nil, ErrForbidden
+	}
 	d.Recovery = rec == 1
 	// last_seen is advisory; throttle to once a minute to avoid write churn.
 	if d.LastSeen == nil || now()-*d.LastSeen > 60_000 {
@@ -448,8 +456,27 @@ func (s *Store) AuthDevice(ctx context.Context, token string) (*Device, error) {
 	return d, nil
 }
 
+// MaxMetaEnc bounds one op's encrypted metadata: 16 KiB holds the longest
+// allowed path many times over.
+const MaxMetaEnc = 16 << 10
+
+// MaxOpaque bounds the other client-supplied ciphertexts the server stores
+// and hands to every device: a device name and a keybox row (about 60 and
+// 125 bytes in practice).
+const MaxOpaque = 4 << 10
+
+// LiveDeviceCount is the number of enrolled, unrevoked devices (recovery identities included).
+func (s *Store) LiveDeviceCount(ctx context.Context, vault string) (int, error) {
+	var n int
+	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM devices WHERE vault_id=? AND revoked_at IS NULL`, vault).Scan(&n)
+	return n, err
+}
+
 // SetDeviceName lets a device (re)name itself once it holds the vault keys.
 func (s *Store) SetDeviceName(ctx context.Context, device string, nameEnc []byte) error {
+	if len(nameEnc) == 0 || len(nameEnc) > MaxOpaque {
+		return fmt.Errorf("%w: bad name_enc", ErrBadRequest)
+	}
 	return s.writeTx(ctx, func(tx *sql.Tx) error {
 		_, err := tx.ExecContext(ctx, `UPDATE devices SET name_enc=? WHERE id=?`, nameEnc, device)
 		return err
@@ -586,7 +613,7 @@ func (s *Store) PutKeybox(ctx context.Context, vault, author string, rows []Keyb
 			return err
 		}
 		for _, r := range rows {
-			if r.Epoch < 1 || r.Epoch > cur || len(r.Wrapped) == 0 {
+			if r.Epoch < 1 || r.Epoch > cur || len(r.Wrapped) == 0 || len(r.Wrapped) > MaxOpaque {
 				return fmt.Errorf("%w: bad keybox row", ErrBadRequest)
 			}
 			var n, rec int
@@ -598,9 +625,23 @@ func (s *Store) PutKeybox(ctx context.Context, vault, author string, rows []Keyb
 			}
 			switch {
 			case r.RecipientID == author:
+				// A device's own rows are written once, at enrolment; rotation rows
+				// arrive through POST /rotate. Replacing an existing row would let a
+				// token thief lock the real device out of its epoch key, so a
+				// different row for an existing epoch is refused (the same bytes
+				// again, a retried enrolment, are a no-op).
+				var existing []byte
+				err := tx.QueryRowContext(ctx, `SELECT wrapped FROM keybox WHERE vault_id=? AND epoch=? AND recipient_id=?`, vault, r.Epoch, r.RecipientID).Scan(&existing)
+				switch {
+				case err == nil && bytes.Equal(existing, r.Wrapped):
+					continue
+				case err == nil:
+					return fmt.Errorf("%w: keybox row for epoch %d already exists", ErrConflict, r.Epoch)
+				case err != sql.ErrNoRows:
+					return err
+				}
 				if _, err := tx.ExecContext(ctx,
-					`INSERT INTO keybox(vault_id, epoch, recipient_id, wrapped, author_id) VALUES(?,?,?,?,?)
-					 ON CONFLICT(vault_id, epoch, recipient_id) DO UPDATE SET wrapped=excluded.wrapped, author_id=excluded.author_id`,
+					`INSERT INTO keybox(vault_id, epoch, recipient_id, wrapped, author_id) VALUES(?,?,?,?,?)`,
 					vault, r.Epoch, r.RecipientID, r.Wrapped, author); err != nil {
 					return err
 				}
@@ -646,7 +687,7 @@ func (s *Store) Rotate(ctx context.Context, vault, author string, epoch int64, r
 		}
 		covered := map[string]bool{}
 		for _, r := range rows {
-			if r.Epoch != epoch || len(r.Wrapped) == 0 {
+			if r.Epoch != epoch || len(r.Wrapped) == 0 || len(r.Wrapped) > MaxOpaque {
 				return fmt.Errorf("%w: keybox rows must be for epoch %d", ErrBadRequest, epoch)
 			}
 			covered[r.RecipientID] = true
@@ -924,6 +965,12 @@ func (s *Store) validateOp(o Op) error {
 	if len(o.MetaEnc) == 0 {
 		return fmt.Errorf("%w: meta_enc required", ErrBadRequest)
 	}
+	// Real metadata is a few hundred bytes (a path of at most 4 KiB plus
+	// numbers). Without a cap a member could store 16 MiB per op and make
+	// every changes, snapshot and history page cost limit × 16 MiB.
+	if len(o.MetaEnc) > MaxMetaEnc {
+		return fmt.Errorf("%w: meta_enc larger than %d bytes", ErrBadRequest, MaxMetaEnc)
+	}
 	if o.MetaEpoch < 1 || o.BaseSeq < 0 {
 		return fmt.Errorf("%w: bad meta_epoch or base_seq", ErrBadRequest)
 	}
@@ -1041,9 +1088,11 @@ func (s *Store) Changes(ctx context.Context, vault string, since int64, limit in
 	return s.queryOps(ctx, `SELECT `+opCols+` FROM ops WHERE vault_id=? AND seq>? ORDER BY seq LIMIT ?`, vault, since, limit)
 }
 
-// Snapshot returns the head op of every path, including tombstones.
-func (s *Store) Snapshot(ctx context.Context, vault string) ([]Op, error) {
-	return s.queryOps(ctx, `SELECT `+opCols+` FROM ops WHERE vault_id=? AND seq IN (SELECT seq FROM heads WHERE vault_id=?) ORDER BY seq`, vault, vault)
+// Snapshot returns the head op of every path, including tombstones, with
+// seq > since, at most limit of them in seq order (a page; the caller asks
+// again from the last seq it saw).
+func (s *Store) Snapshot(ctx context.Context, vault string, since int64, limit int) ([]Op, error) {
+	return s.queryOps(ctx, `SELECT `+opCols+` FROM ops WHERE vault_id=? AND seq>? AND seq IN (SELECT seq FROM heads WHERE vault_id=?) ORDER BY seq LIMIT ?`, vault, since, vault, limit)
 }
 
 func (s *Store) History(ctx context.Context, vault, pathID string, limit int) ([]Op, error) {
@@ -1073,7 +1122,7 @@ func (s *Store) OpsBelowMetaEpoch(ctx context.Context, vault string, epoch int64
 
 // PatchMeta replaces an op's encrypted metadata with a higher-epoch version.
 func (s *Store) PatchMeta(ctx context.Context, vault string, seq int64, metaEnc []byte, metaEpoch int64) error {
-	if len(metaEnc) == 0 {
+	if len(metaEnc) == 0 || len(metaEnc) > MaxMetaEnc {
 		return fmt.Errorf("%w: meta_enc required", ErrBadRequest)
 	}
 	return s.writeTx(ctx, func(tx *sql.Tx) error {
@@ -1168,15 +1217,17 @@ func (s *Store) Restore(ctx context.Context, vault, device string, at int64) (em
 // ---------- GC ----------
 
 // DeadBlobs lists blobs referenced neither by any head nor by any op created
-// after cutoff. Also prunes keybox rows below min_epoch as a side effect.
+// after cutoff, and themselves older than cutoff: a blob uploaded moments ago
+// is in the normal upload-then-post window and must survive a sweep that
+// overlaps the push. Also prunes keybox rows below min_epoch as a side effect.
 func (s *Store) DeadBlobs(ctx context.Context, vault string, cutoff int64) ([]string, error) {
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT b.blob_id FROM blobs b
-		 WHERE b.vault_id=?
+		 WHERE b.vault_id=? AND b.created_at<=?
 		   AND NOT EXISTS (SELECT 1 FROM ops o JOIN heads h ON h.vault_id=o.vault_id AND h.seq=o.seq
 		                   WHERE o.vault_id=b.vault_id AND o.blob_id=b.blob_id)
 		   AND NOT EXISTS (SELECT 1 FROM ops o WHERE o.vault_id=b.vault_id AND o.blob_id=b.blob_id AND o.created_at>?)`,
-		vault, cutoff)
+		vault, cutoff, cutoff)
 	if err != nil {
 		return nil, err
 	}
@@ -1200,11 +1251,11 @@ func (s *Store) DeleteDeadBlob(ctx context.Context, vault, id string, cutoff int
 	var deleted bool
 	err := s.writeTx(ctx, func(tx *sql.Tx) error {
 		res, err := tx.ExecContext(ctx,
-			`DELETE FROM blobs WHERE vault_id=? AND blob_id=?
+			`DELETE FROM blobs WHERE vault_id=? AND blob_id=? AND created_at<=?
 			   AND NOT EXISTS (SELECT 1 FROM ops o JOIN heads h ON h.vault_id=o.vault_id AND h.seq=o.seq
 			                   WHERE o.vault_id=blobs.vault_id AND o.blob_id=blobs.blob_id)
 			   AND NOT EXISTS (SELECT 1 FROM ops o WHERE o.vault_id=blobs.vault_id AND o.blob_id=blobs.blob_id AND o.created_at>?)`,
-			vault, id, cutoff)
+			vault, id, cutoff, cutoff)
 		if err != nil {
 			return err
 		}

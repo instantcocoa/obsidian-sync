@@ -403,7 +403,7 @@ export default class ObsyncPlugin extends Plugin {
     name = name.trim();
     if (!name) throw new Error("device name cannot be empty");
     const s = this.need();
-    await s.client.setDeviceName(s.identity.vaultId, await s.vc.encryptName(name));
+    await s.client.setDeviceName(s.identity.vaultId, await s.vc.encryptName(name, s.identity.deviceId));
     s.identity.deviceName = name;
     this.settings.deviceName = name;
     await this.saveSettings();
@@ -456,7 +456,7 @@ export default class ObsyncPlugin extends Plugin {
   /** Remove a device: rotate keys and re-encrypt (also used by the in-Obsidian tests). */
   async removeDeviceById(id: string, onProgress?: (done: number) => void): Promise<void> {
     const s = this.need();
-    await removeDevice(s, id, (done) => onProgress?.(done));
+    await removeDevice(s, id, (done) => onProgress?.(done), (ids) => new Notice(`obsync: ${ids.length} device(s) that never proved they hold the keys were revoked with this rotation.`, 15_000));
     this.settings.identity = s.identity;
     await this.saveSettings();
   }
@@ -483,10 +483,10 @@ export default class ObsyncPlugin extends Plugin {
         devs
           .filter((d) => !d.revoked_at)
           .map((d) => ({
-            label: d.name + (d.isSelf ? " (this device)" : "") + (d.name === "(unnamed)" ? " ⚠" : ""),
+            label: d.name + (d.isSelf ? " (this device)" : "") + (d.name === "(unnamed)" || d.name === "(unreadable name)" ? " ⚠" : ""),
             detail:
               `${d.recovery ? "recovery identity" : "added " + new Date(d.created_at).toLocaleDateString()}${d.last_seen ? ", seen " + new Date(d.last_seen).toLocaleString() : ""}` +
-              (d.name === "(unnamed)" ? ". Never finished joining or has no keys: remove it if you do not recognise it, or it will be given keys at the next rotation." : ""),
+              (d.name === "(unnamed)" || d.name === "(unreadable name)" ? ". It never proved it holds the vault keys: it will be revoked at the next key rotation. Remove it now if you do not recognise it." : ""),
             action:
               d.isSelf || d.recovery
                 ? undefined

@@ -241,9 +241,10 @@ func TestEnrolmentAndAuth(t *testing.T) {
 	e.do("GET", "/v1/vaults/deadbeef", a.token, nil, nil).expect(t, 403)
 	e.do("POST", "/v1/vaults", a.token, nil, nil).expect(t, 401)
 
-	// A device can rename itself.
-	e.do("PATCH", "/v1/vaults/"+vault+"/devices/me", b.token, map[string]any{"name_enc": []byte("new-name-ct")}, nil).expect(t, 204)
-	e.do("PATCH", "/v1/vaults/"+vault+"/devices/me", b.token, map[string]any{"name_enc": []byte{}}, nil).expect(t, 400)
+	// A device can rename itself, with vault authority (a name is its proof of holding the keys).
+	e.do("PATCH", "/v1/vaults/"+vault+"/devices/me", b.token, map[string]any{"name_enc": []byte("new-name-ct")}, nil).expect(t, 401)
+	e.do("PATCH", "/v1/vaults/"+vault+"/devices/me", b.token, map[string]any{"name_enc": []byte("new-name-ct")}, authHdr(vault)).expect(t, 204)
+	e.do("PATCH", "/v1/vaults/"+vault+"/devices/me", b.token, map[string]any{"name_enc": []byte{}}, authHdr(vault)).expect(t, 400)
 	var devs struct{ Devices []store.Device }
 	e.do("GET", "/v1/vaults/"+vault+"/devices", b.token, nil, nil).expect(t, 200).json(t, &devs)
 	if len(devs.Devices) != 2 {

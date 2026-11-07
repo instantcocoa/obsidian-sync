@@ -46,9 +46,22 @@ file and an 8 MB attachment both ways, with reconnects after
 backgrounding and a force-stop, twice on two units. The plugin's core also runs
 inside a real WebKit engine in CI (`plugin/test/webkit.test.ts`: crypto
 vectors, a two-engine sync round trip with a conflict, the WebSocket live
-channel), which is the engine Obsidian for iOS runs plugins in. Not done:
-Obsidian's iOS app itself on an iPhone, HTTPS from a phone, and a
-security review by a human specialist.
+channel), which is the engine Obsidian for iOS runs plugins in. On
+2026-11-06 Obsidian's iOS app itself followed: a physical iPhone 13 Pro
+(iOS 26) and iPad Pro (iPadOS 17), driven over USB from a Mac
+(`plugin/test/ios-devices.test.ts`, `docs/IOS-DEVICE-TESTING.md`), against
+the server on an EC2 host with a Let's Encrypt certificate, passed twenty
+scenarios: join, edits both ways including in-app ones, three-way conflicts
+and merges, same-line and binary conflicts, rename-vs-edit, folder
+delete-vs-edit, rapid alternating edits, server outage, force quit during a
+12 MB download, backgrounding, NFD names, config sync, server restored
+from backup, device removal with rotation and re-join, a synced plugin,
+and a byte-for-byte comparison of 25 files; real Obsidian on Linux then
+joined the same vault and its note reached both devices. A third
+adversarial review (two agents, areas A to G of
+`docs/SECURITY-REVIEW-GUIDE.md`) found and fixed four weaknesses in the
+roster and op binding, recorded in §5.7. Not done: a security review by a
+human specialist.
 Each component's README has the operational
 details and how to run each suite.
 
@@ -287,10 +300,10 @@ blobs    (vault_id, blob_id, epoch, ct_size, created_at, last_ref_at)
 | Method | Path | Purpose |
 | --- | --- | --- |
 | `POST` | `/v1/vaults` | Create a vault (admin token). |
-| `POST` | `/v1/vaults/{v}/invites` | Mint a one-time invite. Body carries the invite keybox (§5.3). Needs vault authority (§5.8) or the admin token. |
+| `POST` | `/v1/vaults/{v}/invites` | Mint a one-time invite. Body carries the invite keybox (§5.3). Needs vault authority (§5.8); the admin token works only while the vault has no device (the first enrolment). |
 | `POST` | `/v1/invites/{t}` | Redeem: body has the new device's `pub_kex` and `name_enc` → device token + invite keybox. |
 | `GET` | `/v1/vaults/{v}/devices` | Roster: `id, name_enc, pub_kex, revoked_at`. |
-| `PATCH` | `/v1/vaults/{v}/devices/me` | Set the calling device's `name_enc` (after enrolment, once it holds the keys). |
+| `PATCH` | `/v1/vaults/{v}/devices/me` | Set the calling device's `name_enc` (after enrolment, once it holds the keys; needs vault authority). |
 | `GET` | `/v1/vaults/{v}/keybox` | All keybox rows addressed to the calling device. |
 | `POST` | `/v1/vaults/{v}/keybox` | Rows addressed to the caller itself, or (insert-only) to a recovery identity. Never to another device. |
 | `POST` | `/v1/vaults/{v}/auth` | Register the vault authority hash (§5.8) on first enrolment. Idempotent for the same token, 409 for a different one. |
@@ -311,9 +324,11 @@ blobs    (vault_id, blob_id, epoch, ct_size, created_at, last_ref_at)
 | `GET` | `/v1/vaults/{v}/ops?from=T` | Op log by time, for "restore vault to T" tooling. |
 
 All requests carry `Authorization: Bearer <device token>`, never a token in
-the query string. List routes clamp `limit` to 5000 and `blobs/missing`
-accepts at most 5000 ids, so no member can make the server materialise an
-unbounded result. A long-poll re-checks that the caller is still enrolled
+the query string. List routes clamp `limit` to 5000, `snapshot` is paged
+the same way (`since`, `limit`, `more`), `blobs/missing` accepts at most
+5000 ids, and one op's `meta_enc` is at most 16 KiB (names and keybox rows
+4 KiB), so no member can make the server materialise an unbounded result or
+make every other device download one. A long-poll re-checks that the caller is still enrolled
 before answering, so a device revoked while waiting gets nothing. Everything
 is JSON except blob bodies. The API is small enough that a second implementation on
 Cloudflare Workers + D1 + R2 would be a weekend project if ever wanted.
@@ -334,7 +349,8 @@ Cloudflare Workers + D1 + R2 would be a weekend project if ever wanted.
 Server-side, automatic, no device coordination:
 
 - A blob is live if any op within the retention window (default 90 days) or
-  any current head references it.
+  any current head references it, or if it was uploaded inside the window
+  itself: a blob in the normal upload-then-post gap is never swept.
 - A daily sweep deletes dead blobs. The op log itself is retained forever.
 - "Restore vault to time T" = for every path, take the latest op with
   `created_at ≤ T`; if its blob is still present, emit a new `put` op. This is
@@ -411,12 +427,22 @@ blob     = 0x01 || epoch(u32 LE) || salt(16B) || nonce(12B)
          body = flags(1B: bit0 deflate) || plaintext
 
 meta_enc = epoch(u32 LE) || nonce(12B)
-           || AES-256-GCM(K_meta,e, JSON{path, mtime, size, flags}, aad = "meta" || path_id || epoch)
+           || AES-256-GCM(K_meta,e, JSON{path, mtime, size, flags, blob}, aad = "meta" || path_id || epoch)
+           (`blob` is the op's blob_id, or null for a delete: the op row that
+           carries blob_id beside meta_enc is not authenticated, so the
+           metadata names the blob it describes and the applier refuses an
+           op whose row says otherwise, and a decrypted blob whose length is
+           not `size`. Rows from older versions have no `blob` and are
+           accepted; re-encryption adds it.)
 
 name_enc = 0x00000000 || nonce(12B)
-           || AES-256-GCM(K_name, name, aad = "name"),  K_name = HKDF(K_id, "obsync/name/v1")
+           || AES-256-GCM(K_name, name, aad = "name" || device_id),  K_name = HKDF(K_id, "obsync/name/v1")
            (set by the device itself after enrolment via PATCH /devices/me,
-           because it cannot encrypt anything before it holds the keys. Under
+           which needs vault authority: the name is the device's proof that
+           it holds the keys, and the device id in the AAD stops a token
+           holder from copying another device's name onto its own row.
+           Rotation wraps the new key only to devices whose name verifies,
+           and revokes the rest. Under
            the identity key rather than an epoch key: a device can only write
            its own name, so names written under epoch e would become
            unreadable to everyone once e is pruned after a rotation. A
@@ -425,7 +451,10 @@ name_enc = 0x00000000 || nonce(12B)
            a row from an older version, encrypted under K_meta,e.)
 ```
 
-- Per-blob HKDF salt removes the AES-GCM nonce-reuse bound as a concern.
+- Per-blob HKDF salt removes the AES-GCM nonce-reuse bound as a concern for
+  blobs. `K_meta,e` is one key for every op of an epoch, with random
+  96-bit nonces: the 2^32-message bound for that is not approachable by a
+  vault, and a rotation starts a fresh key anyway.
 - The AAD binds every ciphertext to its identifier and epoch, so the server
   cannot swap one blob or one op's metadata for another, and cannot replay an
   old-epoch ciphertext as current without it failing to authenticate under the
@@ -551,10 +580,13 @@ Parameter choices, with the reasoning so they can be reviewed:
   WebCrypto, and shipping a WASM implementation would add an unaudited
   dependency to the most sensitive path. PBKDF2 costs about one second per
   attempt on a phone, which is acceptable for a join-time operation.
-- **64 bytes derived, split into a wrapping key and an auth token.** The
+- **32 bytes derived, expanded by HKDF into a wrapping key and an auth
+  token** (`obsync/recovery/wrap/v1`, `obsync/recovery/auth/v1`). The
   server stores only the SHA-256 of the auth token. An attacker with the
   server's database therefore has `recovery_enc` (needs the passphrase) and
-  a hash (needs the passphrase); neither helps guess the other.
+  a hash (needs the passphrase); neither helps guess the other. Deriving
+  64 bytes straight from PBKDF2 would double the defender's cost per
+  iteration while an attacker still tests one SHA-256 block.
 - **Online guessing** is bounded by the per-IP rate limit on the recovery
   routes (§4.6), not by the KDF.
 - **AES-256-GCM with a fresh 12-byte nonce and a per-blob HKDF subkey.**
@@ -622,11 +654,12 @@ not need to know it is happening. History does not carry over except through
 | Adversary | Gets | Cannot | Mitigation / residual |
 | --- | --- | --- | --- |
 | Reads server disk or backups | ciphertext, path and blob IDs, op timing, ciphertext sizes, device IDs, roster public keys | content, paths, names, mtimes, which human owns which device | padding flag for sizes; timing is inherent |
-| Steals a device token (proxy log, copied `data.json` with sealed keys) | read ciphertext and the op log; see which device is online | write anything: no ops, no blobs, no rotation, revocation, recovery, invites or keybox rows for others | vault authority (§5.8) gates every write; revoke device → rotate |
-| Steals an unused invite link, or holds any member's keys | joins as a device with full read/write, **which means code execution on every device**: a synced `.obsidian/plugins/*/main.js` is reloaded, and `community-plugins.json` enables plugins, automatically (§7.3) | write outside the vault, or under a path other than the one an op is keyed by (§6.5 validation) | 24 h TTL, one-time; unexpected or unnamed device is flagged in the roster; remove + rotate; turn "sync config folder" off if vault members are not fully trusted |
+| Steals a device token (proxy log, copied `data.json` with sealed keys) | read ciphertext and the op log; see which device is online | write anything: no ops, no blobs, no rotation, revocation, recovery, invites, keybox rows (its own included, once written), or a device name (names need authority and authenticate under the device's own id) | vault authority (§5.8) gates every write; revoke device → rotate |
+| Steals an unused invite link, or holds any member's keys | joins as a device with full read/write, **which means code execution on every device**: a synced `.obsidian/plugins/*/main.js` is reloaded, and `community-plugins.json` enables plugins, automatically (§7.3) | write outside the vault, under a path other than the one an op is keyed by, or with a blob other than the one its metadata names (§6.5 validation) | 24 h TTL, one-time; unexpected or unnamed device is flagged in the roster; remove + rotate; turn "sync config folder" off if vault members are not fully trusted |
+| Holds the admin token (or the server's config) | create and delete vaults, install an authority hash, invite the *first* device into an empty vault | invite into a populated vault, so it cannot plant a key-less device for the owner's next rotation to wrap keys to; read or forge anything | invites into a populated vault need vault authority; rotation wraps only to devices whose name authenticates (proof they held the keys) and revokes the rest, reporting them |
 | Takes a device (phone with Obsidian) | everything that device has, including `K_id` and current keys | anything after rotation; anything at all after re-encryption, given the token is revoked | OS disk encryption; per-device key protection (§5.5a); remove + rotate from another device |
-| Guesses the recovery passphrase | one online attempt per request, rate-limited | an offline attack: the server hands out only the KDF salt; the wrapped key is released only against the derived auth token | PBKDF2-600k plus the limiter; someone with the server's disk can still attack offline, so pick a long passphrase |
-| Server operator (honest but curious) | the "reads server disk" row, live, plus which device is online when | content, paths, names, mtimes; cannot substitute one ciphertext for another without AEAD failing | by assumption (§4.6) they do not tamper; curiosity gains nothing beyond metadata |
+| Guesses the recovery passphrase | one online attempt per request, rate-limited (behind a proxy with `--trust-proxy`, keyed on the address the proxy appended, not one the client wrote); the derived `rc_` token opens the join route only, never the vault's read routes | an offline attack: the server hands out only the KDF salt; the wrapped key is released only against the derived auth token | PBKDF2-600k plus the limiter; someone with the server's disk can still attack offline, so pick a long passphrase |
+| Server operator (honest but curious) | the "reads server disk" row, live, plus which device is online when | content, paths, names, mtimes; cannot alter any ciphertext, and cannot re-point an op at another stored blob (the metadata names its blob and size; the applier refuses a mismatch) | by assumption (§4.6) they do not tamper; curiosity gains nothing beyond metadata. A tampering server could still withhold ops or roll the epoch back (§6.8 detects a rewound log) |
 | Passive network | nothing beyond TLS metadata | | TLS |
 
 Accepted residual exposure:

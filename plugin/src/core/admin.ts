@@ -97,7 +97,12 @@ async function finishEnrol(server: string, vaultId: string, deviceName: string, 
     // admin installs it, see `obsync vault auth`. Either way enrolment is done.
     if (!(e instanceof HttpError && (e.status === 409 || e.status === 401))) throw e;
   }
-  await s.client.setDeviceName(vaultId, await s.vc.encryptName(deviceName));
+  try {
+    await s.client.setDeviceName(vaultId, await s.vc.encryptName(deviceName, red.device_id));
+  } catch (e) {
+    // Naming needs vault authority; a pre-§5.8 vault without one leaves the device "(unnamed)" until the admin installs it.
+    if (!(e instanceof HttpError && e.status === 401)) throw e;
+  }
   return s;
 }
 
@@ -136,7 +141,7 @@ export async function listDevices(s: Session): Promise<(WireDevice & { name: str
   const ds = await s.client.devices(s.identity.vaultId);
   const out = [];
   for (const d of ds) {
-    const name = d.recovery ? "(recovery passphrase)" : d.name_enc ? await s.vc.decryptName(fromB64(d.name_enc)) : "(unnamed)";
+    const name = d.recovery ? "(recovery passphrase)" : d.name_enc ? await s.vc.decryptName(fromB64(d.name_enc), d.id) : "(unnamed)";
     out.push({ ...d, name, isSelf: d.id === s.identity.deviceId });
   }
   return out;
@@ -146,19 +151,32 @@ export async function listDevices(s: Session): Promise<(WireDevice & { name: str
  * Rotate to a new epoch, optionally revoking devices (DESIGN.md §5.4).
  * Wraps the new key to every remaining live device and the recovery identity.
  * Returns the new epoch. Call `reencrypt` afterwards (resumable).
+ *
+ * A device receives the new key only if it proved it held the old ones: its
+ * name must authenticate under its own id (names are written with vault
+ * authority). A row planted through the admin token, or one that never
+ * finished enrolling, has no such proof; it is revoked instead and reported
+ * through `onRevokedUnproven`, so a stranger in the roster cannot be handed
+ * `K_e ‖ K_id` by the owner's next rotation.
  */
-export async function rotate(s: Session, revoke: string[] = []): Promise<number> {
+export async function rotate(s: Session, revoke: string[] = [], onRevokedUnproven?: (ids: string[]) => void): Promise<number> {
   const v = s.identity.vaultId;
   const info = await s.client.vault(v);
   const epoch = info.epoch + 1;
   const key = randomBytes(32);
   const devices = await s.client.devices(v);
   const rows = [];
+  const unproven: string[] = [];
   for (const d of devices) {
     if (d.revoked_at || revoke.includes(d.id) || !d.pub_kex) continue;
+    if (!d.recovery && d.id !== s.identity.deviceId && (!d.name_enc || (await s.vc.verifyName(fromB64(d.name_enc), d.id)) === null)) {
+      unproven.push(d.id);
+      continue;
+    }
     rows.push({ epoch, recipient_id: d.id, wrapped: await wrapEpochKey(fromB64(d.pub_kex), v, epoch, d.id, key, s.vc.keyring.kId) });
   }
-  await s.client.rotate(v, epoch, revoke, rows, await authTokenFor(key));
+  if (unproven.length) onRevokedUnproven?.(unproven);
+  await s.client.rotate(v, epoch, [...revoke, ...unproven], rows, await authTokenFor(key));
   s.vc.addEpoch(epoch, key);
   syncIdentityKeys(s);
   return epoch;
@@ -197,6 +215,7 @@ export async function reencrypt(s: Session, onProgress?: (done: number, remainin
       for (const op of f.ops) {
         if (!want.has(op.seq)) continue;
         const meta = await s.vc.decryptMeta(op.path_id, fromB64(op.meta_enc));
+        meta.blob = op.blob_id; // rows from older versions gain the binding here
         await s.client.patchMeta(v, op.seq, await s.vc.encryptMeta(op.path_id, meta, { epoch: target }), target);
         ops++;
       }
@@ -212,8 +231,8 @@ export async function reencrypt(s: Session, onProgress?: (done: number, remainin
 }
 
 /** Remove a device: rotate without it, then re-encrypt. */
-export async function removeDevice(s: Session, deviceId: string, onProgress?: (done: number, remaining: number) => void): Promise<void> {
-  await rotate(s, [deviceId]);
+export async function removeDevice(s: Session, deviceId: string, onProgress?: (done: number, remaining: number) => void, onRevokedUnproven?: (ids: string[]) => void): Promise<void> {
+  await rotate(s, deviceId ? [deviceId] : [], onRevokedUnproven);
   await reencrypt(s, onProgress);
 }
 

@@ -146,12 +146,18 @@ Obsidian; everything found is fixed and merged:
 
 ## What needs to be done
 
-1. **iOS on a device.** Android is done on an emulator and a real Pixel 7,
-   and the plugin core passes inside a real WebKit engine in CI (the
-   `webkit` job), which is what Obsidian for iOS runs plugins in. What is
-   left is Obsidian's iOS app around it: it needs a Mac with Xcode and an
-   iPhone, because AWS Device Farm cannot run App Store apps.
-   `docs/MOBILE-TEST-PROMPT.md` still applies to that run.
+1. **iOS on a device: done 2026-11-07.** A physical iPhone 13 Pro (iOS 26)
+   and iPad Pro (iPadOS 17) on the owner's Mac, driven over USB
+   (`plugin/test/ios-devices.test.ts`, `docs/IOS-DEVICE-TESTING.md`),
+   passed twenty scenarios against the server on the owner's EC2 box
+   `util.frob.io` with a Let's Encrypt certificate; real Obsidian on Linux
+   (`dev.frob.io`, `plugin/test/linux-joins.test.ts`) then joined the same
+   vault and its note reached both devices. The iOS section of
+   `docs/CONFLICT-RECOVERY-MATRIX.md` lists the outcomes. A third
+   adversarial review round (two agents, areas A to G of the guide) found
+   nine weaknesses, all fixed with regression tests
+   (`server/internal/api/review3_test.go`, `plugin/test/review3-*.test.ts`)
+   and recorded in DESIGN §5.7.
 2. **Human security review.** Hand `docs/SECURITY-REVIEW-GUIDE.md` to a
    specialist. When findings come back, fix them in the style of the
    existing review rounds: a failing test first (`security_test.go` for the

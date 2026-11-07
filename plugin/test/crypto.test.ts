@@ -111,8 +111,11 @@ describe("metadata and names", () => {
     expect(VaultCrypto.metaEpoch(enc)).toBe(2);
     expect(await vc.decryptMeta(pid, enc)).toEqual(meta);
     await expect(vc.decryptMeta(await vc.pathId("other"), enc)).rejects.toBeInstanceOf(CryptoError);
-    const name = await vc.encryptName("Eric's laptop");
-    expect(await vc.decryptName(name)).toBe("Eric's laptop");
+    const name = await vc.encryptName("Eric's laptop", "dev-a");
+    expect(await vc.decryptName(name, "dev-a")).toBe("Eric's laptop");
+    // Bound to the device id: another device's row cannot be worn.
+    expect(await vc.verifyName(name, "dev-b")).toBeNull();
+    expect(await vc.decryptName(name, "dev-b")).toBe("(unreadable name)");
   });
 });
 
@@ -175,7 +178,8 @@ describe("test vectors", () => {
       blob_epoch2_seq_rng: hex(await vc.encryptBlob(blobId, pt, { rng: seqRng(0) })),
       blob_epoch1_padded_seq_rng: hex(await vc.encryptBlob(blobId, pt, { rng: seqRng(0), epoch: 1, pad: true })),
       meta_enc_seq_rng: hex(await vc.encryptMeta(pathId, { path: "notes/hello.md", mtime: 1700000000000, size: 13 }, { rng: seqRng(7) })),
-      name_enc_seq_rng: hex(await vc.encryptName("laptop", { rng: seqRng(9) })),
+      name_enc_seq_rng: hex(await vc.encryptName("laptop", "device-1", { rng: seqRng(9) })),
+      auth_token_epoch2: await vc.authToken(2),
       invite_keybox_I_zero_seq_rng: hex(await encryptInviteKeybox(new Uint8Array(32), fixedKeyring(), seqRng(3))),
     };
     const file = fileURLToPath(new URL("./vectors.json", import.meta.url));
@@ -188,7 +192,7 @@ describe("test vectors", () => {
     expect(await vc.decryptBlob(blobId, fromHex(expected.blob_epoch2_seq_rng))).toEqual(pt);
     expect(await vc.decryptBlob(blobId, fromHex(expected.blob_epoch1_padded_seq_rng))).toEqual(pt);
     expect((await vc.decryptMeta(pathId, fromHex(expected.meta_enc_seq_rng))).size).toBe(13);
-    expect(await vc.decryptName(fromHex(expected.name_enc_seq_rng))).toBe("laptop");
+    expect(await vc.decryptName(fromHex(expected.name_enc_seq_rng), "device-1")).toBe("laptop");
     expect(b64url(new Uint8Array(3))).toBe("AAAA");
   });
 });

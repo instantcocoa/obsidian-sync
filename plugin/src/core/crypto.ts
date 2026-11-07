@@ -73,6 +73,11 @@ export const defaultRng: Rng = randomBytes;
 
 // ---------- primitives ----------
 
+/** AAD for a device name: "name" ‖ the device id the row belongs to. */
+function nameAad(deviceId: string): Uint8Array {
+  return concat(utf8("name"), utf8(deviceId));
+}
+
 async function hkdf(ikm: Uint8Array, salt: Uint8Array, info: Uint8Array, len = 32): Promise<Uint8Array> {
   const key = await subtle.importKey("raw", B(ikm), "HKDF", false, ["deriveBits"]);
   return new Uint8Array(await subtle.deriveBits({ name: "HKDF", hash: "SHA-256", salt: B(salt), info: B(info) }, key, len * 8));
@@ -308,22 +313,35 @@ export class VaultCrypto {
    * rotates, and a removed device loses roster access with its token, so
    * nothing is given up. Epoch values ≥ 1 are read for rows written by
    * older versions.
+   *
+   * The device id is in the AAD: a name authenticates as *this* device's,
+   * so a token-only caller cannot copy another device's name onto its own
+   * row, and a row whose name does not verify is one that never proved it
+   * held the keys (rotation refuses to wrap to it, see admin.rotate).
    */
-  async encryptName(name: string, opts: { rng?: Rng } = {}): Promise<Uint8Array> {
+  async encryptName(name: string, deviceId: string, opts: { rng?: Rng } = {}): Promise<Uint8Array> {
     const nonce = (opts.rng ?? defaultRng)(12);
-    const ct = await gcmEncrypt(await this.nameKey(), nonce, utf8("name"), utf8(name));
+    const ct = await gcmEncrypt(await this.nameKey(), nonce, nameAad(deviceId), utf8(name));
     return concat(u32le(0), nonce, ct);
   }
 
-  async decryptName(nameEnc: Uint8Array): Promise<string> {
-    if (nameEnc.length < 16 + 16) throw new CryptoError("bad name");
+  /** The device's name, or null when the row does not authenticate as `deviceId`'s own. */
+  async verifyName(nameEnc: Uint8Array, deviceId: string): Promise<string | null> {
+    if (nameEnc.length < 16 + 16) return null;
     const epoch = readU32le(nameEnc, 0);
+    const nonce = nameEnc.subarray(4, 16);
+    const ct = nameEnc.subarray(16);
     try {
-      const key = epoch === 0 ? await this.nameKey() : await this.metaKey(epoch);
-      return fromUtf8(await gcmDecrypt(key, nameEnc.subarray(4, 16), utf8("name"), nameEnc.subarray(16)));
+      if (epoch === 0) return fromUtf8(await gcmDecrypt(await this.nameKey(), nonce, nameAad(deviceId), ct));
+      // Rows written by versions before the name key: epoch key, aad "name" only.
+      return fromUtf8(await gcmDecrypt(await this.metaKey(epoch), nonce, utf8("name"), ct));
     } catch {
-      return "(unreadable name)";
+      return null;
     }
+  }
+
+  async decryptName(nameEnc: Uint8Array, deviceId: string): Promise<string> {
+    return (await this.verifyName(nameEnc, deviceId)) ?? "(unreadable name)";
   }
 
   private nameKeyP?: Promise<CryptoKey>;
@@ -339,6 +357,14 @@ export interface FileMeta {
   mtime: number;
   size: number;
   flags?: number;
+  /**
+   * The blob this metadata describes (null for a delete). The op row that
+   * carries meta_enc and blob_id side by side is not authenticated, so a
+   * server could re-point an op at another stored blob; the applier refuses
+   * an op whose meta names a different blob. Absent on rows from older
+   * versions, which are accepted.
+   */
+  blob?: string | null;
 }
 
 // ---------- device keypair (ECDH P-256) ----------
@@ -451,10 +477,16 @@ export interface RecoveryMaterial {
   authToken: string;
 }
 
+/**
+ * One 32-byte PBKDF2 output, expanded by HKDF into the wrap key and the auth
+ * token. Asking PBKDF2 for 64 bytes would cost the defender two SHA-256
+ * blocks per iteration while an attacker tests one; HKDF keeps the two
+ * halves independent at the attacker's single-block price.
+ */
 async function pbkdf2(passphrase: string, salt: Uint8Array): Promise<{ wrapKey: Uint8Array; auth: Uint8Array }> {
   const base = await subtle.importKey("raw", B(utf8(passphrase.normalize("NFC"))), "PBKDF2", false, ["deriveBits"]);
-  const bits = new Uint8Array(await subtle.deriveBits({ name: "PBKDF2", hash: "SHA-256", salt: B(salt), iterations: PBKDF2_ITERATIONS }, base, 512));
-  return { wrapKey: bits.subarray(0, 32), auth: bits.subarray(32, 64) };
+  const seed = new Uint8Array(await subtle.deriveBits({ name: "PBKDF2", hash: "SHA-256", salt: B(salt), iterations: PBKDF2_ITERATIONS }, base, 256));
+  return { wrapKey: await hkdf(seed, new Uint8Array(0), utf8("obsync/recovery/wrap/v1")), auth: await hkdf(seed, new Uint8Array(0), utf8("obsync/recovery/auth/v1")) };
 }
 
 export function recoveryAuthToken(auth: Uint8Array): string {

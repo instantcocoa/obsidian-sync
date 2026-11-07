@@ -17,8 +17,8 @@ import { VaultCrypto, CryptoError, unwrapEpochKey, type FileMeta } from "./crypt
 import { fromB64, bytesEqual } from "./encoding";
 import type { FileStat, StateStore, VaultFS } from "./fs";
 import { mergeJson, mergeText } from "./merge";
-import { aliasesConfigDir, compileExclusions, conflictPath, fromLogical, isJsonPath, isSafeDevicePath, isSafeLogicalPath, isTextPath, toLogical, CONFIG_TOKEN } from "./paths";
-import { NetworkError, Client, HttpError, type OpInput, type OpResult, type WireOp } from "./transport";
+import { aliasesConfigDir, compileExclusions, conflictPath, fromLogical, isJsonPath, isSafeDevicePath, isSafeLogicalPath, isTextPath, toLogical, CONFIG_TOKEN, logicalAliasesConfigDir } from "./paths";
+import { NetworkError, Client, HttpError, type Feed, type OpInput, type OpResult, type WireOp } from "./transport";
 
 // ---------- types ----------
 
@@ -569,7 +569,7 @@ export class Engine {
   private async recoverFromRewind(serverSeq: number): Promise<void> {
     const v = this.cfg.vaultId;
     this.log("warn", `server sequence went backwards (${this.state.cursor} -> ${serverSeq}); reconciling against a restored server`);
-    const snap = await this.client.snapshot(v);
+    const snap = await this.fullSnapshot(v);
     await this.adoptEpoch(snap.epoch, snap.min_epoch);
     const heads = new Map<string, WireOp>();
     for (const op of snap.ops) heads.set(op.path_id, op);
@@ -642,10 +642,22 @@ export class Engine {
 
   // ----- pull -----
 
+  /** The head op of every path, gathered page by page (the server clamps a page like `changes`). */
+  private async fullSnapshot(v: string): Promise<Feed> {
+    let since = 0;
+    const ops: WireOp[] = [];
+    for (;;) {
+      const page = await this.client.snapshot(v, { since, limit: 500 });
+      ops.push(...page.ops);
+      if (!page.more || page.ops.length === 0) return { ...page, ops };
+      since = page.ops[page.ops.length - 1].seq;
+    }
+  }
+
   private async pull(): Promise<void> {
     const v = this.cfg.vaultId;
     if (this.state.cursor === 0) {
-      const snap = await this.client.snapshot(v);
+      const snap = await this.fullSnapshot(v);
       await this.adoptEpoch(snap.epoch, snap.min_epoch);
       await this.applyBatch(snap.ops);
       this.state.cursor = snap.cursor;
@@ -710,11 +722,19 @@ export class Engine {
       // vault path and it must be the path this op is actually keyed by;
       // otherwise a compromised member could write outside the vault or
       // smuggle a file past the exclusion rules under another path's id.
-      if (meta && (!isSafeLogicalPath(meta.path) || (await this.vc.pathId(meta.path)) !== op.path_id || aliasesConfigDir(this.device(meta.path), this.fs.configDir))) {
+      if (meta && (!isSafeLogicalPath(meta.path) || (await this.vc.pathId(meta.path)) !== op.path_id || logicalAliasesConfigDir(meta.path, this.fs.configDir) || aliasesConfigDir(this.device(meta.path), this.fs.configDir))) {
         this.log("error", `op ${op.seq} carries an unsafe or mismatched path; refusing to apply it`, { path: meta.path });
         // Report it like any other skipped op: the user should know a file
         // exists in the vault that this device will never show.
         this.hooks.onSkipped?.(meta.path, "the name is not allowed on this device");
+        meta = null;
+      }
+      // The op row (blob_id beside meta_enc) is not authenticated; the
+      // metadata is. An op whose metadata names a different blob than the
+      // row has been re-pointed by whoever holds the database.
+      if (meta && meta.blob !== undefined && meta.blob !== op.blob_id) {
+        this.log("error", `op ${op.seq}: metadata names blob ${meta.blob ?? "null"} but the op carries ${op.blob_id ?? "null"}; refusing to apply it`, { path: meta.path });
+        this.hooks.onSkipped?.(meta.path, "the server's record of this change is inconsistent");
         meta = null;
       }
       // Paths are keyed by their NFC form (path_id above proves meta.path is
@@ -887,6 +907,11 @@ export class Engine {
         plain = await this.vc.decryptBlob(blobId, await this.fetchBlob(blobId, blobs));
       } else throw e;
     }
+    // The metadata's size is authenticated; the blob's identity is a keyed
+    // hash of its plaintext. A mismatch means the op was re-pointed at
+    // another blob (or the metadata was forged by a key holder); either way
+    // the file must not be written.
+    if (meta.size !== plain.length) throw new Error(`blob ${blobId} is ${plain.length} bytes but the metadata says ${meta.size}`);
     const mtime = Math.floor(meta.mtime || Date.now());
     this.state.inflight[logical] = { blob: blobId, seq: op.seq, size: plain.length, mtime };
     await this.flushState();
@@ -1087,7 +1112,7 @@ export class Engine {
       await this.client.putBlob(this.cfg.vaultId, hash, ct, { replace: true });
       const pathId = await this.vc.pathId(logical);
       const e = this.state.files[logical];
-      const meta: FileMeta = { path: logical, mtime: st.mtime, size: st.size };
+      const meta: FileMeta = { path: logical, mtime: st.mtime, size: st.size, blob: hash };
       const op: OpInput = { op_id: opId(), path_id: pathId, blob_id: hash, meta_enc: await this.vc.encryptMeta(pathId, meta), meta_epoch: this.vc.keyring.current, base_seq: e?.seq ?? 0 };
       let r = (await this.client.postOps(this.cfg.vaultId, [op])).results[0];
       if (r.conflict) {
@@ -1114,7 +1139,7 @@ export class Engine {
     const pathId = await this.vc.pathId(logical);
     if (!st) {
       if (!e || e.hash === null) return null; // nothing to delete
-      const meta: FileMeta = { path: logical, mtime: Date.now(), size: 0 };
+      const meta: FileMeta = { path: logical, mtime: Date.now(), size: 0, blob: null };
       return { logical, op: { op_id: opId(), path_id: pathId, blob_id: null, meta_enc: await this.vc.encryptMeta(pathId, meta), meta_epoch: this.vc.keyring.current, base_seq: e.seq } };
     }
     const { bytes, hash } = await this.hashFile(devPath);
@@ -1123,7 +1148,7 @@ export class Engine {
       e.mtime = st.mtime;
       return null; // unchanged after all
     }
-    const meta: FileMeta = { path: logical, mtime: st.mtime, size: st.size };
+    const meta: FileMeta = { path: logical, mtime: st.mtime, size: st.size, blob: hash };
     return {
       logical,
       bytes,

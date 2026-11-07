@@ -122,7 +122,11 @@ func (s *Server) routes() {
 
 	m.HandleFunc("GET /v1/vaults/{v}", s.device(s.getVault))
 	m.HandleFunc("GET /v1/vaults/{v}/devices", s.device(s.listDevices))
-	m.HandleFunc("PATCH /v1/vaults/{v}/devices/me", s.device(s.setDeviceName))
+	// A name is the device's proof that it holds the vault keys (its AAD carries
+	// the device id and only a key holder can produce it), so setting one needs
+	// vault authority: a token-only caller cannot rename itself or wear another
+	// device's name.
+	m.HandleFunc("PATCH /v1/vaults/{v}/devices/me", s.authority(s.setDeviceName))
 	m.HandleFunc("GET /v1/vaults/{v}/keybox", s.device(s.getKeybox))
 	m.HandleFunc("POST /v1/vaults/{v}/keybox", s.device(s.putKeybox))
 	m.HandleFunc("POST /v1/vaults/{v}/auth", s.deviceOrAdmin(s.registerAuth))
@@ -409,6 +413,21 @@ func (s *Server) createInvite(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, err)
 		return
 	}
+	// The admin bearer may mint an invite only for an empty vault (the first
+	// device's own enrolment). On a populated vault an admin-minted invite would
+	// plant a key-less device that the owner's next rotation could wrap keys to;
+	// the admin reaches nothing beyond deletion, by design.
+	if dev(r) == nil {
+		n, err := s.st.LiveDeviceCount(r.Context(), r.PathValue("v"))
+		if err != nil {
+			s.fail(w, err)
+			return
+		}
+		if n > 0 {
+			writeErr(w, http.StatusForbidden, "admin invites are only for an empty vault; a member with the vault keys must invite")
+			return
+		}
+	}
 	inv, err := s.st.CreateInvite(r.Context(), r.PathValue("v"), callerID(r), body.KeyboxEnc, ttl)
 	if err != nil {
 		s.fail(w, err)
@@ -609,19 +628,19 @@ func (s *Server) recoveryJoin(w http.ResponseWriter, r *http.Request) {
 // ---------- feed ----------
 
 type feedResponse struct {
-	Epoch    int64      `json:"epoch"`
-	MinEpoch int64      `json:"min_epoch"`
-	Cursor   int64      `json:"cursor"`
+	Epoch    int64 `json:"epoch"`
+	MinEpoch int64 `json:"min_epoch"`
+	Cursor   int64 `json:"cursor"`
 	// Seq is the vault's head sequence. A client whose cursor is above it
 	// knows the server was restored from a backup and reconciles (DESIGN §6.8).
 	Seq int64 `json:"seq"`
 	// CursorOpID is the op_id at Cursor; the client sends it back as
 	// `expect` so a restore that happens to have re-issued the same
 	// sequence numbers is still detected. Rewound reports that mismatch.
-	CursorOpID string `json:"cursor_op_id,omitempty"`
-	Rewound    bool   `json:"rewound,omitempty"`
-	Ops      []store.Op `json:"ops"`
-	More     bool       `json:"more"`
+	CursorOpID string     `json:"cursor_op_id,omitempty"`
+	Rewound    bool       `json:"rewound,omitempty"`
+	Ops        []store.Op `json:"ops"`
+	More       bool       `json:"more"`
 }
 
 func (s *Server) snapshot(w http.ResponseWriter, r *http.Request) {
@@ -631,17 +650,29 @@ func (s *Server) snapshot(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, err)
 		return
 	}
-	ops, err := s.st.Snapshot(r.Context(), v)
+	// Paged like /changes: a member cannot make one response carry every
+	// head of a million-path vault.
+	since := qInt(r, "since", 0)
+	limit := int(qInt(r, "limit", int64(s.cfg.ChangesLimit)))
+	if limit <= 0 || limit > s.cfg.ChangesLimit {
+		limit = s.cfg.ChangesLimit
+	}
+	ops, err := s.st.Snapshot(r.Context(), v, since, limit+1)
 	if err != nil {
 		s.fail(w, err)
 		return
+	}
+	more := false
+	if len(ops) > limit {
+		ops = ops[:limit]
+		more = true
 	}
 	cursorOp, err := s.st.OpIDAt(r.Context(), v, vault.Seq)
 	if err != nil {
 		s.fail(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, feedResponse{Epoch: vault.Epoch, MinEpoch: vault.MinEpoch, Cursor: vault.Seq, Seq: vault.Seq, CursorOpID: cursorOp, Ops: ops})
+	writeJSON(w, http.StatusOK, feedResponse{Epoch: vault.Epoch, MinEpoch: vault.MinEpoch, Cursor: vault.Seq, Seq: vault.Seq, CursorOpID: cursorOp, Ops: ops, More: more})
 }
 
 func (s *Server) changes(w http.ResponseWriter, r *http.Request) {

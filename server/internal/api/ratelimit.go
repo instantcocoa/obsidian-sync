@@ -32,8 +32,12 @@ func newLimiter(perMinute, burst int, trustXFF bool) *limiter {
 
 func (l *limiter) key(r *http.Request) string {
 	if l.trustXFF {
+		// A trusted proxy appends the address it saw to X-Forwarded-For; every
+		// earlier entry is whatever the client wrote. Key on the last one, or a
+		// fresh fake first entry per request would give a fresh bucket.
 		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-			return strings.TrimSpace(strings.Split(xff, ",")[0])
+			parts := strings.Split(xff, ",")
+			return normalizeIP(strings.TrimSpace(parts[len(parts)-1]))
 		}
 	}
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
@@ -83,4 +87,20 @@ func (l *limiter) allow(next http.HandlerFunc) http.HandlerFunc {
 		}
 		next(w, r)
 	}
+}
+
+// normalizeIP makes "[::1]:1234", "[::1]", "::1" and "::1%en0" one key, so an
+// address written with brackets, a port or a zone cannot buy a fresh bucket.
+func normalizeIP(a string) string {
+	if h, _, err := net.SplitHostPort(a); err == nil {
+		a = h
+	}
+	a = strings.TrimPrefix(strings.TrimSuffix(a, "]"), "[")
+	if i := strings.IndexByte(a, '%'); i >= 0 {
+		a = a[:i]
+	}
+	if ip := net.ParseIP(a); ip != nil {
+		return ip.String()
+	}
+	return a
 }

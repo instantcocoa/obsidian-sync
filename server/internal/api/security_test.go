@@ -151,15 +151,22 @@ func TestAuthorityClaimRules(t *testing.T) {
 	e := newEnv(t)
 	var v store.Vault
 	e.do("POST", "/v1/vaults", adminTok, nil, nil).expect(t, 201).json(t, &v)
+	// The API no longer lets the admin invite into a populated vault, so the
+	// second device of this pre-§5.8 vault is enrolled through the store, the
+	// way such a database would already exist on disk.
 	enrol := func() device {
-		var inv store.Invite
-		e.do("POST", "/v1/vaults/"+v.ID+"/invites", adminTok, map[string]any{"keybox_enc": randBytes(64)}, nil).expect(t, 201).json(t, &inv)
+		inv, err := e.st.CreateInvite(context.Background(), v.ID, "admin", randBytes(64), time.Hour)
+		if err != nil {
+			t.Fatal(err)
+		}
 		var red store.Redeemed
 		e.do("POST", "/v1/invites/"+inv.Token, "", map[string]any{"pub_kex": randBytes(65)}, nil).expect(t, 201).json(t, &red)
 		return device{red.DeviceID, red.DeviceToken}
 	}
 	a := enrol()
 	b := enrol()
+	// And the HTTP route refuses the admin once a device exists.
+	e.do("POST", "/v1/vaults/"+v.ID+"/invites", adminTok, map[string]any{"keybox_enc": randBytes(64)}, nil).expect(t, 403)
 	base := "/v1/vaults/" + v.ID
 	var info store.Vault
 	e.do("GET", base, a.token, nil, nil).expect(t, 200).json(t, &info)

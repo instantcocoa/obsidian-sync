@@ -231,8 +231,9 @@ export class Client {
     return (await this.json<{ devices: WireDevice[] }>("GET", `/v1/vaults/${vaultId}/devices`)).devices ?? [];
   }
 
+  /** Naming needs vault authority: a name is the device's proof that it holds the keys. */
   async setDeviceName(vaultId: string, nameEnc: Uint8Array): Promise<void> {
-    await this.json("PATCH", `/v1/vaults/${vaultId}/devices/me`, { name_enc: b64(nameEnc) });
+    await this.json("PATCH", `/v1/vaults/${vaultId}/devices/me`, { name_enc: b64(nameEnc) }, { authority: Boolean(this.opts.vaultAuth) });
   }
 
   async keybox(vaultId: string): Promise<KeyboxRow[]> {
@@ -276,9 +277,15 @@ export class Client {
 
   // ---------- feed ----------
 
-  async snapshot(vaultId: string): Promise<Feed> {
-    return this.json("GET", `/v1/vaults/${vaultId}/snapshot`);
+  /** One page of head ops (seq > since); loop while `more` (Engine.fullSnapshot does). */
+  async snapshot(vaultId: string, opts: { since?: number; limit?: number } = {}): Promise<Feed> {
+    const q = new URLSearchParams();
+    if (opts.since) q.set("since", String(opts.since));
+    if (opts.limit) q.set("limit", String(opts.limit));
+    const qs = q.toString();
+    return this.json("GET", `/v1/vaults/${vaultId}/snapshot${qs ? "?" + qs : ""}`);
   }
+
 
   async changes(vaultId: string, since: number, opts: { wait?: number; limit?: number; expect?: string; signal?: AbortSignal } = {}): Promise<Feed> {
     const q = new URLSearchParams({ since: String(since) });

@@ -1,8 +1,20 @@
 # What a human security reviewer should look at
 
-This is the brief for an external review of obsync. Two agent reviews have
-already run (findings and fixes are in the git history and summarised in
-`DESIGN.md` §5.7 and §5.8); this document lists the claims that still rest on
+This is the brief for an external review of obsync. Three agent review
+rounds have already run (findings and fixes are in the git history and
+summarised in `DESIGN.md` §5.7 and §5.8). The third, on 2026-11-07, worked
+from this document area by area with proof tests and found ten things the
+first two missed, all fixed the same day and pinned by
+`server/internal/api/review3_*_test.go` and `plugin/test/review3-*.test.ts`:
+device names forgeable by a token holder (no device id in the AAD, no
+authority on the route), the admin token able to plant a key-less device
+that the next rotation would wrap keys to, a token holder able to overwrite
+its own keybox rows, metadata not bound to its blob, the proxy-mode limiter
+keyed on a client-written address, the recovery token accepted as a device
+bearer, an unbounded snapshot and uncapped metadata, GC sweeping freshly
+uploaded blobs, and two spellings of the config directory that bypassed
+every `$CONFIG` rule. That is the reason this document still asks for a
+person: each round found real things. It lists the claims that still rest on
 the author's and the agents' judgement and would benefit from a person who
 breaks things for a living. It is written so that the reviewer can start
 cold. Budget: one to two days for a thorough pass.

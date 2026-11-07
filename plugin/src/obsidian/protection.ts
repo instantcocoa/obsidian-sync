@@ -31,7 +31,9 @@ export function safeStorageAvailable(): boolean {
   const ss = remote()?.safeStorage;
   if (!ss || !ss.isEncryptionAvailable()) return false;
   const backend = ss.getSelectedStorageBackend?.();
-  return backend === undefined || backend !== "basic_text";
+  // macOS and Windows report no backend (always a real keychain); Linux must
+  // name a real one: not the plaintext fallback and not the pre-selection value.
+  return backend === undefined || (backend !== "basic_text" && backend !== "unknown");
 }
 
 /**

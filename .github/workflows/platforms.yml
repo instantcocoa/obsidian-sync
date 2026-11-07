@@ -140,5 +140,6 @@ jobs:
           path: |
             plugin/.cache/obsidian-gate.log
             plugin/.cache/obsidian-e2e/**/state/user-data/logs/**
+            plugin/.cache/obsidian-e2e/**/obsidian.log
             plugin/.cache/obsidian-e2e/**/vault/.obsidian/plugins/obsync/*.json
           if-no-files-found: ignore

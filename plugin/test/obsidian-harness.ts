@@ -96,8 +96,26 @@ export class ObsidianInstance {
     });
     o.proc.stdout!.on("data", (d) => (o.log += d));
     o.proc.stderr!.on("data", (d) => (o.log += d));
+    // Everything Electron and the renderer said, plus how the process ended,
+    // lands in a file the CI artifact collects: a window that vanishes
+    // mid-suite ("not connected") is otherwise undiagnosable after the fact.
+    o.logPath = join(base, "obsidian.log");
+    o.proc.on("exit", (code, signal) => {
+      o.log += `\n[electron exited code=${code} signal=${signal} at ${new Date().toISOString()}]\n`;
+      o.flushLog();
+    });
     await o.connect();
     return o;
+  }
+
+  logPath = "";
+  flushLog(): void {
+    if (!this.logPath) return;
+    try {
+      writeFileSync(this.logPath, this.log);
+    } catch {
+      /* best effort */
+    }
   }
 
   private async connect(): Promise<void> {
@@ -279,6 +297,7 @@ export class ObsidianInstance {
   }
 
   async stop(keep = false): Promise<void> {
+    this.flushLog();
     try {
       await this.browser?.close();
     } catch {

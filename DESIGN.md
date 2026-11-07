@@ -963,7 +963,10 @@ alias check all fold names the way a case-insensitive volume does (NFKC,
 both case directions, combining marks stripped): on macOS and Windows
 volumes `Workspace.json` and `plugins/Obsync/` are the excluded paths, and
 on APFS `obſync` (long s) is the obsync directory, which a bare
-case-insensitive regex would not match. A write whose name, or any folder
+case-insensitive regex would not match (measured by
+`plugin/test/fold-volume.test.ts` on each CI platform: APFS also folds the
+Kelvin sign, sharp s, NFD and the fi ligature; NTFS folds ASCII case only;
+ext4 folds nothing; `fold()` covers every pair any of them folds). A write whose name, or any folder
 on the way to it, the volume would fold onto a differently spelled existing
 entry is refused and reported rather than replacing that entry's bytes.
 Paths carrying `: < > " | ? *` are rejected outright (an NTFS `::$DATA`

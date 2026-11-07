@@ -169,7 +169,11 @@ and the local filesystem.
   in both filesystems' write paths. The sixth review found it applied to the
   first of these only (`/obsync/i` does not match `obſync`, APFS does).
   Check for any comparison site still using `toLowerCase()` or a bare `i`
-  flag, and whether NTFS folds U+017F and U+212A the way APFS does.
+  flag. `plugin/test/fold-volume.test.ts` measures each CI volume: APFS
+  folds ASCII case, U+017F, U+212A, U+00DF, NFD and U+FB01; NTFS (GitHub's
+  Windows runner) folds ASCII case only; ext4 folds nothing. `fold()` agrees
+  with every pair a volume folds, and over-folds the rest, which only
+  over-excludes.
 - `decryptBlob(id, blob, { maxPlain })`: the engine passes the authenticated
   `meta.size`; the deflate stream is cancelled one chunk past it (sixth
   review: a 64 KiB ciphertext inflated to 64 MiB on every device before any

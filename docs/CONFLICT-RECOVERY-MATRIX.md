@@ -135,7 +135,8 @@ new engine could come up and never start.
 Driven over USB from a Mac with devicectl and pymobiledevice3, no
 jailbreak, no UI automation (`docs/IOS-DEVICE-TESTING.md`). In-app edits
 go through `obsidian://new`, which uses Obsidian's own vault API. Twenty
-scenarios, all green on 2026-11-07 (run 7):
+scenarios, all green on 2026-11-07 (runs 7 and 10; runs 8 and 9 found the
+race recorded as scenarios 39 and 40):
 
 | # | Situation | Outcome |
 | --- | --- | --- |

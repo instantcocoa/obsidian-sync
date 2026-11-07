@@ -203,24 +203,50 @@ func (f *FS) Promote(vault, stage, id string) error {
 	return syncDir(filepath.Dir(f.path(vault, id)))
 }
 
-// Swap moves the current blob file (if any) aside under `prev` and promotes
+// Swap keeps the current blob file (if any) aside under `prev` and promotes
 // `stage` into its place, so a caller whose index write then fails can put
 // the previous bytes back with Restore. Returns whether a previous file was
 // set aside.
+//
+// The aside copy is a hard link, not a rename: the rename of `stage` over
+// `id` then replaces the file atomically and the name is never empty, so a
+// reader fetching the blob at that instant never sees "no such file" (which
+// the plugin would take for a permanent 404 and skip the op). The link's
+// timestamp is set to now, so GC's hour-of-grace sweep for abandoned files
+// counts from this request, not from the old blob's write. On a file system
+// without hard links the rename pair is used instead.
 func (f *FS) Swap(vault, stage, id, prev string) (bool, error) {
 	had := false
-	if err := os.Rename(f.path(vault, id), f.path(vault, prev)); err == nil {
+	cur, prevPath := f.path(vault, id), f.path(vault, prev)
+	switch err := os.Link(cur, prevPath); {
+	case err == nil:
 		had = true
-	} else if !errors.Is(err, os.ErrNotExist) {
+	case errors.Is(err, os.ErrNotExist):
+	case errors.Is(err, os.ErrPermission) || isNotSupported(err):
+		if rerr := os.Rename(cur, prevPath); rerr == nil {
+			had = true
+		} else if !errors.Is(rerr, os.ErrNotExist) {
+			return false, rerr
+		}
+	default:
 		return false, err
+	}
+	if had {
+		now := time.Now()
+		os.Chtimes(prevPath, now, now)
 	}
 	if err := f.Promote(vault, stage, id); err != nil {
 		if had {
-			os.Rename(f.path(vault, prev), f.path(vault, id))
+			os.Rename(prevPath, cur)
 		}
 		return had, err
 	}
 	return had, nil
+}
+
+func isNotSupported(err error) bool {
+	var errno syscall.Errno
+	return errors.As(err, &errno) && (errno == syscall.ENOTSUP || errno == syscall.EXDEV || errno == syscall.EMLINK)
 }
 
 // Restore undoes Swap: the bytes under `prev` become the blob again (or, when

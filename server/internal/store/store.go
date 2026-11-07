@@ -973,6 +973,20 @@ func (s *Store) UpsertBlob(ctx context.Context, vault, id string, by Actor, epoc
 		if err := s.actorLiveTx(ctx, tx, vault, by); err != nil {
 			return err
 		}
+		// The epoch window is re-read here, not only before the body: an
+		// upload held open across a re-encryption could otherwise land a row
+		// at an epoch the vault has since retired and pull min_epoch back.
+		var vaultEpoch int64
+		if err := tx.QueryRowContext(ctx, `SELECT epoch FROM vaults WHERE id=?`, vault).Scan(&vaultEpoch); err != nil {
+			return err
+		}
+		minEpoch, merr := s.minEpoch(ctx, tx, vault, vaultEpoch)
+		if merr != nil {
+			return merr
+		}
+		if epoch < minEpoch || epoch > vaultEpoch {
+			return fmt.Errorf("%w: blob epoch %d outside [%d,%d]", ErrBadRequest, epoch, minEpoch, vaultEpoch)
+		}
 		var cur sql.NullInt64
 		if err := tx.QueryRowContext(ctx, `SELECT epoch FROM blobs WHERE vault_id=? AND blob_id=?`, vault, id).Scan(&cur); err != nil && !errors.Is(err, sql.ErrNoRows) {
 			return err

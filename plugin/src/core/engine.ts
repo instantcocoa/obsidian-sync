@@ -1293,7 +1293,10 @@ export class Engine {
       }
     } else {
       this.log("error", `op rejected for ${p.logical}: ${r.error}`);
-      if (/blob not uploaded/.test(r.error ?? "")) return; // retry next round
+      // Retry next round: the blob is still on its way, or our keyring is
+      // behind the server's epoch window (the next pull adopts the new epoch
+      // and the push re-encrypts). Anything else is final for these bytes.
+      if (/blob not uploaded|min_epoch/.test(r.error ?? "")) return;
       this.dirty.delete(p.logical);
     }
   }

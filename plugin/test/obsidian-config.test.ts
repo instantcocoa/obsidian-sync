@@ -40,7 +40,24 @@ describe.skipIf(!OBSIDIAN_BIN)("real Obsidian, config conflict root cause", () =
     await srv?.stop();
   });
 
-  const appJson = (inst: ObsidianInstance) => fsp.readFile(join(inst.vault, ".obsidian/app.json"), "utf8");
+  // Obsidian rewrites app.json at startup (truncate, then write); a read that
+  // lands in between sees an empty file, so wait for a parseable one.
+  const appJson = async (inst: ObsidianInstance) => {
+    const deadline = Date.now() + 20_000;
+    for (;;) {
+      const cur = await fsp.readFile(join(inst.vault, ".obsidian/app.json"), "utf8").catch(() => "");
+      try {
+        if (cur.length > 0) {
+          JSON.parse(cur);
+          return cur;
+        }
+      } catch {
+        /* mid-write */
+      }
+      if (Date.now() > deadline) return cur;
+      await new Promise((r) => setTimeout(r, 200));
+    }
+  };
   const conflictsOnDisk = async (inst: ObsidianInstance) =>
     (await fsp.readdir(join(inst.vault, ".obsidian"))).filter((f) => / \(conflict /.test(f)).sort();
 

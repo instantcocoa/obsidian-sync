@@ -28,7 +28,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { TestServer, Device, ADMIN } from "./harness";
 import { createVault, createInviteLink, joinWithLink, type Session } from "../src/core/admin";
-import { DEFAULT_EXCLUSIONS, compileExclusions, isSafeLogicalPath, logicalAliasesConfigDir } from "../src/core/paths";
+import { DEFAULT_EXCLUSIONS, compileExclusions, fold, isSafeLogicalPath, logicalAliasesConfigDir } from "../src/core/paths";
 import { utf8 } from "../src/core/encoding";
 import { ConfigHooks } from "../src/obsidian/hooks";
 
@@ -156,8 +156,8 @@ describe("the plugin-reload hook recognises plugin code by a literal prefix", ()
     await evilPut(a.session, `$CONFIG/plugin${LONG_S}/dataview/main.js`, "// evil\n");
     await b.sync();
     const onDisk = readFileSync(join(b.dir, ".obsidian/plugins/dataview/main.js"), "utf8");
-    // Either the write was refused, or the hook saw it under the real plugin path. Neither holds on HEAD.
-    const announced = applied.some((p) => /^\.obsidian\/plugins\/dataview\/main\.js$/.test(p));
+    // Either the write was refused, or the hook saw it as plugin code (ConfigHooks folds the path the way the volume does). Neither held on 8319950.
+    const announced = applied.some((p) => fold(p) === fold(".obsidian/plugins/dataview/main.js"));
     expect(onDisk === "// dataview\n" || announced).toBe(true);
     await a.cleanup();
     await b.cleanup();

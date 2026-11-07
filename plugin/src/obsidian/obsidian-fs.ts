@@ -12,7 +12,7 @@
  * Obsidian notices.
  */
 import { App, TFile, TFolder, normalizePath } from "obsidian";
-import { isSafeDevicePath, foldClash } from "../core/paths";
+import { isSafeDevicePath } from "../core/paths";
 import type { FileStat, VaultFS, StateStore } from "../core/fs";
 
 type AdapterExt = App["vault"]["adapter"] & {
@@ -168,41 +168,19 @@ export class ObsidianFS implements VaultFS {
   }
 
   /**
-   * An existing entry (file or folder, at any depth of `path`) that this
-   * volume treats as one of `path`'s segments although it is spelled
-   * differently, as the file system spells it, or null. Folded the way the
-   * volume folds (`fold`), not just by case: "obſync" is obsync on APFS.
-   */
-  private async spelledAs(path: string): Promise<string | null> {
-    const segs = path.split("/");
-    let parent = "";
-    for (const seg of segs) {
-      let l: { files: string[]; folders: string[] };
-      try {
-        l = await this.app.vault.adapter.list(parent);
-      } catch {
-        return null; // the folder is missing, so nothing below it can clash
-      }
-      for (const e of [...l.files, ...l.folders]) {
-        const p = normalizePath(e);
-        if (foldClash(p.slice(p.lastIndexOf("/") + 1), seg)) return p;
-      }
-      parent = parent ? `${parent}/${seg}` : seg;
-    }
-    return null;
-  }
-
-  /**
-   * A new file whose name (or any folder on the way to it) the volume folds
-   * onto an existing, differently spelled entry would silently replace that
-   * entry's bytes, or land inside a folder the exclusions name under another
-   * spelling. Refuse, so the engine skips the op and reports it (a
-   * case-sensitive device keeps both; this one keeps the first).
+   * A write under a name that the volume resolves to an existing, differently
+   * spelled entry would silently replace that entry's bytes. Measured by
+   * asking the volume (the adapter answers for the name, yet no entry in the
+   * folder is spelled exactly so), never by a folding table: names the
+   * volume keeps apart ("café.md" and "cafe.md" on APFS) stay apart here.
+   * Refuse, so the engine skips the op and reports it (a case-sensitive
+   * device keeps both; this one keeps the first).
    */
   private async refuseCaseClash(path: string): Promise<void> {
     if (!(await this.volumeIgnoresCase())) return;
-    const other = await this.spelledAs(path);
-    if (other) throw new Error(`"${other}" already exists and this volume treats part of "${path}" as the same name`);
+    if ((await this.app.vault.adapter.exists(path)) && !(await this.exactName(path))) {
+      throw new Error(`"${path}" resolves to an entry spelled differently on this volume; refusing to replace it`);
+    }
   }
 
   private async exactName(path: string): Promise<boolean> {
@@ -236,10 +214,43 @@ export class ObsidianFS implements VaultFS {
     }
   }
 
+  /**
+   * A case-only folder rename arrives as deletes under the old spelling and
+   * puts under the new; Obsidian leaves the emptied folder behind, and on a
+   * case-insensitive volume the puts would land inside it under the old
+   * name. When a parent of `path` exists only under a different casing and
+   * is empty, rename it to the requested spelling first.
+   */
+  private async alignParentSpelling(path: string): Promise<void> {
+    if (!(await this.volumeIgnoresCase())) return;
+    const segs = path.split("/");
+    let rel = "";
+    for (const seg of segs.slice(0, -1)) {
+      const want = rel ? `${rel}/${seg}` : seg;
+      try {
+        if (await this.app.vault.adapter.exists(want)) {
+          const l = await this.app.vault.adapter.list(rel);
+          const folders = l.folders.map((f) => normalizePath(f));
+          if (!folders.includes(want)) {
+            const twin = folders.find((f) => f.toLowerCase() === want.toLowerCase());
+            if (twin) {
+              const inside = await this.app.vault.adapter.list(twin);
+              if (inside.files.length === 0 && inside.folders.length === 0) await this.app.vault.adapter.rename(twin, want);
+            }
+          }
+        }
+      } catch {
+        /* best effort: the write below decides */
+      }
+      rel = want;
+    }
+  }
+
   async write(path: string, data: Uint8Array, mtime: number): Promise<void> {
     path = this.checked(path);
     const opts = { mtime: Math.floor(mtime) };
     const buf = data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength) as ArrayBuffer;
+    await this.alignParentSpelling(path);
     await this.ensureFolder(path);
     if (this.isDot(path)) {
       if (!(await this.exactName(path))) await this.refuseCaseClash(path);

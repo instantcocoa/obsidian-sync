@@ -4,7 +4,6 @@
  * plugin bundle.
  */
 import type { FileStat, StateStore, VaultFS } from "./fs";
-import { foldClash } from "./paths";
 import { promises as fsp, watch, type FSWatcher } from "node:fs";
 import * as nodePath from "node:path";
 
@@ -71,48 +70,69 @@ export class NodeFS implements VaultFS {
     return new Uint8Array(await fsp.readFile(this.abs(path)));
   }
 
-  /** Does the volume answer for any casing of a name? Probed once with the config dir, when it exists. */
-  private caseInsensitive: Promise<boolean> | null = null;
-  private volumeIgnoresCase(): Promise<boolean> {
-    if (!this.caseInsensitive) {
-      const swapped = this.configDir.replace(/[a-zA-Z]/g, (c) => (c === c.toLowerCase() ? c.toUpperCase() : c.toLowerCase()));
-      this.caseInsensitive =
-        swapped === this.configDir
-          ? Promise.resolve(false)
-          : fsp.access(this.abs(this.configDir)).then(
-              () => fsp.access(this.abs(swapped)).then(
-                () => true,
-                () => false,
-              ),
-              () => false,
-            );
+  /**
+   * Refuse to write under a name that this volume resolves to an existing,
+   * differently spelled entry: on a case-insensitive or normalising volume
+   * the bytes would silently replace that entry's. Measured by asking the
+   * volume (does the path resolve, and is any entry in its folder spelled
+   * exactly so?), not by a folding table, so names the volume keeps apart
+   * ("café.md" and "cafe.md" on APFS) stay apart here too. Same rule as
+   * ObsidianFS.refuseCaseClash; the engine skips and reports.
+   */
+  private async refuseAliasClash(path: string): Promise<void> {
+    const raw = this.raw.get(path) ?? path;
+    try {
+      await fsp.stat(this.abs(path));
+    } catch {
+      return; // nothing answers for this name: a new entry
     }
-    return this.caseInsensitive;
+    const i = raw.lastIndexOf("/");
+    const dir = i < 0 ? "" : raw.slice(0, i);
+    const seg = raw.slice(i + 1);
+    const entries = await fsp.readdir(this.abs(dir)).catch(() => null);
+    if (!entries) return;
+    const nfc = seg.normalize("NFC");
+    if (entries.some((e) => e === seg || e.normalize("NFC") === nfc)) return; // spelled exactly so (a normalisation twin is the same name)
+    throw new Error(`"${path}" resolves to an entry spelled differently on this volume; refusing to replace it`);
   }
 
   /**
-   * On a case-insensitive volume, refuse to write under a name (or through a
-   * folder) that the volume folds onto an existing, differently spelled
-   * entry: the bytes would replace that entry's, or land inside a folder the
-   * exclusions name under another spelling ("obſync" is obsync on APFS).
-   * Same rule as ObsidianFS.refuseCaseClash; the engine skips and reports.
+   * A case-only folder rename reaches us as deletes under the old spelling
+   * and puts under the new one, and Obsidian leaves the emptied folder
+   * behind. On a case-insensitive volume the puts would land inside that
+   * old-spelled folder and the scanner would report them under the old name
+   * forever. When a parent of `path` resolves to an existing folder spelled
+   * differently and that folder is empty, rename it to the requested
+   * spelling first; a folder that still has contents is left as it is.
    */
-  private async refuseFoldClash(path: string): Promise<void> {
-    if (!(await this.volumeIgnoresCase())) return;
+  private async alignParentSpelling(path: string): Promise<void> {
     const segs = (this.raw.get(path) ?? path).split("/");
     let rel = "";
-    for (const seg of segs) {
-      const entries = await fsp.readdir(this.abs(rel)).catch(() => null);
-      if (!entries) return; // the folder is missing, so nothing below it can clash
-      const twin = entries.find((e) => foldClash(e.normalize("NFC"), seg.normalize("NFC")));
-      if (twin) throw new Error(`"${rel ? rel + "/" : ""}${twin}" already exists and this volume treats "${seg}" as the same name`);
-      rel = rel ? `${rel}/${seg}` : seg;
+    for (const seg of segs.slice(0, -1)) {
+      const want = rel ? `${rel}/${seg}` : seg;
+      const st = await fsp.stat(this.abs(want)).catch(() => null);
+      if (st?.isDirectory()) {
+        const siblings = await fsp.readdir(this.abs(rel)).catch(() => [] as string[]);
+        const nfc = seg.normalize("NFC");
+        if (!siblings.some((e) => e === seg || e.normalize("NFC") === nfc)) {
+          // Spelled differently on disk. Find which entry it is by inode.
+          for (const e of siblings) {
+            const es = await fsp.stat(this.abs(rel ? `${rel}/${e}` : e)).catch(() => null);
+            if (!es || !es.isDirectory() || es.ino !== st.ino) continue;
+            const inside = await fsp.readdir(this.abs(rel ? `${rel}/${e}` : e)).catch(() => ["?"]);
+            if (inside.length === 0) await fsp.rename(this.abs(rel ? `${rel}/${e}` : e), this.abs(want)).catch(() => {});
+            break;
+          }
+        }
+      }
+      rel = want;
     }
   }
 
   async write(path: string, data: Uint8Array, mtime: number): Promise<void> {
     const abs = this.abs(path);
-    await this.refuseFoldClash(path);
+    await this.alignParentSpelling(path);
+    await this.refuseAliasClash(path);
     await fsp.mkdir(nodePath.dirname(abs), { recursive: true });
     const tmp = `${abs}.obsync-tmp`;
     await fsp.writeFile(tmp, data);

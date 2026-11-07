@@ -29,8 +29,8 @@ import {
   wrapEpochKey,
   type DeviceKeypair,
   type Keyring,
-  type KeyringJSON, RECOVERY_ITERATIONS, LEGACY_RECOVERY_ITERATIONS } from "./crypto";
-import { b64, fromB64, randomBytes } from "./encoding";
+  type KeyringJSON, RECOVERY_ITERATIONS, LEGACY_RECOVERY_ITERATIONS, CryptoError, type FileMeta } from "./crypto";
+import { b64, fromB64, randomBytes, utf8 } from "./encoding";
 import { Client, HttpError, type WireDevice } from "./transport";
 
 /** Everything a device persists to come back as itself. Stored in plugin data. */
@@ -160,13 +160,35 @@ export async function listDevices(s: Session): Promise<(WireDevice & { name: str
  * returns whether it did. Cheap (one roster fetch) and safe to run at every
  * start.
  */
-export async function ensureOwnName(s: Session): Promise<boolean> {
+export function ensureOwnName(s: Session): Promise<boolean> {
+  const p = ensureOwnNameNow(s).finally(() => {
+    if (nameRewriteInFlight.get(s) === p) nameRewriteInFlight.delete(s);
+  });
+  nameRewriteInFlight.set(s, p);
+  return p;
+}
+
+/** The start-up rewrite that may still be in flight, per session, so a rename waits for it instead of being undone by it. */
+const nameRewriteInFlight = new WeakMap<Session, Promise<boolean>>();
+
+async function ensureOwnNameNow(s: Session): Promise<boolean> {
   const v = s.identity.vaultId;
   const me = (await s.client.devices(v)).find((d) => d.id === s.identity.deviceId);
   if (!me || me.revoked_at) return false;
   if (me.name_enc && (await s.vc.verifyName(fromB64(me.name_enc), me.id)) !== null) return false;
   await s.client.setDeviceName(v, await s.vc.encryptName(s.identity.deviceName, me.id));
   return true;
+}
+
+/**
+ * Rename this device in the roster. Waits for a start-up name rewrite that
+ * is still in flight, which would otherwise land after the rename and put
+ * the old name back.
+ */
+export async function renameOwnDevice(s: Session, name: string): Promise<void> {
+  await nameRewriteInFlight.get(s)?.catch(() => {});
+  await s.client.setDeviceName(s.identity.vaultId, await s.vc.encryptName(name, s.identity.deviceId));
+  s.identity.deviceName = name;
 }
 
 /**
@@ -232,16 +254,44 @@ export async function rotate(s: Session, revoke: string[] = [], confirmUnproven?
  * same blob_id; the server accepts the replacement because the header epoch
  * is higher.
  */
-export async function reencrypt(s: Session, onProgress?: (done: number, remaining: number) => void): Promise<{ blobs: number; ops: number }> {
+export async function reencrypt(s: Session, onProgress?: (done: number, remaining: number) => void): Promise<{ blobs: number; ops: number; skipped: string[] }> {
   const v = s.identity.vaultId;
   const target = (await s.client.vault(v)).epoch;
   let blobs = 0;
   let ops = 0;
+  const skipped: string[] = [];
+  let lastIds = "";
   for (;;) {
     const ids = await s.client.blobsBelowEpoch(v, target, 200);
     if (ids.length === 0) break;
+    const key = ids.join(",");
+    if (key === lastIds) throw new Error(`re-encryption is not making progress on ${ids.length} blob(s)`);
+    lastIds = key;
     for (const id of ids) {
-      const pt = await s.vc.decryptBlob(id, await s.client.getBlob(v, id));
+      let ct: Uint8Array;
+      try {
+        ct = await s.client.getBlob(v, id);
+      } catch (e) {
+        if (e instanceof HttpError && e.status === 404) {
+          skipped.push(id); // the server dropped an orphaned row meanwhile; nothing to carry over
+          continue;
+        }
+        throw e;
+      }
+      let pt: Uint8Array;
+      try {
+        pt = await s.vc.decryptBlob(id, ct);
+      } catch (e) {
+        if (!(e instanceof CryptoError) || /epoch/.test(e.message)) throw e;
+        // A blob no key holder can read (a member uploaded bytes that do not
+        // hash to the id, or garbage). It was never applicable, and it must
+        // not hold the whole vault on the old keys: carry it over as a
+        // marked placeholder under the new epoch. Every device keeps
+        // skipping that op (blob_id mismatch), a later op for the path heals
+        // it, and the retired epoch can be pruned.
+        pt = utf8(`obsync: blob ${id} could not be decrypted during re-encryption and was replaced`);
+        skipped.push(id);
+      }
       await s.client.putBlob(v, id, await s.vc.encryptBlob(id, pt, { epoch: target }), { replace: true });
       onProgress?.(++blobs, ids.length);
     }
@@ -257,12 +307,22 @@ export async function reencrypt(s: Session, onProgress?: (done: number, remainin
       if (f.ops.length === 0) break;
       for (const op of f.ops) {
         if (!want.has(op.seq)) continue;
-        const meta = await s.vc.decryptMeta(op.path_id, fromB64(op.meta_enc));
-        // Rows from older versions gain the blob binding here. A row that
-        // already carries one keeps it: the applier refuses an op whose
-        // authenticated metadata names another blob than the row, and
-        // re-encryption must not launder such a row into a consistent one.
-        if (meta.blob === undefined) meta.blob = op.blob_id;
+        let meta: FileMeta;
+        try {
+          meta = await s.vc.decryptMeta(op.path_id, fromB64(op.meta_enc));
+          // Rows from older versions gain the blob binding here. A row that
+          // already carries one keeps it: the applier refuses an op whose
+          // authenticated metadata names another blob than the row, and
+          // re-encryption must not launder such a row into a consistent one.
+          if (meta.blob === undefined) meta.blob = op.blob_id;
+        } catch (e) {
+          if (!(e instanceof CryptoError) || /epoch/.test(e.message)) throw e;
+          // Unreadable metadata (a member's garbage): carry a placeholder
+          // that no applier accepts (an empty path fails validation), so the
+          // op stays skipped and the old epoch can still be retired.
+          meta = { path: "", mtime: 0, size: 0, blob: op.blob_id };
+          skipped.push(`op ${op.seq}`);
+        }
         await s.client.patchMeta(v, op.seq, await s.vc.encryptMeta(op.path_id, meta, { epoch: target }), target);
         ops++;
       }
@@ -274,11 +334,20 @@ export async function reencrypt(s: Session, onProgress?: (done: number, remainin
     s.vc.pruneBelow(target);
     syncIdentityKeys(s);
   }
-  return { blobs, ops };
+  return { blobs, ops, skipped };
 }
 
 /** Remove a device: rotate without it, then re-encrypt. */
 export async function removeDevice(s: Session, deviceId: string, onProgress?: (done: number, remaining: number) => void, confirmUnproven?: (ids: string[], names: string[]) => boolean | Promise<boolean>): Promise<void> {
+  if (!deviceId) {
+    // "Rotate keys" with an earlier rotation's re-encryption still unfinished
+    // resumes that work instead of minting yet another epoch on top of it.
+    const info = await s.client.vault(s.identity.vaultId);
+    if (info.min_epoch < info.epoch) {
+      await reencrypt(s, onProgress);
+      return;
+    }
+  }
   await rotate(s, deviceId ? [deviceId] : [], confirmUnproven);
   await reencrypt(s, onProgress);
 }

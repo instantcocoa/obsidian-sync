@@ -13,7 +13,7 @@
  *      against the exact base blob, everything else becomes a sibling file.
  */
 
-import { VaultCrypto, CryptoError, unwrapEpochKey, type FileMeta } from "./crypto";
+import { VaultCrypto, CryptoError, unwrapEpochKey, type FileMeta, PAD_BLOCK } from "./crypto";
 import { fromB64, bytesEqual } from "./encoding";
 import type { FileStat, StateStore, VaultFS } from "./fs";
 import { mergeJson, mergeText } from "./merge";
@@ -130,6 +130,15 @@ const DEFAULTS = {
 };
 
 export class SyncError extends Error {}
+
+/**
+ * Blobs fetched ahead of the op that needs them, by id. Holds promises so a
+ * download can be in flight while an earlier op is being written; the
+ * applier starts at most `parallel` of them and drops each entry once its
+ * op is done, so a batch of 500 photos costs `parallel` blobs of memory,
+ * not the whole batch.
+ */
+type BlobCache = Map<string, Promise<Uint8Array>>;
 
 /** The local file changed between the apply decision and the write; the decision is remade. */
 class ConcurrentLocalEdit extends Error {}
@@ -850,21 +859,34 @@ export class Engine {
     const last = new Map<string, Decoded>();
     for (const d of decoded) if (d.meta) last.set(d.logical, d);
     const ordered = [...last.values()].sort((x, y) => Number(x.op.blob_id !== null) - Number(y.op.blob_id !== null));
-    // Prefetch blobs we will probably write (skip excluded and already-synced).
-    const want = new Set<string>();
+    // Blobs we will probably write (skip excluded and already-synced), fetched
+    // a bounded window ahead of the op being applied. `meta.size` is known
+    // here and bounds what each download may be before anything is decrypted
+    // (writeRemote); the window bounds how many are held at once.
+    const queue: string[] = [];
     for (const d of ordered) {
       if (this.excluded(d.logical) || !d.op.blob_id) continue;
       if (this.state.files[d.logical]?.hash === d.op.blob_id) continue;
-      want.add(d.op.blob_id);
+      queue.push(d.op.blob_id);
     }
-    const blobs = new Map<string, Uint8Array>();
-    await this.parallel([...want], async (id) => {
-      try {
-        blobs.set(id, await this.client.getBlob(this.cfg.vaultId, id));
-      } catch (e) {
-        this.log("warn", `blob ${id.slice(0, 8)} fetch failed; will retry`, e);
+    const blobs: BlobCache = new Map();
+    const window = Math.max(1, Math.min(this.cfg.parallel, 8));
+    let nextFetch = 0;
+    const prefetch = () => {
+      while (nextFetch < queue.length && blobs.size < window) {
+        const id = queue[nextFetch++];
+        if (blobs.has(id)) continue;
+        const p = this.client.getBlob(this.cfg.vaultId, id);
+        // A failed prefetch is forgotten so fetchBlob tries again on demand;
+        // the handler below keeps a never-awaited rejection from surfacing.
+        p.catch((e) => {
+          this.log("warn", `blob ${id.slice(0, 8)} fetch failed; will retry`, e);
+          if (blobs.get(id) === p) blobs.delete(id);
+        });
+        blobs.set(id, p);
       }
-    });
+    };
+    prefetch();
     let done = 0;
     for (const d of ordered) {
       try {
@@ -893,6 +915,8 @@ export class Engine {
         }
       }
       this.setStatus({ progress: { done: ++done, total: last.size } });
+      if (d.op.blob_id) blobs.delete(d.op.blob_id);
+      prefetch();
     }
     this.setStatus({ progress: undefined });
   }
@@ -916,7 +940,7 @@ export class Engine {
    * abandoned and the decision remade, so the edit becomes a merge or a
    * sibling instead of being overwritten.
    */
-  private async applyRemote(logical: string, op: WireOp, meta: FileMeta, blobs: Map<string, Uint8Array>): Promise<void> {
+  private async applyRemote(logical: string, op: WireOp, meta: FileMeta, blobs: BlobCache): Promise<void> {
     for (let attempt = 0; ; attempt++) {
       try {
         return await this.applyRemoteOnce(logical, op, meta, blobs);
@@ -927,7 +951,7 @@ export class Engine {
     }
   }
 
-  private async applyRemoteOnce(logical: string, op: WireOp, meta: FileMeta, blobs: Map<string, Uint8Array>): Promise<void> {
+  private async applyRemoteOnce(logical: string, op: WireOp, meta: FileMeta, blobs: BlobCache): Promise<void> {
     const devPath = this.device(logical);
     const e = this.state.files[logical];
     if (e && e.seq >= op.seq) return; // already applied (replay after a rewind)
@@ -1004,25 +1028,37 @@ export class Engine {
     await this.writeRemote(logical, op, meta, blobs, st);
   }
 
-  private async fetchBlob(id: string, blobs?: Map<string, Uint8Array>): Promise<Uint8Array> {
+  private async fetchBlob(id: string, blobs?: BlobCache): Promise<Uint8Array> {
     const cached = blobs?.get(id);
-    if (cached) return cached;
+    if (cached) {
+      try {
+        return await cached;
+      } catch {
+        /* the prefetch failed; fetch on demand below */
+      }
+    }
     const b = await this.client.getBlob(this.cfg.vaultId, id);
-    blobs?.set(id, b);
+    blobs?.set(id, Promise.resolve(b));
     return b;
   }
 
   /** Download (if needed), decrypt, verify, and write a remote put to disk. */
-  private async writeRemote(logical: string, op: WireOp, meta: FileMeta, blobs?: Map<string, Uint8Array>, seen?: FileStat | null): Promise<void> {
+  private async writeRemote(logical: string, op: WireOp, meta: FileMeta, blobs?: BlobCache, seen?: FileStat | null): Promise<void> {
     const devPath = this.device(logical);
     const blobId = op.blob_id!;
+    const ct = await this.fetchBlob(blobId, blobs);
+    // Ciphertext is at most the plaintext plus one padding block and the
+    // headers (compression is kept only when it shrinks); anything larger
+    // cannot be the file the authenticated metadata describes, so it is
+    // refused before a byte of it is decrypted.
+    if (ct.length > meta.size + PAD_BLOCK + 256) throw new Error(`blob ${blobId} is ${ct.length} bytes of ciphertext for a ${meta.size}-byte file; refusing to decrypt it`);
     let plain: Uint8Array;
     try {
-      plain = await this.vc.decryptBlob(blobId, await this.fetchBlob(blobId, blobs), { maxPlain: meta.size });
+      plain = await this.vc.decryptBlob(blobId, ct, { maxPlain: meta.size });
     } catch (e) {
       if (e instanceof CryptoError && /epoch/.test(e.message)) {
         await this.refreshKeys();
-        plain = await this.vc.decryptBlob(blobId, await this.fetchBlob(blobId, blobs), { maxPlain: meta.size });
+        plain = await this.vc.decryptBlob(blobId, ct, { maxPlain: meta.size });
       } else throw e;
     }
     // The metadata's size is authenticated; the blob's identity is a keyed
@@ -1063,7 +1099,7 @@ export class Engine {
     localHash: string,
     head: WireOp,
     meta: FileMeta,
-    blobs?: Map<string, Uint8Array>,
+    blobs?: BlobCache,
     seen?: FileStat | null,
   ): Promise<void> {
     // Decided from `seen` (the stat the local bytes were read under); if the
@@ -1162,7 +1198,7 @@ export class Engine {
       // gone, then new name" in that order (see applyBatch).
       pending.sort((x, y) => Number(x.op.blob_id !== null) - Number(y.op.blob_id !== null));
       // Upload missing blobs first (server enforces blobs-before-ops).
-      const byBlob = new Map<string, Uint8Array>();
+      const byBlob = new Map<string, Uint8Array>(); // push side: bytes we read ourselves
       for (const p of pending) if (p.op.blob_id && p.bytes) byBlob.set(p.op.blob_id, p.bytes);
       const missing = await this.client.missingBlobs(this.cfg.vaultId, [...byBlob.keys()]);
       let done = 0;
@@ -1215,11 +1251,15 @@ export class Engine {
       const meta = await this.vc.decryptMeta(r.conflict.path_id, fromB64(r.conflict.meta_enc));
       // The head the server hands back gets the same checks as a pulled op:
       // its metadata must be ours by path and must name the blob the row
-      // carries. Otherwise skip and report, exactly as applyBatch would.
-      if (meta.path !== p.logical || (meta.blob !== undefined && meta.blob !== r.conflict.blob_id)) {
-        this.log("error", `conflict head for ${p.logical} is inconsistent (path ${meta.path}, blob ${meta.blob ?? "null"} vs ${r.conflict.blob_id ?? "null"}); not resolving against it`);
-        this.hooks.onSkipped?.(p.logical, "the server's record of this change is inconsistent");
-        this.dirty.delete(p.logical);
+      // carries. An inconsistent head must lose: rebase our version on it
+      // as if it were a tombstone, so the next push supersedes it. (Merely
+      // skipping it would leave this path frozen: every honest edit would
+      // conflict with the same bad head forever.)
+      if (meta.path.normalize("NFC") !== p.logical || (meta.blob !== undefined && meta.blob !== r.conflict.blob_id)) {
+        this.log("error", `conflict head for ${p.logical} is inconsistent (path ${meta.path}, blob ${meta.blob ?? "null"} vs ${r.conflict.blob_id ?? "null"}); our version will replace it`);
+        this.hooks.onSkipped?.(p.logical, "the server's record of the other version is inconsistent; yours replaces it");
+        this.state.files[p.logical] = { hash: null, seq: r.conflict.seq, at: r.conflict.created_at, size: 0, mtime: 0 };
+        this.markDirty(p.logical);
         return;
       }
       if (p.bytes) {

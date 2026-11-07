@@ -24,6 +24,7 @@ import {
   type Identity,
   type Session,
   ensureOwnName,
+  renameOwnDevice,
 } from "../core/admin";
 import { ObsidianFS, ObsidianStateStore } from "./obsidian-fs";
 import { ConfigHooks } from "./hooks";
@@ -557,8 +558,7 @@ export default class ObsyncPlugin extends Plugin {
     name = name.trim();
     if (!name) throw new Error("device name cannot be empty");
     const s = this.need();
-    await s.client.setDeviceName(s.identity.vaultId, await s.vc.encryptName(name, s.identity.deviceId));
-    s.identity.deviceName = name;
+    await renameOwnDevice(s, name);
     this.settings.deviceName = name;
     await this.saveSettings();
     await this.restartEngine();

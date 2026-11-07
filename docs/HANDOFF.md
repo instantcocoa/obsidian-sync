@@ -213,6 +213,28 @@ Obsidian; everything found is fixed and merged:
    never swept; doc drift (TTL 1 h, no delete route, `obsync.db`);
    `platforms.yml` had no `permissions:` block. All fixed;
    `server/internal/api/review6_test.go`. Released as 0.1.5.
+1e. **Seventh review (2026-11-07): the sixth round's own fixes, read as
+   hurried changes with edges. Both sides 3.5/5 → fixed, released as
+   0.1.6.** Plugin (7 proofs, `review7-*.test.ts`): the new inconsistent-
+   head refusal in `settle()` froze a path for every honest writer (now
+   rebased on as a tombstone); the fold-table clash refusal blocked
+   `café.md`/`cafe.md` and case-only folder renames (now a volume probe,
+   plus respelling of an emptied parent folder); `reencrypt()` had no
+   failure isolation (one bad member blob wedged every rotation; now a
+   marked placeholder, and "Rotate keys" resumes an unfinished
+   re-encryption); `applyBatch` prefetched a whole batch (now a window of
+   `parallel`, and ciphertext larger than `meta.size` admits is refused
+   before decryption); `ensureOwnName` could undo a rename (renames now
+   wait for it). Server (5 proofs, `review7_test.go`): `POST /invites` was
+   the one write without the in-transaction re-check; the in-transaction
+   401 said "forbidden" so an honest device whose upload crossed a
+   rotation read it as removal (the body now says why); the blob index was
+   committed before the file (a crash during re-encryption would have
+   pruned the only key that read the blob; file first now, orphan files
+   swept); `pub_kex` was length-checked only (curve-checked now, and the
+   plugin treats an unimportable key as unproven); `--trust-proxy` was a
+   boolean (CIDRs now). `fold-volume.test.ts` measures each CI volume's
+   folding. govulncheck still needs a run from a host with egress.
 2. **Human security review.** Hand `docs/SECURITY-REVIEW-GUIDE.md` to a
    specialist. When findings come back, fix them in the style of the
    existing review rounds: a failing test first (`security_test.go` for the

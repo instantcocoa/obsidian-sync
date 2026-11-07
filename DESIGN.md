@@ -973,9 +973,24 @@ on APFS `obſync` (long s) is the obsync directory, which a bare
 case-insensitive regex would not match (measured by
 `plugin/test/fold-volume.test.ts` on each CI platform: APFS also folds the
 Kelvin sign, sharp s, NFD and the fi ligature; NTFS folds ASCII case only;
-ext4 folds nothing; `fold()` covers every pair any of them folds). A write whose name, or any folder
-on the way to it, the volume would fold onto a differently spelled existing
-entry is refused and reported rather than replacing that entry's bytes.
+ext4 folds nothing; `fold()` covers every pair any of them folds). Folding
+is for *exclusions*, where over-matching is harmless. Whether a write may
+land is decided by asking the volume instead: a path that resolves to an
+existing entry no folder lists under exactly that spelling is refused and
+reported rather than replacing that entry's bytes, while names the volume
+keeps apart (`café.md` and `cafe.md` on APFS) stay apart here too. A
+case-only folder rename arrives as deletes and puts and Obsidian leaves the
+emptied folder behind; an empty parent folder that exists only under another
+casing is renamed to the requested spelling before the put, so the files do
+not land under the old name forever. Failure isolation is one rule for every
+consumer of remote rows: the applier skips an unapplicable op; a conflict
+head whose metadata is inconsistent is rebased on as a tombstone so the
+honest push supersedes it rather than conflicting forever; re-encryption
+carries an undecryptable blob over as a marked placeholder (and unreadable
+metadata as an empty-path placeholder no applier accepts) so one member's
+garbage cannot hold the vault on retired keys; a batch's blobs are fetched a
+bounded window ahead and each download is refused before decryption when it
+is larger than the authenticated size admits.
 Paths carrying `: < > " | ? *` are rejected outright (an NTFS `::$DATA`
 suffix names the file itself and would escape a per-file exclusion;
 Obsidian forbids these characters in names on every platform). The invite

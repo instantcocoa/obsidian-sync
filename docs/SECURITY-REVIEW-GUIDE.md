@@ -163,11 +163,14 @@ and the local filesystem.
   Unicode normalisation tricks, overlong encodings, case folding, combining
   marks, or a path that is safe on Linux and dangerous on Windows or macOS
   (case-insensitive and normalising filesystems).
-- `fold()` (NFKC, both case directions, marks stripped) is applied at every
-  remote-string-versus-local-name comparison: `aliasesConfigDir`,
-  `compileExclusions`, `ConfigHooks.afterApply`, and the fold-clash refusal
-  in both filesystems' write paths. The sixth review found it applied to the
-  first of these only (`/obsync/i` does not match `obſync`, APFS does).
+- `fold()` (NFKC, both case directions, marks stripped) is applied where
+  over-matching is safe: `aliasesConfigDir`, `compileExclusions`,
+  `ConfigHooks.afterApply`. The sixth review found it applied to the first
+  of these only (`/obsync/i` does not match `obſync`, APFS does). Whether a
+  write may land is decided by probing the volume (`refuseAliasClash` /
+  `refuseCaseClash`: the path resolves but no entry is spelled exactly so);
+  the seventh review found a fold-table refusal there blocked names APFS
+  keeps apart and case-only folder renames.
   Check for any comparison site still using `toLowerCase()` or a bare `i`
   flag. `plugin/test/fold-volume.test.ts` measures each CI volume: APFS
   folds ASCII case, U+017F, U+212A, U+00DF, NFD and U+FB01; NTFS (GitHub's

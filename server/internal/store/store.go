@@ -1135,6 +1135,10 @@ func (s *Store) AppendOps(ctx context.Context, vault string, by Actor, ops []Op)
 		if err := s.actorLiveTx(ctx, tx, vault, by); err != nil {
 			return err
 		}
+		minEpoch, err := s.minEpoch(ctx, tx, vault, epoch)
+		if err != nil {
+			return err
+		}
 		for i, o := range ops {
 			results[i].OpID = o.OpID
 			if err := s.validateOp(o); err != nil {
@@ -1143,6 +1147,12 @@ func (s *Store) AppendOps(ctx context.Context, vault string, by Actor, ops []Op)
 			}
 			if o.MetaEpoch > epoch {
 				results[i].Error = "meta_epoch ahead of vault epoch"
+				continue
+			}
+			if o.MetaEpoch < minEpoch {
+				// Same floor as for blobs: metadata under a retired epoch would
+				// pull min_epoch back and no live device could read it.
+				results[i].Error = fmt.Sprintf("meta_epoch %d below the vault's min_epoch %d", o.MetaEpoch, minEpoch)
 				continue
 			}
 			// Idempotent replay.

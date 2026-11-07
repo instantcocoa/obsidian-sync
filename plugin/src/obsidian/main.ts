@@ -719,10 +719,11 @@ export default class ObsyncPlugin extends Plugin {
     return this.guard(async () => {
       if (!(await ConfirmModal.ask(this.app, "Rotate vault keys?", "New data uses a fresh key and all existing data is re-encrypted. Nothing is removed.", "Rotate"))) return;
       const s = this.need();
-      await removeDevice(s, "", (done) => this.statusEl.setText(`obsync re-encrypting ${done}`), (ids, names) => this.confirmUnproven(ids, names));
+      const r = await removeDevice(s, "", (done) => this.statusEl.setText(`obsync re-encrypting ${done}`), (ids, names) => this.confirmUnproven(ids, names));
       this.settings.identity = s.identity;
       await this.saveSettings();
-      new Notice("obsync: keys rotated.");
+      const skipped = r.skipped.length ? ` ${r.skipped.length} unreadable item(s) were replaced by placeholders; see the console.` : "";
+      new Notice(r.resumed ? `obsync: finished the previous rotation's re-encryption; run Rotate keys again for a new epoch.${skipped}` : `obsync: keys rotated.${skipped}`, 10000);
     });
   }
 

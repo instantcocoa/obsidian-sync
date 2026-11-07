@@ -235,6 +235,23 @@ Obsidian; everything found is fixed and merged:
    plugin treats an unimportable key as unproven); `--trust-proxy` was a
    boolean (CIDRs now). `fold-volume.test.ts` measures each CI volume's
    folding. govulncheck still needs a run from a host with egress.
+1f. **Eighth review (2026-11-07 night): the seventh round's fixes. Plugin
+   3.5/5, server 4/5 → fixed, released as 0.1.7.** Plugin (9 proofs,
+   `review8-*.test.ts`): the inconsistent-head rebase was a no-op for a
+   local delete (now rebased as if the bad head were ours, so the delete
+   lands); re-encryption still rethrew non-CryptoError failures and "no key
+   for epoch" (now only transport errors abort; keys are refreshed once,
+   then a placeholder); dropping the parent-level clash check let a
+   case-twin folder from Linux overwrite a Mac file (every segment is
+   probed again, after the empty-folder respelling); a blob shared by many
+   ops was fetched once per op (refcounted); the rename guard was keyed by
+   Session (per device, all in-flight rewrites); re-encryption dropped
+   compression and padding (kept). Server (1 proof + 7 confirmations,
+   `review8_test.go`): a row write failing after the file rename left new
+   bytes under the old row (the previous file is kept aside and restored);
+   plus the epoch floor the plugin review asked for (blob header and
+   meta_epoch below min_epoch are refused), clearer pre-check 401 bodies,
+   orphan files deleted by path, README on `--trust-proxy 0.0.0.0/0`.
 2. **Human security review.** Hand `docs/SECURITY-REVIEW-GUIDE.md` to a
    specialist. When findings come back, fix them in the style of the
    existing review rounds: a failing test first (`security_test.go` for the

@@ -80,20 +80,28 @@ export class NodeFS implements VaultFS {
    * ObsidianFS.refuseCaseClash; the engine skips and reports.
    */
   private async refuseAliasClash(path: string): Promise<void> {
-    const raw = this.raw.get(path) ?? path;
-    try {
-      await fsp.stat(this.abs(path));
-    } catch {
-      return; // nothing answers for this name: a new entry
+    // Every segment, not just the last: "notes/A.md" written through a
+    // folder the volume resolves to "Notes/" would replace Notes/A.md. An
+    // empty twin folder has been renamed by alignParentSpelling before this
+    // runs, so a differently spelled parent that still resolves has contents.
+    const segs = (this.raw.get(path) ?? path).split("/");
+    let rel = "";
+    for (const seg of segs) {
+      const want = rel ? `${rel}/${seg}` : seg;
+      const resolves = await fsp.stat(this.abs(want)).then(
+        () => true,
+        () => false,
+      );
+      if (!resolves) return; // nothing answers for this name here or below: new entries
+      const entries = await fsp.readdir(this.abs(rel)).catch(() => null);
+      if (entries) {
+        const nfc = seg.normalize("NFC");
+        if (!entries.some((e) => e === seg || e.normalize("NFC") === nfc)) {
+          throw new Error(`"${want}" resolves to an entry spelled differently on this volume; refusing to write through it`);
+        }
+      }
+      rel = want;
     }
-    const i = raw.lastIndexOf("/");
-    const dir = i < 0 ? "" : raw.slice(0, i);
-    const seg = raw.slice(i + 1);
-    const entries = await fsp.readdir(this.abs(dir)).catch(() => null);
-    if (!entries) return;
-    const nfc = seg.normalize("NFC");
-    if (entries.some((e) => e === seg || e.normalize("NFC") === nfc)) return; // spelled exactly so (a normalisation twin is the same name)
-    throw new Error(`"${path}" resolves to an entry spelled differently on this volume; refusing to replace it`);
   }
 
   /**

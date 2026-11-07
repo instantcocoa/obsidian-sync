@@ -178,8 +178,27 @@ export class ObsidianFS implements VaultFS {
    */
   private async refuseCaseClash(path: string): Promise<void> {
     if (!(await this.volumeIgnoresCase())) return;
-    if ((await this.app.vault.adapter.exists(path)) && !(await this.exactName(path))) {
-      throw new Error(`"${path}" resolves to an entry spelled differently on this volume; refusing to replace it`);
+    // Every segment: a folder the volume resolves under another spelling
+    // would route the write into that folder's files. The adapter lists a
+    // folder's children under the spelling it was asked with, so each level
+    // is checked by its own basename against its parent's listing.
+    const segs = path.split("/");
+    let rel = "";
+    for (const seg of segs) {
+      const want = rel ? `${rel}/${seg}` : seg;
+      if (!(await this.app.vault.adapter.exists(want))) return;
+      let names: string[];
+      try {
+        const l = await this.app.vault.adapter.list(rel);
+        names = [...l.files, ...l.folders].map((e) => {
+          const p = normalizePath(e);
+          return p.slice(p.lastIndexOf("/") + 1);
+        });
+      } catch {
+        return; // listing failed: let the write decide
+      }
+      if (!names.includes(seg)) throw new Error(`"${want}" resolves to an entry spelled differently on this volume; refusing to write through it`);
+      rel = want;
     }
   }
 

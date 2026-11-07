@@ -48,8 +48,9 @@ proxy pass `--trust-proxy CIDR[,CIDR]` (the proxy's own addresses) so the
 limiter and the security log key on the last `X-Forwarded-For` entry, the one
 your proxy appended, for requests that arrive from those addresses; requests
 from any other peer are keyed on the peer itself, so nothing that reaches the
-listener directly can pick its own bucket. Without the flag every client
-behind a proxy would share the proxy's address.
+listener directly can pick its own bucket. Give it the proxy's addresses,
+never `0.0.0.0/0` (that would trust every IPv4 peer's header again). Without
+the flag every client behind a proxy would share the proxy's address.
 All `X-Forwarded-For` lines are read as one list, so a proxy that adds its
 own line (HAProxy's default) is handled the same as one that appends to the
 client's; an entry that is not an IP address is ignored and the peer address

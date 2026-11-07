@@ -269,6 +269,11 @@ export class VaultCrypto {
    * MAX_PLAIN, the largest blob a default server stores.
    */
   async decryptBlob(blobId: string, blob: Uint8Array, opts: { maxPlain?: number } = {}): Promise<Uint8Array> {
+    return (await this.decryptBlobInfo(blobId, blob, opts)).plaintext;
+  }
+
+  /** decryptBlob plus how the body was stored, so re-encryption can keep the same compression and padding. */
+  async decryptBlobInfo(blobId: string, blob: Uint8Array, opts: { maxPlain?: number } = {}): Promise<{ plaintext: Uint8Array; compressed: boolean; padded: boolean }> {
     const limit = Math.min(opts.maxPlain ?? MAX_PLAIN, MAX_PLAIN);
     if (blob.length < BLOB_HEADER_LEN + 16 || blob[0] !== BLOB_VERSION) throw new CryptoError("bad blob header");
     const epoch = readU32le(blob, 1);
@@ -293,7 +298,7 @@ export class VaultCrypto {
     // Belt and braces: AEAD already bound the id, but a buggy writer could
     // have mislabelled the content. Never trust a mismatched blob.
     if ((await this.blobId(plaintext)) !== blobId) throw new CryptoError("blob_id mismatch after decrypt");
-    return plaintext;
+    return { plaintext, compressed: (flags & 1) !== 0, padded: (flags & 2) !== 0 };
   }
 
   static blobEpoch(blob: Uint8Array): number {

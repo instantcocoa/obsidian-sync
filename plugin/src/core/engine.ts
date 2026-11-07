@@ -864,10 +864,12 @@ export class Engine {
     // here and bounds what each download may be before anything is decrypted
     // (writeRemote); the window bounds how many are held at once.
     const queue: string[] = [];
+    const uses = new Map<string, number>(); // ops in this batch still to use each blob
     for (const d of ordered) {
       if (this.excluded(d.logical) || !d.op.blob_id) continue;
       if (this.state.files[d.logical]?.hash === d.op.blob_id) continue;
-      queue.push(d.op.blob_id);
+      if (!uses.has(d.op.blob_id)) queue.push(d.op.blob_id);
+      uses.set(d.op.blob_id, (uses.get(d.op.blob_id) ?? 0) + 1);
     }
     const blobs: BlobCache = new Map();
     const window = Math.max(1, Math.min(this.cfg.parallel, 8));
@@ -915,7 +917,12 @@ export class Engine {
         }
       }
       this.setStatus({ progress: { done: ++done, total: last.size } });
-      if (d.op.blob_id) blobs.delete(d.op.blob_id);
+      if (d.op.blob_id) {
+        // One blob under many names is downloaded once per batch, not once per name.
+        const left = (uses.get(d.op.blob_id) ?? 1) - 1;
+        uses.set(d.op.blob_id, left);
+        if (left <= 0) blobs.delete(d.op.blob_id);
+      }
       prefetch();
     }
     this.setStatus({ progress: undefined });
@@ -1257,8 +1264,13 @@ export class Engine {
       // conflict with the same bad head forever.)
       if (meta.path.normalize("NFC") !== p.logical || (meta.blob !== undefined && meta.blob !== r.conflict.blob_id)) {
         this.log("error", `conflict head for ${p.logical} is inconsistent (path ${meta.path}, blob ${meta.blob ?? "null"} vs ${r.conflict.blob_id ?? "null"}); our version will replace it`);
-        this.hooks.onSkipped?.(p.logical, "the server's record of the other version is inconsistent; yours replaces it");
-        this.state.files[p.logical] = { hash: null, seq: r.conflict.seq, at: r.conflict.created_at, size: 0, mtime: 0 };
+        this.hooks.onSkipped?.(this.device(p.logical), "the server's record of the other version is inconsistent; yours replaces it");
+        // Rebase on the bad head. For an edit, as a tombstone (our bytes are
+        // the file). For a delete, as if the bad head were what we had: the
+        // next scan then finds the file gone and pushes the delete against
+        // it; a tombstone base would make the delete a no-op and leave the
+        // bad row as head for everyone.
+        this.state.files[p.logical] = { hash: p.bytes ? null : r.conflict.blob_id, seq: r.conflict.seq, at: r.conflict.created_at, size: 0, mtime: 0 };
         this.markDirty(p.logical);
         return;
       }

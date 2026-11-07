@@ -1005,8 +1005,12 @@ func (s *Server) putBlob(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if epoch < 1 || epoch > vault.Epoch {
-		writeErr(w, http.StatusBadRequest, fmt.Sprintf("blob epoch %d outside [1,%d]", epoch, vault.Epoch))
+	// A blob under an epoch older than anything the vault still holds would
+	// drag min_epoch back down: every device has pruned that key, so nobody
+	// could read it, and re-encryption could never finish. Only a member who
+	// kept a retired key can produce one; refuse it.
+	if epoch < vault.MinEpoch || epoch > vault.Epoch {
+		writeErr(w, http.StatusBadRequest, fmt.Sprintf("blob epoch %d outside [%d,%d]", epoch, vault.MinEpoch, vault.Epoch))
 		return
 	}
 	// Every upload comes from a key holder (route requires vault authority).
@@ -1056,19 +1060,36 @@ func (s *Server) putBlob(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		return
 	}
-	if live, err := s.st.CheckVaultAuth(r.Context(), v, vaultAuth(r)); err != nil || !live || !s.st.DeviceLive(r.Context(), dev(r).ID) {
+	if !s.st.DeviceLive(r.Context(), dev(r).ID) {
 		s.blobs.Delete(v, stage)
-		s.fail(w, fmt.Errorf("%w: device revoked or vault authority changed", store.ErrForbidden))
+		s.fail(w, fmt.Errorf("%w: device revoked", store.ErrForbidden))
 		return
 	}
-	if err := s.blobs.Promote(v, stage, id); err != nil {
+	if live, err := s.st.CheckVaultAuth(r.Context(), v, vaultAuth(r)); err != nil || !live {
+		s.blobs.Delete(v, stage)
+		s.fail(w, fmt.Errorf("%w: vault authority changed", store.ErrForbidden))
+		return
+	}
+	// The previous bytes stay aside until the row commits: a row write that
+	// fails (database busy, device revoked meanwhile) must not leave new
+	// bytes under the old description, where a GET would serve them under
+	// the old epoch and the old size.
+	prev := id + "-prev-" + strconv.FormatInt(time.Now().UnixNano(), 36)
+	had, err := s.blobs.Swap(v, stage, id, prev)
+	if err != nil {
 		s.blobs.Delete(v, stage)
 		s.fail(w, err)
 		return
 	}
 	if _, err := s.st.UpsertBlob(r.Context(), v, id, actor(r), epoch, n, replace); err != nil {
+		if rerr := s.blobs.Restore(v, prev, id, had); rerr != nil {
+			s.log.Error("blob row write failed and the previous file could not be restored", "vault", v, "blob", id, "err", rerr)
+		}
 		s.fail(w, err)
 		return
+	}
+	if had {
+		s.blobs.Delete(v, prev)
 	}
 	w.Header().Set("X-Blob-Epoch", strconv.FormatInt(epoch, 10))
 	w.WriteHeader(http.StatusCreated)
@@ -1263,11 +1284,11 @@ func (s *Server) GC(ctx context.Context, retention time.Duration) (int, error) {
 		if ids, err := s.blobs.Orphans(v.ID, time.Hour); err != nil {
 			s.log.Warn("gc: list orphan files", "vault", v.ID, "err", err)
 		} else {
-			for _, id := range ids {
-				lk := s.blobLock(id)
+			for _, o := range ids {
+				lk := s.blobLock(o.ID)
 				lk.Lock()
-				if _, err := s.st.GetBlob(ctx, v.ID, id); errors.Is(err, store.ErrNotFound) {
-					if derr := s.blobs.Delete(v.ID, id); derr == nil {
+				if _, err := s.st.GetBlob(ctx, v.ID, o.ID); errors.Is(err, store.ErrNotFound) {
+					if derr := s.blobs.DeletePath(o.Path); derr == nil {
 						removed++
 					}
 				}

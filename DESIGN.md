@@ -732,7 +732,12 @@ plugin re-syncs on the latter, exactly as for the authority middleware's
 before it records the index row, so a crash between the two leaves a file
 ahead of its row (re-encrypted again next pass) and never a row ahead of
 its file (which would drop the blob from the re-encryption listing while
-every device prunes the key that reads it).
+every device prunes the key that reads it); the previous file is kept aside
+until the row commits and put back if it does not, so a failed row write
+never leaves new bytes under the old description. Epochs have a floor as
+well as a ceiling: a blob header or `meta_epoch` below the vault's
+`min_epoch` is refused, because no live device holds that key any more and
+the row would drag `min_epoch` back and hold the vault on retired keys.
 
 ### 5.8 Vault authority token
 

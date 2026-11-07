@@ -102,7 +102,13 @@ func adminToken(data, flagVal string) (string, error) {
 	if err := os.WriteFile(p, []byte(tok+"\n"), 0o600); err != nil {
 		return "", err
 	}
-	fmt.Fprintf(os.Stderr, "generated admin token (saved to %s):\n  %s\n", p, tok)
+	// The token is shown only to a person at a terminal; under systemd stderr
+	// is the journal, which more accounts can read than the token file.
+	if fi, err := os.Stderr.Stat(); err == nil && fi.Mode()&os.ModeCharDevice != 0 {
+		fmt.Fprintf(os.Stderr, "generated admin token (saved to %s):\n  %s\n", p, tok)
+	} else {
+		fmt.Fprintf(os.Stderr, "generated admin token, saved to %s\n", p)
+	}
 	return tok, nil
 }
 
@@ -178,7 +184,9 @@ func serve(args []string) error {
 			},
 		}
 		h.Handler = hsts(srv)
-		go func() { errc <- http.ListenAndServe(":80", m.HTTPHandler(nil)) }()
+		// The ACME and redirect listener answers nothing worth waiting for.
+		plain := &http.Server{Addr: ":80", Handler: m.HTTPHandler(nil), ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 30 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 30 * time.Second}
+		go func() { errc <- plain.ListenAndServe() }()
 		go func() { errc <- h.ListenAndServeTLS("", "") }()
 		log.Info("serving", "https", *acme, "data", *data)
 	} else {

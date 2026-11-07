@@ -581,7 +581,10 @@ loses the vault. That is the correct default.
 Parameter choices, with the reasoning so they can be reviewed:
 
 - **PBKDF2-HMAC-SHA-256, 2 000 000 iterations for the recovery passphrase
-  (600 000 for the on-device PIN), 16-byte random salt.** 600 000 is
+  (600 000 for the on-device PIN), 16-byte random salt.** A join tries
+  2 000 000 first and then 600 000, which versions before 0.1.3 used, since
+  the server reveals only the salt before the proof; a passphrase that
+  opened at the old count is re-set at the new one once joined. 600 000 is
   the OWASP Password Storage Cheat Sheet recommendation for PBKDF2 with
   SHA-256 (2023 revision). Argon2id would be preferable but is not in
   WebCrypto, and shipping a WASM implementation would add an unaudited
@@ -681,7 +684,10 @@ Accepted residual exposure:
    roster is the whole access-control list, which is why every device is
    told when the roster grows (the feed carries a roster hash; a newcomer
    raises a notice that cannot be silenced) and why names that repeat are
-   flagged in Manage devices.
+   flagged in Manage devices. "Newcomer" is judged against the roster last
+   seen, kept both in the sync state and beside the identity; with neither
+   (a rebuilt or lost state file) a device enrolled after this one counts
+   as new, so a lost file cannot hide one.
 4. **Keys are sealed by default where that is free.** A desktop stores them
    in the OS keychain at enrolment without asking; a phone is offered a PIN
    once. A vault folder that another tool also copies (`.git`, Dropbox,
@@ -979,7 +985,9 @@ device does not take the server's word for it: a lying server could say
 the same thing to make every device write new content under a key a
 removed member still holds. Sync pauses with an error notice that says
 what is and is not expected, and the keys stay as they were. A person who
-knows a backup was restored runs "Accept server restore"; the device then
+knows a backup was restored runs "Accept server restore" (refused when no
+regression is pending, and spent by the next sync whether or not it was
+needed); the device then
 makes the older epoch current again (the restored authority hash and keybox
 are that epoch's) while keeping the newer keys, which still open anything
 written under them, and enrolment offers the server only the epochs it

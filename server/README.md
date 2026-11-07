@@ -22,7 +22,8 @@ go build -o obsync ./cmd/obsync
 ```
 
 On first start an admin token is generated and saved to `DIR/admin-token`
-(or pass `OBSYNC_ADMIN_TOKEN`; `--admin-token` works too but shows in `ps`
+(shown on the terminal only when stderr is one, never into a journal; or
+pass `OBSYNC_ADMIN_TOKEN`; `--admin-token` works too but shows in `ps`
 to every local user). Everything under `DIR` is created private to the
 server's user (umask 077; the database, its WAL and the blobs are 0600), and
 the server should run as its own user: `obsync.service` in this directory

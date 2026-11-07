@@ -931,7 +931,7 @@ func (s *Server) putBlob(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, err)
 		return
 	}
-	body := http.MaxBytesReader(w, r.Body, s.cfg.MaxBlobSize)
+	body := http.MaxBytesReader(w, &idleReader{r: r.Body, rc: http.NewResponseController(w)}, s.cfg.MaxBlobSize)
 	head := make([]byte, blobHeaderLen)
 	if _, err := io.ReadFull(body, head); err != nil {
 		writeErr(w, http.StatusBadRequest, "blob too short")
@@ -1018,7 +1018,7 @@ func (s *Server) getBlob(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Header().Set("X-Blob-Epoch", strconv.FormatInt(info.Epoch, 10))
 	w.Header().Set("Cache-Control", "private, max-age=0")
-	http.ServeContent(w, r, id, time.UnixMilli(info.CreatedAt), f)
+	http.ServeContent(&idleWriter{ResponseWriter: w, rc: http.NewResponseController(w)}, r, id, time.UnixMilli(info.CreatedAt), f)
 }
 
 // ---------- ops ----------
@@ -1176,4 +1176,33 @@ func (s *Server) GC(ctx context.Context, retention time.Duration) (int, error) {
 		}
 	}
 	return removed, nil
+}
+
+// blobIdle is how long a blob transfer may stall before the connection is
+// dropped. The server's 15-minute request deadline suits every other route;
+// a large blob on a slow link needs "progress keeps the connection alive".
+const blobIdle = 2 * time.Minute
+
+// idleReader extends the read deadline on every read of a blob body.
+type idleReader struct {
+	r  io.ReadCloser
+	rc *http.ResponseController
+}
+
+func (b *idleReader) Read(p []byte) (int, error) {
+	_ = b.rc.SetReadDeadline(time.Now().Add(blobIdle))
+	return b.r.Read(p)
+}
+
+func (b *idleReader) Close() error { return b.r.Close() }
+
+// idleWriter extends the write deadline on every write of a blob download.
+type idleWriter struct {
+	http.ResponseWriter
+	rc *http.ResponseController
+}
+
+func (b *idleWriter) Write(p []byte) (int, error) {
+	_ = b.rc.SetWriteDeadline(time.Now().Add(blobIdle))
+	return b.ResponseWriter.Write(p)
 }

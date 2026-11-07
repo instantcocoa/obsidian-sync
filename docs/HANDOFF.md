@@ -177,6 +177,15 @@ Obsidian; everything found is fixed and merged:
    regenerated there). CI is green on all five jobs at `c069b18`. Not yet
    done: a device re-run of the 0.1.3 plugin (the iPhone and iPad were lent
    to another session when it was cut).
+1c. **Fifth review (2026-11-07): the fourth round's own changes, 3/5 → fixed.**
+   One high (the recovery KDF change would have rejected every passphrase
+   set before 0.1.3; a join now tries both counts and re-sets at the new
+   one), three medium (restore acceptance never expired; a lost state file
+   hid newcomers; blob transfers inherited the 15-minute deadline) and four
+   low (admin token printed to the journal, no timeouts on :80, sealing
+   offered only at enrolment, a paused device re-downloading the snapshot).
+   All fixed; `review5_test.go`, `review5.test.ts`. util's admin token was
+   rotated and its journal purged afterwards.
 2. **Human security review.** Hand `docs/SECURITY-REVIEW-GUIDE.md` to a
    specialist. When findings come back, fix them in the style of the
    existing review rounds: a failing test first (`security_test.go` for the

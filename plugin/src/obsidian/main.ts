@@ -56,6 +56,10 @@ interface Settings {
   syncNotices: boolean;
   /** The one-time warning about a second tool mirroring the vault folder has been shown. */
   mirrorWarned: boolean;
+  /** Key protection was chosen or offered once (keychain on desktop, PIN on phones). */
+  protectionOffered: boolean;
+  /** Live device ids as last seen; survives a lost state file so a newcomer is never absorbed silently. */
+  knownDevices?: string[];
 }
 
 /** Where an unloading instance leaves its engine's stop promise for the next one (see onunload). */
@@ -76,6 +80,7 @@ const DEFAULT_SETTINGS: Settings = {
   debounceMs: 1500,
   syncNotices: true,
   mirrorWarned: false,
+  protectionOffered: false,
 };
 
 /**
@@ -298,6 +303,7 @@ export default class ObsyncPlugin extends Plugin {
         deviceName: identity.deviceName,
         privJwk: identity.privJwk,
         exclusions: this.effectiveExclusions(),
+        ...(this.settings.knownDevices ? { knownDevices: this.settings.knownDevices } : {}),
         compress: this.settings.compress,
         pad: this.settings.pad,
         debounceMs: this.settings.debounceMs,
@@ -316,6 +322,10 @@ export default class ObsyncPlugin extends Plugin {
             `obsync: the server's key epoch went backwards (${from} → ${to}), so sync is paused on this device. That is expected only if the server was just restored from a backup taken before a key rotation: if so, run the command "Accept server restore". If not, rotate the vault keys from a device you trust before accepting anything.`,
             0,
           ),
+        onRosterChanged: (ids) => {
+          this.settings.knownDevices = ids;
+          void this.saveSettings();
+        },
         onNewDevices: (ds) =>
           new Notice(
             `obsync: new device${ds.length > 1 ? "s" : ""} joined this vault: ${ds.map((d) => d.name).join(", ")}. If that was not you, open Manage devices and remove it; the keys rotate and it is locked out.`,
@@ -343,6 +353,9 @@ export default class ObsyncPlugin extends Plugin {
     );
     await this.engine.start();
     void this.warnIfMirrored();
+    // Installs from before keys were sealed by default, and a reload that
+    // interrupted the seal at enrolment, get the same one-time offer.
+    if (!this.settings.protectionOffered) void this.defaultProtection();
     void this.checkVaultAuthority();
   }
 
@@ -370,6 +383,8 @@ export default class ObsyncPlugin extends Plugin {
   private async adopt(session: Session, what: string): Promise<void> {
     this.settings.identity = session.identity;
     this.removedNoticed = false;
+    // The roster as it stands at enrolment: later arrivals are news.
+    this.settings.knownDevices = (await listDevices(session)).filter((d) => !d.revoked_at).map((d) => d.id);
     await this.saveSettings();
     await this.restartEngine();
     this.routineNotice(`obsync: ${what}. Initial sync running.`);
@@ -383,6 +398,9 @@ export default class ObsyncPlugin extends Plugin {
    */
   private async defaultProtection(): Promise<void> {
     if (this.settings.protection.method !== "none" || !this.settings.identity) return;
+    if (this.settings.protectionOffered) return;
+    this.settings.protectionOffered = true;
+    await this.saveSettings();
     try {
       if (!Platform.isMobile) {
         if (safeStorageAvailable()) {
@@ -441,7 +459,11 @@ export default class ObsyncPlugin extends Plugin {
         "Accept restore",
       );
       if (!ok) return;
-      this.engine?.acceptServerRestore();
+      if (!this.engine?.regressionPending()) {
+        new Notice("obsync: nothing to accept; the server has not reported an older key epoch.", 8000);
+        return;
+      }
+      this.engine.acceptServerRestore();
       new Notice("obsync: restore accepted; sync resumes.");
     });
   }

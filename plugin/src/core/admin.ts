@@ -29,8 +29,7 @@ import {
   wrapEpochKey,
   type DeviceKeypair,
   type Keyring,
-  type KeyringJSON,
-} from "./crypto";
+  type KeyringJSON, RECOVERY_ITERATIONS, LEGACY_RECOVERY_ITERATIONS } from "./crypto";
 import { b64, fromB64, randomBytes } from "./encoding";
 import { Client, HttpError, type WireDevice } from "./transport";
 
@@ -255,15 +254,26 @@ export async function joinWithPassphrase(server: string, vaultId: string, passph
   // The server hands out only the KDF salt; the wrapped key comes back from
   // the join itself, after the derived auth token proved the passphrase.
   const info = await Client.getRecovery(server, vaultId, fetchImpl);
-  const { wrapKey, authToken } = await deriveRecovery(passphrase, fromB64(info.salt));
   const kp = await generateKeypair();
-  let joined;
-  try {
-    joined = await Client.recoveryJoin(server, vaultId, authToken, kp.pub, new Uint8Array(0), fetchImpl);
-  } catch (e) {
-    if (e instanceof HttpError && e.status === 401) throw new Error("wrong recovery passphrase");
-    throw e;
+  // The server does not say how many iterations the passphrase was set
+  // with (only the salt leaves it before the proof), so try today's count,
+  // then the one versions before 0.1.3 used. A legacy hit is re-set at
+  // today's count once joined.
+  let joined: Awaited<ReturnType<typeof Client.recoveryJoin>> | null = null;
+  let wrapKey: Uint8Array | null = null;
+  let legacy = false;
+  for (const iterations of [RECOVERY_ITERATIONS, LEGACY_RECOVERY_ITERATIONS]) {
+    const d = await deriveRecovery(passphrase, fromB64(info.salt), iterations);
+    try {
+      joined = await Client.recoveryJoin(server, vaultId, d.authToken, kp.pub, new Uint8Array(0), fetchImpl);
+      wrapKey = d.wrapKey;
+      legacy = iterations !== RECOVERY_ITERATIONS;
+      break;
+    } catch (e) {
+      if (!(e instanceof HttpError && e.status === 401)) throw e;
+    }
   }
+  if (!joined || !wrapKey) throw new Error("wrong recovery passphrase");
   const privJwk = await openRecoveryWith(wrapKey, fromB64(joined.recovery_enc));
   const epochs = new Map<number, Uint8Array>();
   let kId: Uint8Array | null = null;
@@ -274,5 +284,7 @@ export async function joinWithPassphrase(server: string, vaultId: string, passph
   }
   if (!kId || epochs.size === 0) throw new Error("recovery identity holds no keys for this vault");
   const keyring: Keyring = { kId, epochs, current: Math.max(joined.epoch, ...epochs.keys()) };
-  return finishEnrol(server, vaultId, deviceName, keyring, kp, joined, fetchImpl);
+  const s = await finishEnrol(server, vaultId, deviceName, keyring, kp, joined, fetchImpl);
+  if (legacy) await setRecoveryPassphrase(s, passphrase);
+  return s;
 }

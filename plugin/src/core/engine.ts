@@ -62,6 +62,8 @@ export interface EngineConfig {
   vaultId: string;
   deviceId: string;
   deviceName: string;
+  /** Live device ids known at enrolment (kept by the plugin beside the identity), so a lost state file cannot hide a newcomer. */
+  knownDevices?: string[];
   /** Device ECDH private key, to unwrap keybox rows after a rotation. */
   privJwk: JsonWebKey;
   exclusions: string[];
@@ -114,6 +116,8 @@ export interface EngineHooks {
   onEpochRegressed?: (from: number, to: number) => void;
   /** Devices that appeared in the roster since the last sync. The roster is the trust boundary; a stranger here is the leak signal. */
   onNewDevices?: (devices: { id: string; name: string }[]) => void;
+  /** The live roster as last seen; the plugin persists it beside the identity. */
+  onRosterChanged?: (ids: string[]) => void;
 }
 
 const DEFAULTS = {
@@ -163,7 +167,7 @@ export class Engine {
   private status: Status = { phase: "idle", pending: 0 };
   /** Local deletions held back by the mass-deletion guard, awaiting confirmation. */
   heldDeletes: string[] = [];
-  private cfg: Required<Omit<EngineConfig, "noLive" | "compress" | "pad">> & EngineConfig;
+  private cfg: Required<Omit<EngineConfig, "noLive" | "compress" | "pad" | "knownDevices">> & EngineConfig;
 
   constructor(
     public readonly fs: VaultFS,
@@ -517,8 +521,14 @@ export class Engine {
           this.wantSync = false;
           this.setStatus({ phase: "syncing", message: undefined });
           await this.retryBusy();
-          await this.pull();
-          await this.push();
+          try {
+            await this.pull();
+            await this.push();
+          } finally {
+            // Acceptance covers one sync: armed and unused, it must not wait
+            // for a later, possibly hostile, regression.
+            this.restoreAccepted = false;
+          }
           this.setStatus({ phase: "idle", lastSync: Date.now() });
         } while (this.wantSync && !this.stopped);
       } catch (err) {
@@ -670,6 +680,11 @@ export class Engine {
 
   private async pull(): Promise<void> {
     const v = this.cfg.vaultId;
+    if (this.regressionNoticed && !this.restoreAccepted) {
+      // Paused on a regression: one cheap request per cycle, not a snapshot.
+      const info = await this.client.vault(v);
+      if (info.epoch < this.vc.keyring.current) throw new SyncError(`the server's key epoch is still behind (${this.vc.keyring.current} -> ${info.epoch}); sync stays paused until "Accept server restore"`);
+    }
     if (this.state.cursor === 0) {
       const snap = await this.fullSnapshot(v);
       await this.adoptEpoch(snap.epoch, snap.min_epoch);
@@ -705,16 +720,26 @@ export class Engine {
   private async watchRoster(hash: string | undefined): Promise<void> {
     if (!hash || hash === this.state.roster) return;
     const live = (await this.client.devices(this.cfg.vaultId)).filter((d) => !d.revoked_at);
-    const first = this.state.devices === undefined;
-    const known = new Set(this.state.devices ?? []);
+    // What counts as "already there": the roster last seen (state file), or
+    // the one the plugin kept beside the identity since enrolment. With
+    // neither (a fresh engine, a lost state file, a rebuild) the roster's
+    // own timestamps decide: a device enrolled after this one is news, one
+    // enrolled before it was there when we joined. A lost state file can
+    // therefore never hide a newcomer.
+    const baseline = this.state.devices ?? this.cfg.knownDevices;
+    const known = new Set(baseline ?? []);
+    const me = live.find((d) => d.id === this.cfg.deviceId);
     const added: { id: string; name: string }[] = [];
     for (const d of live) {
-      if (first || d.id === this.cfg.deviceId || known.has(d.id)) continue;
+      if (d.id === this.cfg.deviceId) continue;
+      const isNew = baseline !== undefined ? !known.has(d.id) : me !== undefined && d.created_at > me.created_at;
+      if (!isNew) continue;
       added.push({ id: d.id, name: d.recovery ? "(recovery passphrase)" : d.name_enc ? await this.vc.decryptName(fromB64(d.name_enc), d.id) : "(unnamed)" });
     }
     this.state.devices = live.map((d) => d.id);
     this.state.roster = hash;
     this.scheduleSave();
+    this.hooks.onRosterChanged?.(this.state.devices);
     if (added.length) {
       this.log("warn", `new device(s) in the roster: ${added.map((a) => a.name).join(", ")}`);
       this.hooks.onNewDevices?.(added);
@@ -734,6 +759,11 @@ export class Engine {
     this.restoreAccepted = true;
     this.regressionNoticed = "";
     this.kick(0);
+  }
+
+  /** True while a server-reported epoch regression keeps sync paused. */
+  regressionPending(): boolean {
+    return this.regressionNoticed !== "";
   }
 
   private async adoptEpoch(epoch: number, minEpoch: number): Promise<void> {

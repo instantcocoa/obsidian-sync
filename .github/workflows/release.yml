@@ -22,12 +22,14 @@ jobs:
           cache-dependency-path: plugin/package-lock.json
       - name: Build
         working-directory: plugin
+        env:
+          TAG: ${{ github.ref_name }}
         run: |
           npm ci
           npm run check
           npm run build
           v=$(node -p "require('./manifest.json').version")
-          [ "$v" = "${{ github.ref_name }}" ] || { echo "manifest.json says $v, tag is ${{ github.ref_name }}"; exit 1; }
+          [ "$v" = "$TAG" ] || { echo "manifest.json says $v, tag is $TAG"; exit 1; }
           sha256sum main.js manifest.json styles.css | tee SHA256SUMS
       - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4
         with:
@@ -38,7 +40,10 @@ jobs:
       - name: Publish
         env:
           GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          SHA: ${{ github.sha }}
+          REPO: ${{ github.repository }}
         working-directory: plugin
         run: |
-          notes="Built by GitHub Actions from tag ${{ github.ref_name }} (commit ${{ github.sha }}); provenance attested. Install or update with BRAT: instantcocoa/obsidian-sync."
-          gh release create "${{ github.ref_name }}" --repo "${{ github.repository }}" --title "obsync ${{ github.ref_name }}" --notes "$notes" main.js manifest.json styles.css SHA256SUMS
+          notes="Built by GitHub Actions from tag $TAG (commit $SHA); provenance attested. Install or update with BRAT: instantcocoa/obsidian-sync."
+          gh release create "$TAG" --repo "$REPO" --title "obsync $TAG" --notes "$notes" main.js manifest.json styles.css SHA256SUMS

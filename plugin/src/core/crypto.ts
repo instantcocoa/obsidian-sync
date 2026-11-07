@@ -64,6 +64,8 @@ export const PBKDF2_ITERATIONS = 600_000;
  * more work than a PIN typed at every unlock: a few seconds on a phone.
  */
 export const RECOVERY_ITERATIONS = 2_000_000;
+/** What versions before 0.1.3 used for the recovery passphrase; a join tries it second. */
+export const LEGACY_RECOVERY_ITERATIONS = 600_000;
 
 const INFO_BLOBID = utf8("obsync/blob-id/v1");
 const INFO_PATHID = utf8("obsync/path-id/v1");
@@ -489,9 +491,9 @@ export interface RecoveryMaterial {
  * blocks per iteration while an attacker tests one; HKDF keeps the two
  * halves independent at the attacker's single-block price.
  */
-async function pbkdf2(passphrase: string, salt: Uint8Array): Promise<{ wrapKey: Uint8Array; auth: Uint8Array }> {
+async function pbkdf2(passphrase: string, salt: Uint8Array, iterations = RECOVERY_ITERATIONS): Promise<{ wrapKey: Uint8Array; auth: Uint8Array }> {
   const base = await subtle.importKey("raw", B(utf8(passphrase.normalize("NFC"))), "PBKDF2", false, ["deriveBits"]);
-  const seed = new Uint8Array(await subtle.deriveBits({ name: "PBKDF2", hash: "SHA-256", salt: B(salt), iterations: RECOVERY_ITERATIONS }, base, 256));
+  const seed = new Uint8Array(await subtle.deriveBits({ name: "PBKDF2", hash: "SHA-256", salt: B(salt), iterations }, base, 256));
   return { wrapKey: await hkdf(seed, new Uint8Array(0), utf8("obsync/recovery/wrap/v1")), auth: await hkdf(seed, new Uint8Array(0), utf8("obsync/recovery/auth/v1")) };
 }
 
@@ -518,8 +520,8 @@ export async function createRecovery(passphrase: string, rng: Rng = defaultRng):
  * passphrase costs an online, rate-limited request and nothing is available
  * to guess at offline.
  */
-export async function deriveRecovery(passphrase: string, salt: Uint8Array): Promise<{ wrapKey: Uint8Array; authToken: string }> {
-  const { wrapKey, auth } = await pbkdf2(passphrase, salt);
+export async function deriveRecovery(passphrase: string, salt: Uint8Array, iterations = RECOVERY_ITERATIONS): Promise<{ wrapKey: Uint8Array; authToken: string }> {
+  const { wrapKey, auth } = await pbkdf2(passphrase, salt, iterations);
   return { wrapKey, authToken: recoveryAuthToken(auth) };
 }
 

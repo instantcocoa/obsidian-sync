@@ -251,7 +251,12 @@ func (s *Server) event(r *http.Request, name string, kv ...any) {
 	} else if s.isAdmin(bearer(r)) {
 		by = "admin"
 	}
-	args := append([]any{"event", name, "ip", s.clientIP(r), "vault", r.PathValue("v"), "by", by, "route", r.Method + " " + r.URL.Path}, kv...)
+	// The invite token is part of the redeem route; the log keeps its prefix only.
+	route := r.URL.Path
+	if t := r.PathValue("t"); t != "" {
+		route = strings.Replace(route, t, t[:min(len(t), 6)]+"…", 1)
+	}
+	args := append([]any{"event", name, "ip", s.clientIP(r), "vault", r.PathValue("v"), "by", by, "route", r.Method + " " + route}, kv...)
 	s.log.Info("security", args...)
 }
 

@@ -54,6 +54,8 @@ interface Settings {
   debounceMs: number;
   /** Show notices for routine sync events (conflicts resolved, synced plugins enabled, settings arriving). Errors and anything that needs a decision are always shown. */
   syncNotices: boolean;
+  /** The one-time warning about a second tool mirroring the vault folder has been shown. */
+  mirrorWarned: boolean;
 }
 
 /** Where an unloading instance leaves its engine's stop promise for the next one (see onunload). */
@@ -73,6 +75,7 @@ const DEFAULT_SETTINGS: Settings = {
   pad: false,
   debounceMs: 1500,
   syncNotices: true,
+  mirrorWarned: false,
 };
 
 /**
@@ -125,6 +128,7 @@ export default class ObsyncPlugin extends Plugin {
     this.addCommand({ id: "reupload", name: "Re-upload current file to the server", callback: () => this.cmdReupload() });
     this.addCommand({ id: "apply-held-deletes", name: "Apply held deletions", callback: () => this.engine?.applyHeldDeletes() });
     this.addCommand({ id: "unlock", name: "Unlock vault keys", callback: () => void this.unlock() });
+    this.addCommand({ id: "accept-restore", name: "Accept server restore (after the server was restored from a backup)", callback: () => this.cmdAcceptRestore() });
     // A scanned invite QR (or a tapped obsidian:// link) lands here.
     this.registerObsidianProtocolHandler(JOIN_ACTION, (params) => void this.joinFromProtocol(String(params.link ?? "")));
 
@@ -309,7 +313,12 @@ export default class ObsyncPlugin extends Plugin {
         afterApply: (p, k) => this.hooks.afterApply(p, k),
         onEpochRegressed: (from, to) =>
           new Notice(
-            `obsync: the server's key epoch went backwards (${from} → ${to}). That is expected only if the server was just restored from a backup taken before a key rotation. If you did not restore a backup, stop syncing on every device and rotate the vault keys from one you trust.`,
+            `obsync: the server's key epoch went backwards (${from} → ${to}), so sync is paused on this device. That is expected only if the server was just restored from a backup taken before a key rotation: if so, run the command "Accept server restore". If not, rotate the vault keys from a device you trust before accepting anything.`,
+            0,
+          ),
+        onNewDevices: (ds) =>
+          new Notice(
+            `obsync: new device${ds.length > 1 ? "s" : ""} joined this vault: ${ds.map((d) => d.name).join(", ")}. If that was not you, open Manage devices and remove it; the keys rotate and it is locked out.`,
             60000,
           ),
         onConflict: (p, sib) => this.routineNotice(`obsync: conflict on ${p}. Your version was saved as ${sib}.`, 10000),
@@ -333,6 +342,7 @@ export default class ObsyncPlugin extends Plugin {
       },
     );
     await this.engine.start();
+    void this.warnIfMirrored();
     void this.checkVaultAuthority();
   }
 
@@ -363,6 +373,77 @@ export default class ObsyncPlugin extends Plugin {
     await this.saveSettings();
     await this.restartEngine();
     this.routineNotice(`obsync: ${what}. Initial sync running.`);
+    await this.defaultProtection();
+  }
+
+  /**
+   * Seal the keys by default. On desktop the OS keychain costs nothing and
+   * needs no prompt. On a phone the only option is a PIN, so it is offered
+   * once; "Not now" leaves the keys in data.json, as the settings text says.
+   */
+  private async defaultProtection(): Promise<void> {
+    if (this.settings.protection.method !== "none" || !this.settings.identity) return;
+    try {
+      if (!Platform.isMobile) {
+        if (safeStorageAvailable()) {
+          await this.setProtection("safe", { touchId: false });
+          this.routineNotice("obsync: vault keys are stored in the OS keychain. Change this under Protect keys.");
+        }
+        return;
+      }
+      const want = await ConfirmModal.ask(
+        this.app,
+        "Protect the vault keys with a PIN?",
+        "Without one, the keys sit in data.json inside this vault's plugin folder, readable by anything that can read the vault: a backup, a computer this phone trusts, another app. A PIN is asked once per launch; six characters or more, longer is better. You can change this later under Protect keys.",
+        "Set a PIN",
+      );
+      if (!want) return;
+      const r = await PromptModal.ask(this.app, "Set a PIN", [
+        { name: "PIN (6+ characters; longer is better)", secret: true },
+        { name: "Repeat", secret: true },
+      ]);
+      if (!r) return;
+      if (r[0] !== r[1]) throw new Error("PINs differ; set one later under Protect keys");
+      await this.setProtection("pin", { pin: r[0] });
+    } catch (e) {
+      new Notice(`obsync: ${(e as Error).message}`, 8000);
+    }
+  }
+
+  /**
+   * A second tool copying the vault folder copies the keys with it. Say so
+   * once, on the evidence the folder gives: the markers such tools leave,
+   * or a path under a cloud drive.
+   */
+  private async warnIfMirrored(): Promise<void> {
+    if (this.settings.mirrorWarned || !this.settings.identity) return;
+    const ad = this.app.vault.adapter as { exists(p: string): Promise<boolean>; getBasePath?: () => string };
+    const found: string[] = [];
+    for (const m of [".git", ".dropbox", ".sync", ".stfolder", ".stversions"]) if (await ad.exists(m).catch(() => false)) found.push(m);
+    const base = ad.getBasePath?.() ?? "";
+    const cloud = /iCloud|Dropbox|OneDrive|Google Drive|Mobile Documents/i.exec(base);
+    if (cloud) found.push(cloud[0]);
+    if (found.length === 0) return;
+    this.settings.mirrorWarned = true;
+    await this.saveSettings();
+    new Notice(
+      `obsync: this vault folder is also handled by ${found.join(", ")}. Anything that copies the folder copies the vault keys in ${this.app.vault.configDir}/plugins/obsync/data.json unless they are protected: see Settings → obsync → Protect keys, or keep that folder out of the other tool.`,
+      30000,
+    );
+  }
+
+  cmdAcceptRestore(): Promise<void> {
+    return this.guard(async () => {
+      const ok = await ConfirmModal.ask(
+        this.app,
+        "Accept the server's older key epoch?",
+        "Only do this if you restored the server from a backup taken before a key rotation. This device will encrypt new content under the older key again. If you did not restore a backup, the server may be lying: rotate the keys from a device you trust instead.",
+        "Accept restore",
+      );
+      if (!ok) return;
+      this.engine?.acceptServerRestore();
+      new Notice("obsync: restore accepted; sync resumes.");
+    });
   }
 
   /** A notice about a routine sync event; silenced by the "Sync notices" setting. Errors and decisions use `new Notice` directly. */
@@ -521,16 +602,20 @@ export default class ObsyncPlugin extends Plugin {
     return this.guard(async () => {
       const s = this.need();
       const devs = await this.devices();
+      const counts = new Map<string, number>();
+      for (const d of devs) if (!d.revoked_at) counts.set(d.name, (counts.get(d.name) ?? 0) + 1);
+      const dup = (name: string) => (counts.get(name) ?? 0) > 1;
       new ListModal(
         this.app,
         "Devices",
         devs
           .filter((d) => !d.revoked_at)
           .map((d) => ({
-            label: d.name + (d.isSelf ? " (this device)" : "") + (d.name === "(unnamed)" || d.name === "(unreadable name)" ? " ⚠" : ""),
+            label: d.name + (d.isSelf ? " (this device)" : "") + (d.name === "(unnamed)" || d.name === "(unreadable name)" || dup(d.name) ? " ⚠" : ""),
             detail:
               `${d.recovery ? "recovery identity" : "added " + new Date(d.created_at).toLocaleDateString()}${d.last_seen ? ", seen " + new Date(d.last_seen).toLocaleString() : ""}` +
-              (d.name === "(unnamed)" || d.name === "(unreadable name)" ? ". It never proved it holds the vault keys: it will be revoked at the next key rotation. Remove it now if you do not recognise it." : ""),
+              (d.name === "(unnamed)" || d.name === "(unreadable name)" ? ". It never proved it holds the vault keys: it will be revoked at the next key rotation. Remove it now if you do not recognise it." : "") +
+              (dup(d.name) && !d.isSelf ? ". Another device has the same name: make sure both are yours." : ""),
             action:
               d.isSelf || d.recovery
                 ? undefined
@@ -572,7 +657,10 @@ export default class ObsyncPlugin extends Plugin {
         "Set",
       );
       if (!v) return;
-      if (v[0].length < 12) throw new Error("use at least 12 characters");
+      // Against someone holding the server's database this passphrase is the
+      // whole vault, attacked offline at a few thousand guesses a second per
+      // GPU: a short password lasts weeks, four random words do not.
+      if (v[0].length < 20 && v[0].trim().split(/\s+/).length < 4) throw new Error("use at least four words, or 20 characters");
       if (v[0] !== v[1]) throw new Error("passphrases differ");
       await this.setRecovery(v[0]);
       new Notice("obsync: recovery passphrase set.");

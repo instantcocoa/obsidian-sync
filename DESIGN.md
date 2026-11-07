@@ -580,7 +580,8 @@ loses the vault. That is the correct default.
 
 Parameter choices, with the reasoning so they can be reviewed:
 
-- **PBKDF2-HMAC-SHA-256, 600 000 iterations, 16-byte random salt.** This is
+- **PBKDF2-HMAC-SHA-256, 2 000 000 iterations for the recovery passphrase
+  (600 000 for the on-device PIN), 16-byte random salt.** 600 000 is
   the OWASP Password Storage Cheat Sheet recommendation for PBKDF2 with
   SHA-256 (2023 revision). Argon2id would be preferable but is not in
   WebCrypto, and shipping a WASM implementation would add an unaudited
@@ -675,7 +676,22 @@ Accepted residual exposure:
 2. **Vault write access is code execution** on every device that syncs the
    config folder (§7.3). That is the point of syncing plugins; the roster is
    the trust boundary, and the plugin announces every plugin it enables.
-3. **An actively malicious server is out of scope.** If that ever changes,
+3. **All members are equal.** Any member can rotate, revoke any other member
+   including the owner, invite, and restore. There is no owner role; the
+   roster is the whole access-control list, which is why every device is
+   told when the roster grows (the feed carries a roster hash; a newcomer
+   raises a notice that cannot be silenced) and why names that repeat are
+   flagged in Manage devices.
+4. **Keys are sealed by default where that is free.** A desktop stores them
+   in the OS keychain at enrolment without asking; a phone is offered a PIN
+   once. A vault folder that another tool also copies (`.git`, Dropbox,
+   iCloud Drive) earns a one-time warning, because that copy carries
+   `data.json` unless the keys are sealed.
+5. **An epoch regression pauses sync.** A server reporting an older epoch
+   than the device holds is the restore-from-backup case or a lying server;
+   the device keeps its keys, stops, and resumes only after "Accept server
+   restore" (§6.8).
+6. **An actively malicious server is out of scope.** If that ever changes,
    the fix is a per-device running hash over the op log exchanged through
    the keybox channel; the formats here do not preclude it.
 
@@ -959,14 +975,15 @@ holds across a restore. `plugin/test/conflict-recovery.test.ts` rows 21 and
 22 exercise both the simple case and the concurrent one.
 
 When the restored server reports an older epoch than the device holds, the
-device makes that epoch current again (its authority hash and keybox are
-the old epoch's) but keeps the newer keys: they still open anything written
-under them, and enrolment only offers the server the epochs it knows. The
-plugin shows the regression as an error notice the user must read, because
-a lying server could say the same thing to make every device write new
-content under a key a removed member still holds; the notice says what is
-and is not expected and tells the user to rotate from a trusted device if
-no backup was restored.
+device does not take the server's word for it: a lying server could say
+the same thing to make every device write new content under a key a
+removed member still holds. Sync pauses with an error notice that says
+what is and is not expected, and the keys stay as they were. A person who
+knows a backup was restored runs "Accept server restore"; the device then
+makes the older epoch current again (the restored authority hash and keybox
+are that epoch's) while keeping the newer keys, which still open anything
+written under them, and enrolment offers the server only the epochs it
+knows.
 
 ### 6.7 Mobile
 

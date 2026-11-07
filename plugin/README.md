@@ -34,9 +34,13 @@ Pairs with the `obsync` server in `../server`. Design and rationale are in
    which asks before joining) or open the plugin's settings, paste the link
    into **Join with invite link** and press **Join**. A notice confirms the
    join and the status bar shows `obsync ✓`. The link is single-use and
-   expires in 24 hours. Notices about routine sync events (a conflict
+   expires in one hour (a key rotation ends it early). Notices about routine sync events (a conflict
    resolved, a synced plugin enabled) can be turned off under **Sync
-   notices**; errors and decisions are always shown.
+   notices**; errors and decisions are always shown. On a desktop the vault
+   keys go into the OS keychain at this point without asking; a phone is
+   offered a PIN once (**Protect keys** changes either later). Every device
+   is told when a new device joins the vault; if it was not you, remove it
+   under **Manage devices** and the keys rotate.
 5. Optional but recommended: **Set recovery passphrase** so a new device can
    join with only the server URL, the vault id and the passphrase if you lose
    every other device. The vault id is shown under **Status** with a Copy

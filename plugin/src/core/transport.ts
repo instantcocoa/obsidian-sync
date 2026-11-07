@@ -77,6 +77,8 @@ export interface Feed {
   rewound?: boolean;
   ops: WireOp[];
   more: boolean;
+  /** Short hash of the live device ids; a change means the roster changed. */
+  roster?: string;
 }
 
 export interface VaultInfo {

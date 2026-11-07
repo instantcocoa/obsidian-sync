@@ -465,6 +465,29 @@ func (s *Store) AuthDevice(ctx context.Context, token string) (*Device, error) {
 	return d, nil
 }
 
+// MaxOpenInvites bounds a vault's unused, unexpired invites.
+const MaxOpenInvites = 20
+
+// RosterHash is a short fingerprint of the vault's live device ids, carried
+// in every feed so a device learns of a new member without polling /devices.
+func (s *Store) RosterHash(ctx context.Context, vault string) (string, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id FROM devices WHERE vault_id=? AND revoked_at IS NULL ORDER BY id`, vault)
+	if err != nil {
+		return "", err
+	}
+	defer rows.Close()
+	h := sha256.New()
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return "", err
+		}
+		h.Write([]byte(id))
+		h.Write([]byte{0})
+	}
+	return hex.EncodeToString(h.Sum(nil))[:16], rows.Err()
+}
+
 // MaxMetaEnc bounds one op's encrypted metadata: 16 KiB holds the longest
 // allowed path many times over.
 const MaxMetaEnc = 16 << 10
@@ -523,6 +546,15 @@ func (s *Store) CreateInvite(ctx context.Context, vault, createdBy string, keybo
 	token, hash := NewToken("in_")
 	inv := &Invite{Token: token, ExpiresAt: now() + ttl.Milliseconds()}
 	err := s.writeTx(ctx, func(tx *sql.Tx) error {
+		// A member can mint invites freely, each with a 1 MiB keybox; bound
+		// the unused ones so a trusted party cannot fill the disk with them.
+		var open int
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM invites WHERE vault_id=? AND used_at IS NULL AND expires_at>?`, vault, now()).Scan(&open); err != nil {
+			return err
+		}
+		if open >= MaxOpenInvites {
+			return fmt.Errorf("%w: %d unused invites already; wait for them to expire or rotate the keys", ErrConflict, open)
+		}
 		_, err := tx.ExecContext(ctx, `INSERT INTO invites(token_hash, vault_id, keybox_enc, created_by, expires_at) VALUES(?,?,?,?,?)`,
 			hash, vault, keyboxEnc, createdBy, inv.ExpiresAt)
 		return err

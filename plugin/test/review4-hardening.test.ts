@@ -10,7 +10,9 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { TestServer, Device, ADMIN } from "./harness";
-import { createVault, rotate } from "../src/core/admin";
+import { createVault, createInviteLink, joinWithLink, rotate } from "../src/core/admin";
+import { generateKeypair, parseInviteLink } from "../src/core/crypto";
+import { Client } from "../src/core/transport";
 
 let srv: TestServer;
 beforeAll(async () => {
@@ -76,5 +78,43 @@ describe("plain http gate", () => {
     const joinBlock = src.slice(start, end);
     expect(joinBlock).toContain("joinWithLink(");
     expect(joinBlock, "the invite-link Join handler calls joinWithLink without plainHttpOk; the passphrase and create flows both gate on it").toContain("plainHttpOk");
+  });
+});
+
+describe("roster alerts", () => {
+  it("a device that joins the roster is announced to every other device on its next sync, and the first look after joining announces nothing", async () => {
+    const sa = await createVault(srv.url, ADMIN, "laptop");
+    const seen: { id: string; name: string }[][] = [];
+    const a = await new Device("laptop", sa, { hooks: { onNewDevices: (ds) => seen.push(ds) } }).start();
+    await a.write("note.md", "hello\n");
+    await a.sync();
+    expect(seen).toEqual([]); // its own roster, seen for the first time: not news
+
+    const sb = await joinWithLink(await createInviteLink(sa), "phone");
+    const b = await new Device("phone", sb).start();
+    await b.sync();
+    await a.sync();
+    expect(seen.flat().map((d) => d.name)).toEqual(["phone"]);
+    await a.sync();
+    expect(seen).toHaveLength(1); // not repeated while the roster is unchanged
+
+    // A device enrolled through a leaked link that never named itself still shows up, as "(unnamed)".
+    const { server, token } = parseInviteLink(await createInviteLink(sa));
+    const kp = await generateKeypair();
+    await Client.redeemInvite(server, token, kp.pub, new Uint8Array(0));
+    await a.sync();
+    expect(seen.flat().map((d) => d.name)).toEqual(["phone", "(unnamed)"]);
+    await a.cleanup();
+    await b.cleanup();
+  });
+});
+
+describe("invite hygiene", () => {
+  it("a vault holds at most twenty unused invites", async () => {
+    const sa = await createVault(srv.url, ADMIN, "laptop");
+    for (let i = 0; i < 20; i++) await createInviteLink(sa);
+    await expect(createInviteLink(sa)).rejects.toThrow(/409/);
+    await rotate(sa); // ends them all
+    await createInviteLink(sa);
   });
 });

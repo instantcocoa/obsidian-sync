@@ -49,6 +49,9 @@ export interface State {
   /** op_id at `cursor`, when known; the server checks it so a restore from backup is never mistaken for "nothing new". */
   cursorOp?: string;
   epoch: number;
+  /** The roster hash the server last reported, and the live device ids seen then (to announce newcomers). */
+  roster?: string;
+  devices?: string[];
   /** keyed by logical path ($CONFIG-mapped) */
   files: Record<string, FileEntry>;
   dirty: string[];
@@ -109,6 +112,8 @@ export interface EngineHooks {
    * the user must see it, not just the console.
    */
   onEpochRegressed?: (from: number, to: number) => void;
+  /** Devices that appeared in the roster since the last sync. The roster is the trust boundary; a stranger here is the leak signal. */
+  onNewDevices?: (devices: { id: string; name: string }[]) => void;
 }
 
 const DEFAULTS = {
@@ -668,6 +673,7 @@ export class Engine {
     if (this.state.cursor === 0) {
       const snap = await this.fullSnapshot(v);
       await this.adoptEpoch(snap.epoch, snap.min_epoch);
+      await this.watchRoster(snap.roster);
       await this.applyBatch(snap.ops);
       this.state.cursor = snap.cursor;
       this.state.cursorOp = snap.cursor_op_id;
@@ -681,6 +687,7 @@ export class Engine {
         return this.pull();
       }
       await this.adoptEpoch(feed.epoch, feed.min_epoch);
+      await this.watchRoster(feed.roster);
       if (feed.ops.length === 0) break;
       await this.applyBatch(feed.ops);
       this.state.cursor = feed.cursor;
@@ -688,6 +695,45 @@ export class Engine {
       this.scheduleSave();
       if (!feed.more) break;
     }
+  }
+
+  /**
+   * The feed carries a hash of the live roster. When it moves, fetch the
+   * roster and announce every device that was not there before (never on
+   * the first look, which is simply the roster this device joined).
+   */
+  private async watchRoster(hash: string | undefined): Promise<void> {
+    if (!hash || hash === this.state.roster) return;
+    const live = (await this.client.devices(this.cfg.vaultId)).filter((d) => !d.revoked_at);
+    const first = this.state.devices === undefined;
+    const known = new Set(this.state.devices ?? []);
+    const added: { id: string; name: string }[] = [];
+    for (const d of live) {
+      if (first || d.id === this.cfg.deviceId || known.has(d.id)) continue;
+      added.push({ id: d.id, name: d.recovery ? "(recovery passphrase)" : d.name_enc ? await this.vc.decryptName(fromB64(d.name_enc), d.id) : "(unnamed)" });
+    }
+    this.state.devices = live.map((d) => d.id);
+    this.state.roster = hash;
+    this.scheduleSave();
+    if (added.length) {
+      this.log("warn", `new device(s) in the roster: ${added.map((a) => a.name).join(", ")}`);
+      this.hooks.onNewDevices?.(added);
+    }
+  }
+
+  /** Set by acceptServerRestore: the next epoch regression is taken as a real restore and adopted. */
+  private restoreAccepted = false;
+  private regressionNoticed = "";
+
+  /**
+   * The person confirmed that the server was restored from a backup taken
+   * before a key rotation, so the next sync may adopt the older epoch the
+   * server reports instead of refusing to write under it.
+   */
+  acceptServerRestore(): void {
+    this.restoreAccepted = true;
+    this.regressionNoticed = "";
+    this.kick(0);
   }
 
   private async adoptEpoch(epoch: number, minEpoch: number): Promise<void> {
@@ -701,14 +747,26 @@ export class Engine {
         // the restored keybox, so everything we encrypt or sign from now on
         // uses it again. A later rotation moves forward as usual.
         const from = this.vc.keyring.current;
-        this.log("error", `vault epoch went backwards (${from} -> ${epoch}); using the restored epoch key`);
+        if (!this.restoreAccepted) {
+          // Not adopted on the server's word alone: a lying server could say
+          // this to make every device encrypt new content under a key a
+          // removed member still holds. Sync stops here until a person who
+          // knows a backup was restored accepts it (acceptServerRestore).
+          const key = `${from}->${epoch}`;
+          if (this.regressionNoticed !== key) {
+            this.regressionNoticed = key;
+            this.hooks.onEpochRegressed?.(from, epoch);
+          }
+          throw new SyncError(`the server's key epoch went backwards (${from} -> ${epoch}); sync is paused until "Accept server restore" is run, if a backup really was restored`);
+        }
+        this.restoreAccepted = false;
+        this.log("error", `vault epoch went backwards (${from} -> ${epoch}); restore accepted, using the restored epoch key`);
         this.vc.keyring.current = epoch;
         // The newer keys stay in the keyring: they still open any blob written
         // under them that the restore left behind, and enrolment only offers
         // the server epochs it knows (finishEnrol filters), so keeping them
         // costs nothing. Dropping them would make a regression silent and final.
         this.hooks.onKeysChanged?.();
-        this.hooks.onEpochRegressed?.(from, epoch);
       }
       this.state.epoch = epoch;
     }

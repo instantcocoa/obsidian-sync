@@ -12,6 +12,7 @@ import (
 	"hash/fnv"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"strconv"
@@ -79,7 +80,9 @@ func New(cfg Config, st *store.Store, blobs *blobstore.FS) *Server {
 		cfg.MaxWait = 60 * time.Second
 	}
 	if cfg.InviteTTL == 0 {
-		cfg.InviteTTL = 24 * time.Hour
+		// Links are minted at the moment they are used; an hour loses nothing
+		// and shortens how long a leaked one is live.
+		cfg.InviteTTL = time.Hour
 	}
 	if cfg.ChangesLimit == 0 {
 		cfg.ChangesLimit = 1000
@@ -223,12 +226,37 @@ func (s *Server) limited(next http.HandlerFunc) http.HandlerFunc {
 
 // failAuth records a failed credential and rejects, or short-circuits with
 // 429 once the client has failed too often.
+// clientIP is the address the request is attributed to in the event log:
+// the proxy-appended hop under --trust-proxy, else the peer address.
+func (s *Server) clientIP(r *http.Request) string {
+	if s.cfg.TrustProxy {
+		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+			parts := strings.Split(xff, ",")
+			return normalizeIP(strings.TrimSpace(parts[len(parts)-1]))
+		}
+	}
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return normalizeIP(r.RemoteAddr)
+	}
+	return normalizeIP(host)
+}
+
+// event writes one security-relevant line: who (device or admin, address),
+// what (name), on which vault, with what outcome. Never a token.
+func (s *Server) event(r *http.Request, name string, kv ...any) {
+	args := append([]any{"event", name, "ip", s.clientIP(r), "vault", r.PathValue("v"), "by", callerID(r), "route", r.Method + " " + r.URL.Path}, kv...)
+	s.log.Info("security", args...)
+}
+
 func (s *Server) failAuth(w http.ResponseWriter, r *http.Request, msg string) {
 	if s.authFail != nil && !s.authFail.take(s.authFail.key(r)) {
+		s.event(r, "auth.limited")
 		w.Header().Set("Retry-After", "60")
 		writeErr(w, http.StatusTooManyRequests, "too many failed authentication attempts")
 		return
 	}
+	s.event(r, "auth.failed", "reason", msg)
 	writeErr(w, http.StatusUnauthorized, msg)
 }
 
@@ -375,6 +403,7 @@ func (s *Server) createVault(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, err)
 		return
 	}
+	s.event(r, "vault.created", "new_vault", v.ID)
 	writeJSON(w, http.StatusCreated, v)
 }
 
@@ -433,6 +462,7 @@ func (s *Server) createInvite(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, err)
 		return
 	}
+	s.event(r, "invite.created", "ttl_s", int64(ttl.Seconds()))
 	writeJSON(w, http.StatusCreated, inv)
 }
 
@@ -447,9 +477,11 @@ func (s *Server) redeemInvite(w http.ResponseWriter, r *http.Request) {
 	}
 	out, err := s.st.RedeemInvite(r.Context(), r.PathValue("t"), body.PubKex, body.NameEnc)
 	if err != nil {
+		s.event(r, "invite.redeem.failed")
 		s.fail(w, err)
 		return
 	}
+	s.event(r, "invite.redeemed", "vault", out.VaultID, "new_device", out.DeviceID)
 	writeJSON(w, http.StatusCreated, out)
 }
 
@@ -541,6 +573,7 @@ func (s *Server) registerAuth(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, err)
 		return
 	}
+	s.event(r, "auth.installed")
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -566,6 +599,7 @@ func (s *Server) rotate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.hub.Publish(v, vault.Seq, vault.Epoch)
+	s.event(r, "keys.rotated", "epoch", body.Epoch, "revoked", len(body.Revoke))
 	writeJSON(w, http.StatusOK, vault)
 }
 
@@ -585,6 +619,7 @@ func (s *Server) setRecovery(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, err)
 		return
 	}
+	s.event(r, "recovery.set")
 	writeJSON(w, http.StatusCreated, map[string]string{"device_id": id})
 }
 
@@ -616,9 +651,11 @@ func (s *Server) recoveryJoin(w http.ResponseWriter, r *http.Request) {
 	}
 	out, rows, recoveryEnc, err := s.st.RecoveryJoin(r.Context(), r.PathValue("v"), bearer(r), body.PubKex, body.NameEnc)
 	if err != nil {
+		s.event(r, "recovery.join.failed")
 		s.fail(w, err)
 		return
 	}
+	s.event(r, "recovery.joined", "new_device", out.DeviceID)
 	writeJSON(w, http.StatusCreated, map[string]any{
 		"device_id": out.DeviceID, "device_token": out.DeviceToken, "vault_id": out.VaultID, "epoch": out.Epoch, "keybox": rows,
 		"recovery_enc": recoveryEnc,
@@ -641,6 +678,9 @@ type feedResponse struct {
 	Rewound    bool       `json:"rewound,omitempty"`
 	Ops        []store.Op `json:"ops"`
 	More       bool       `json:"more"`
+	// Roster is a short hash of the live device ids, so a client notices a
+	// device joining (or leaving) without a request of its own.
+	Roster string `json:"roster,omitempty"`
 }
 
 func (s *Server) snapshot(w http.ResponseWriter, r *http.Request) {
@@ -672,7 +712,8 @@ func (s *Server) snapshot(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, feedResponse{Epoch: vault.Epoch, MinEpoch: vault.MinEpoch, Cursor: vault.Seq, Seq: vault.Seq, CursorOpID: cursorOp, Ops: ops, More: more})
+	roster, _ := s.st.RosterHash(r.Context(), v)
+	writeJSON(w, http.StatusOK, feedResponse{Epoch: vault.Epoch, MinEpoch: vault.MinEpoch, Cursor: vault.Seq, Seq: vault.Seq, CursorOpID: cursorOp, Ops: ops, More: more, Roster: roster})
 }
 
 func (s *Server) changes(w http.ResponseWriter, r *http.Request) {
@@ -739,7 +780,8 @@ func (s *Server) changes(w http.ResponseWriter, r *http.Request) {
 				cursor = ops[len(ops)-1].Seq
 				cursorOp = ops[len(ops)-1].OpID
 			}
-			writeJSON(w, http.StatusOK, feedResponse{Epoch: vault.Epoch, MinEpoch: vault.MinEpoch, Cursor: cursor, Seq: vault.Seq, CursorOpID: cursorOp, Ops: ops, More: more})
+			roster, _ := s.st.RosterHash(r.Context(), v)
+			writeJSON(w, http.StatusOK, feedResponse{Epoch: vault.Epoch, MinEpoch: vault.MinEpoch, Cursor: cursor, Seq: vault.Seq, CursorOpID: cursorOp, Ops: ops, More: more, Roster: roster})
 			return
 		}
 		t := time.NewTimer(remaining)
@@ -1085,6 +1127,7 @@ func (s *Server) restore(w http.ResponseWriter, r *http.Request) {
 	if skipped == nil {
 		skipped = []string{}
 	}
+	s.event(r, "vault.restored", "emitted", n)
 	writeJSON(w, http.StatusOK, map[string]any{"emitted": n, "skipped_path_ids": skipped, "cursor": vault.Seq})
 }
 

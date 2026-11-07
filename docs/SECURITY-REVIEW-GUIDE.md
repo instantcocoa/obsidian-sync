@@ -181,7 +181,9 @@ and the local filesystem.
 
 ### E. Local key protection (`keystore.ts`, `protection.ts`, DESIGN §5.5a)
 
-- Three modes: none (keys in `data.json` in the clear), PIN (PBKDF2 600k,
+- Three modes, with the keychain chosen automatically at enrolment on
+  desktop and a PIN offered once on phones (fourth review): none (keys in
+  `data.json` in the clear), PIN (PBKDF2 600k,
   AES-GCM sealed identity, offline-guessable, minimum 6 digits with a
   warning), OS keychain (Electron `safeStorage`, desktop only, with an
   optional Touch ID prompt on macOS). Review the sealed format, the AAD,

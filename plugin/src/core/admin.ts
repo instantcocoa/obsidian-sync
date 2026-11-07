@@ -123,7 +123,7 @@ export async function createVault(server: string, adminToken: string, deviceName
 }
 
 /** Mint an invite link for another device. The link carries the keys; guard it. */
-export async function createInviteLink(s: Session, ttlSeconds = 24 * 3600): Promise<string> {
+export async function createInviteLink(s: Session, ttlSeconds = 3600): Promise<string> {
   const inviteKey = randomBytes(32);
   const inv = await s.client.createInvite(s.identity.vaultId, await encryptInviteKeybox(inviteKey, s.vc.keyring), ttlSeconds);
   return buildInviteLink(s.identity.server, inv.token, inviteKey);

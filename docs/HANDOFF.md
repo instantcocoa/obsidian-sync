@@ -158,6 +158,23 @@ Obsidian; everything found is fixed and merged:
    nine weaknesses, all fixed with regression tests
    (`server/internal/api/review3_test.go`, `plugin/test/review3-*.test.ts`)
    and recorded in DESIGN §5.7.
+1b. **Fourth review (hardening, 2026-11-07): done, 3/5 → the fixes for a 4.**
+   An independent hardening pass (`plugin/.cache/agent-sec-hardening/REPORT.md`
+   on the Mac) graded the core hardened and the edges soft. Everything it
+   asked for is in: database files private and umask 077, IPv6 limiter on
+   /64 with a capped map, rotation ends unused invites and a vault holds at
+   most 20, epoch regression pauses sync until "Accept server restore",
+   plain-http consent on the invite and QR joins, keys sealed by default
+   (keychain on desktop, PIN offered on phones) with a mirror-tool warning,
+   a roster hash in the feed with a notice on every new device and
+   duplicate names flagged, a security-event log, AEAD-only TLS with HSTS
+   and request timeouts, recovery passphrase at four words or 20 characters
+   under 2 000 000 iterations, one-hour invites, `server/obsync.service`,
+   CI actions pinned by commit and releases built in CI from the tag with
+   provenance (`.github/workflows/release.yml`). Regression tests:
+   `review4_hardening_test.go`, `review4-hardening.test.ts`. Not yet done:
+   installing the systemd unit on `util` (its devices were lent to another
+   session at the time) and a device re-run of the 0.1.3 plugin.
 2. **Human security review.** Hand `docs/SECURITY-REVIEW-GUIDE.md` to a
    specialist. When findings come back, fix them in the style of the
    existing review rounds: a failing test first (`security_test.go` for the

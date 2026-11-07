@@ -707,6 +707,13 @@ describe("extreme scenarios", () => {
     expect((await sa.client.vault(sa.identity.vaultId)).epoch).toBe(2);
     await own.restoreFrom(backup);
     expect((await sa.client.vault(sa.identity.vaultId)).epoch).toBe(1);
+    // The devices refuse the older epoch on the server's word alone: sync
+    // pauses with an error until a person accepts the restore on each.
+    for (const d of [a, b]) {
+      await expect(d.sync()).rejects.toThrow(/went backwards/);
+      expect(d.engine.getStatus().phase).toBe("error");
+      d.engine.acceptServerRestore();
+    }
     await converge([a, b], 12);
     const m = await expectIdentical([a, b]);
     expect(m).toEqual({ "k.md": "epoch 2 content\n", "k2.md": "new in epoch 2\n" });

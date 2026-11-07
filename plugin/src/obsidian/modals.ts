@@ -176,7 +176,7 @@ export class ListModal extends Modal {
  * The invite link as a QR code plus the text. The QR encodes an
  * `obsidian://obsync-join?link=…` URL, which a phone's camera opens in
  * Obsidian (the OS knows `obsidian://`, not `obsync://`); the plugin there
- * asks before joining. Same link, same single use, same 24 hours.
+ * asks before joining. Same link, same single use, same one hour.
  */
 export class InviteModal extends Modal {
   constructor(
@@ -189,7 +189,7 @@ export class InviteModal extends Modal {
   override onOpen(): void {
     this.titleEl.setText("Invite another device");
     this.contentEl.createEl("p", {
-      text: "On the other device, install obsync first, then scan this with its camera, or copy the link and paste it into Settings → obsync → Join. Valid for 24 hours, single use. It contains the vault keys: show or send it only where you would a password.",
+      text: "On the other device, install obsync first, then scan this with its camera, or copy the link and paste it into Settings → obsync → Join. Valid for one hour, single use; a key rotation ends it early. It contains the vault keys: show or send it only where you would a password.",
     });
     const qr = qrcode(0, "M");
     qr.addData(this.scanUrl);

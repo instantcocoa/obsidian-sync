@@ -154,6 +154,11 @@ func serve(args []string) error {
 		Handler:           srv,
 		ReadHeaderTimeout: 30 * time.Second,
 		IdleTimeout:       120 * time.Second,
+		// A whole request or response, blob bodies included, must finish in
+		// this time: a client trickling one byte a minute does not hold a
+		// goroutine and a descriptor for ever.
+		ReadTimeout:  15 * time.Minute,
+		WriteTimeout: 15 * time.Minute,
 	}
 	errc := make(chan error, 1)
 	if *acme != "" {
@@ -163,7 +168,16 @@ func serve(args []string) error {
 			Cache:      autocert.DirCache(filepath.Join(*data, "acme")),
 		}
 		h.Addr = ":443"
-		h.TLSConfig = &tls.Config{GetCertificate: m.GetCertificate, MinVersion: tls.VersionTLS12}
+		h.TLSConfig = &tls.Config{
+			GetCertificate: m.GetCertificate,
+			MinVersion:     tls.VersionTLS12,
+			// AEAD suites only: Go's default list still offers CBC-SHA1 for TLS 1.2.
+			CipherSuites: []uint16{
+				tls.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256, tls.TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384, tls.TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305,
+				tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256, tls.TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384, tls.TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305,
+			},
+		}
+		h.Handler = hsts(srv)
 		go func() { errc <- http.ListenAndServe(":80", m.HTTPHandler(nil)) }()
 		go func() { errc <- h.ListenAndServeTLS("", "") }()
 		log.Info("serving", "https", *acme, "data", *data)
@@ -245,4 +259,13 @@ func gc(args []string) error {
 	}
 	fmt.Printf("removed %d blobs\n", n)
 	return nil
+}
+
+// hsts adds Strict-Transport-Security on the TLS listener, so a client that
+// once reached the server over https will not try http for two years.
+func hsts(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Strict-Transport-Security", "max-age=63072000")
+		next.ServeHTTP(w, r)
+	})
 }

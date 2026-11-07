@@ -25,8 +25,20 @@ On first start an admin token is generated and saved to `DIR/admin-token`
 (or pass `OBSYNC_ADMIN_TOKEN`; `--admin-token` works too but shows in `ps`
 to every local user). Everything under `DIR` is created private to the
 server's user (umask 077; the database, its WAL and the blobs are 0600), and
-the server should run as its own user. Mobile Obsidian needs a publicly
-trusted certificate, so use `--acme-domain` or put Caddy/Traefik in front.
+the server should run as its own user: `obsync.service` in this directory
+is a systemd unit that does that (its own transient user, read-only
+system, no new privileges, the one capability needed to bind 80 and 443,
+data in `/var/lib/obsync`). Mobile Obsidian needs a publicly trusted
+certificate, so use `--acme-domain` or put Caddy/Traefik in front; the
+built-in listener offers TLS 1.2 and 1.3 with AEAD suites only and sends
+HSTS.
+
+Every security-relevant event is one `security` line on stderr with the
+client address, the acting device or admin, the vault and the outcome:
+vault created, invite created or redeemed (or refused), recovery set or
+joined (or refused), authority installed, keys rotated, vault restored,
+and every failed or rate-limited authentication. Tokens are never logged.
+A vault can hold at most 20 unused invites; a rotation ends them all.
 
 Unauthenticated routes (invite redemption and recovery join) and
 failed token checks are rate-limited per client IP: `--auth-rate N` requests

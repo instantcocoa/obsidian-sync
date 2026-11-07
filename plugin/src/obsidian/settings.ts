@@ -131,7 +131,7 @@ export class ObsyncSettingTab extends PluginSettingTab {
     el.createEl("h3", { text: "Devices" });
     new Setting(el)
       .setName("Generate invite link")
-      .setDesc("For another device. Valid 24 hours, single use. Send it over a channel you trust and delete it afterwards.")
+      .setDesc("For another device. Valid for one hour, single use, and a key rotation ends it early. Show the QR code to the device, or send the link over a channel you trust.")
       .addButton((b) => b.setButtonText("Generate").onClick(() => this.plugin.cmdInvite()));
     new Setting(el)
       .setName("Manage devices")

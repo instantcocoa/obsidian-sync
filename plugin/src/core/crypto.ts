@@ -58,6 +58,12 @@ export const BLOB_VERSION = 0x01;
 export const BLOB_HEADER_LEN = 1 + 4 + 16 + 12;
 export const PAD_BLOCK = 4096;
 export const PBKDF2_ITERATIONS = 600_000;
+/**
+ * The recovery passphrase alone opens the vault to whoever holds the
+ * server's database, and it is used once per recovery, so it can afford
+ * more work than a PIN typed at every unlock: a few seconds on a phone.
+ */
+export const RECOVERY_ITERATIONS = 2_000_000;
 
 const INFO_BLOBID = utf8("obsync/blob-id/v1");
 const INFO_PATHID = utf8("obsync/path-id/v1");
@@ -485,7 +491,7 @@ export interface RecoveryMaterial {
  */
 async function pbkdf2(passphrase: string, salt: Uint8Array): Promise<{ wrapKey: Uint8Array; auth: Uint8Array }> {
   const base = await subtle.importKey("raw", B(utf8(passphrase.normalize("NFC"))), "PBKDF2", false, ["deriveBits"]);
-  const seed = new Uint8Array(await subtle.deriveBits({ name: "PBKDF2", hash: "SHA-256", salt: B(salt), iterations: PBKDF2_ITERATIONS }, base, 256));
+  const seed = new Uint8Array(await subtle.deriveBits({ name: "PBKDF2", hash: "SHA-256", salt: B(salt), iterations: RECOVERY_ITERATIONS }, base, 256));
   return { wrapKey: await hkdf(seed, new Uint8Array(0), utf8("obsync/recovery/wrap/v1")), auth: await hkdf(seed, new Uint8Array(0), utf8("obsync/recovery/auth/v1")) };
 }
 

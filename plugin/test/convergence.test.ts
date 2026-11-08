@@ -54,9 +54,22 @@ function rng(seed: number): () => number {
 
 const stem = (p: string) => p.replace(/\.[^.]+$/, "");
 
+/**
+ * CONVERGENCE_SEEDS="100-299" replaces every config's pinned seeds with that
+ * range: a wide sweep for a history that fails to converge. A seed that fails
+ * is pinned by adding it to the config's `seeds` above.
+ */
+function seedsFor(cfg: Config): number[] {
+  const m = /^(\d+)-(\d+)$/.exec(process.env.CONVERGENCE_SEEDS ?? "");
+  if (!m) return cfg.seeds;
+  const out: number[] = [];
+  for (let s = Number(m[1]); s <= Number(m[2]); s++) out.push(s);
+  return out;
+}
+
 describe("randomised multi-device convergence", () => {
   for (const cfg of CONFIGS)
-    for (const seed of cfg.seeds) {
+    for (const seed of seedsFor(cfg)) {
       const { rounds: ROUNDS, paths: PATHS } = cfg;
       it(`${cfg.name}, seed ${seed}: ${ROUNDS} rounds converge without loss`, async () => {
       const r = rng(seed);

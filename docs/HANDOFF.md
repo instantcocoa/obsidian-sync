@@ -399,7 +399,12 @@ Obsidian; everything found is fixed and merged:
    rejection is retried; `review13-epoch-once.test.ts` forces the
    interleaving with a real rotation). Two stale comments in
    `blobstore/fs.go` reworded; the device test's outage case restarts the
-   unit in a finally.
+   unit in a finally. Verified after release: device run 12 (2026-11-08
+   04:50 UTC, 0.1.14 on the iPhone and iPad against util's systemd server)
+   20 of 20; a convergence sweep of 60 fresh seeds per config
+   (`CONVERGENCE_SEEDS=100-159`, 180 runs) and 60,000 merge-fuzz histories
+   (`MERGE_FUZZ_SEED=20261108 MERGE_FUZZ_ROUNDS=60000`) found no history
+   that fails to converge or loses a write.
 2. **Human security review.** Hand `docs/SECURITY-REVIEW-GUIDE.md` to a
    specialist. When findings come back, fix them in the style of the
    existing review rounds: a failing test first (`security_test.go` for the

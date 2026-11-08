@@ -99,7 +99,10 @@ export class ObsidianInstance {
     // Everything Electron and the renderer said, plus how the process ended,
     // lands in a file the CI artifact collects: a window that vanishes
     // mid-suite ("not connected") is otherwise undiagnosable after the fact.
-    o.logPath = join(base, "obsidian.log");
+    // Outside the instance directory, which stop() removes before the
+    // artifact is collected.
+    mkdirSync(join(CACHE, "logs"), { recursive: true });
+    o.logPath = join(CACHE, "logs", `${name}-${process.pid}-${Date.now()}.log`);
     o.proc.on("exit", (code, signal) => {
       o.log += `\n[electron exited code=${code} signal=${signal} at ${new Date().toISOString()}]\n`;
       o.flushLog();

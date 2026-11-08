@@ -77,6 +77,7 @@ const ALIAS = (folder: string) => new Error(`"${folder}" resolves to a folder sp
  */
 function refuseNotes(mac: Device): { on: boolean; refused: number } {
   const orig = mac.fs.write.bind(mac.fs);
+  const origProbe = mac.fs.aliasRefusal?.bind(mac.fs);
   const ctl = { on: true, refused: 0 };
   mac.fs.write = async (p, d, m) => {
     if (ctl.on && p.startsWith("notes/")) {
@@ -85,6 +86,11 @@ function refuseNotes(mac: Device): { on: boolean; refused: number } {
     }
     return orig(p, d, m);
   };
+  // The engine asks the volume first (VaultFS.aliasRefusal) before it
+  // downloads anything for a parked op; the stub must answer the way the
+  // write would, or on a case-sensitive volume the probe says "fine" and the
+  // test measures the wrong thing.
+  mac.fs.aliasRefusal = async (p) => (ctl.on && p.startsWith("notes/") ? ALIAS("notes").message : (await origProbe?.(p)) ?? null);
   return ctl;
 }
 

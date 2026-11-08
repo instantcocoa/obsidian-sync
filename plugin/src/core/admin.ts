@@ -320,15 +320,17 @@ export async function reencrypt(s: Session, onProgress?: (done: number, remainin
         // here would undo the length hiding vault-wide at every rotation.
         store = { compress: info.compressed, pad: info.padded };
       } catch (e) {
-        // Only a transport failure aborts (and is retried as a whole). Any
-        // other failure is a blob no key holder can read: bytes that do not
-        // hash to the id, a body that is not deflate, an epoch no row gives
-        // us a key for, garbage. It was never applicable, and it must not
+        // Only a proven defect of the bytes themselves (authentication
+        // failed, id mismatch, bad header, malformed compressed body, over
+        // the admitted size: CryptoError kind "defect") is a blob no key
+        // holder can read. Such a blob was never applicable, and it must not
         // hold the whole vault on the old keys: carry it over as a marked
         // placeholder under the new epoch. Every device keeps skipping that
         // op (blob_id mismatch), a later op for the path heals it, and the
-        // retired epoch can be pruned.
-        if (e instanceof HttpError || e instanceof NetworkError) throw e;
+        // retired epoch can be pruned. Anything else (transport, a key this
+        // device lacks, a runtime without DecompressionStream, an OOM) is
+        // about this device, not the blob: abort, replace nothing.
+        if (!(e instanceof CryptoError) || e.kind !== "defect") throw e;
         pt = utf8(`obsync: blob ${id} could not be decrypted during re-encryption and was replaced`);
         skipped.push(id);
       }
@@ -357,7 +359,7 @@ export async function reencrypt(s: Session, onProgress?: (done: number, remainin
           if (meta.blob === undefined) meta.blob = op.blob_id;
         } catch (e) {
           if (e instanceof HttpError || e instanceof NetworkError) throw e;
-          if (e instanceof CryptoError && /epoch/.test(e.message) && (await refreshKeyring(s))) {
+          if (e instanceof CryptoError && e.kind === "environment" && /epoch/.test(e.message) && (await refreshKeyring(s))) {
             try {
               meta = await s.vc.decryptMeta(op.path_id, fromB64(op.meta_enc));
               if (meta.blob === undefined) meta.blob = op.blob_id;
@@ -368,10 +370,12 @@ export async function reencrypt(s: Session, onProgress?: (done: number, remainin
               /* still unreadable: placeholder below */
             }
           }
-          // Unreadable metadata (a member's garbage, or not JSON at all):
-          // carry a placeholder that no applier accepts (an empty path fails
-          // validation), so the op stays skipped and the old epoch can still
-          // be retired.
+          // Unreadable metadata (a member's garbage: authentication failed,
+          // or not JSON at all) is a defect of the row. Carry a placeholder
+          // that no applier accepts (an empty path fails validation), so the
+          // op stays skipped and the old epoch can still be retired. A key
+          // this device lacks is about this device: abort instead.
+          if (!((e instanceof CryptoError && e.kind === "defect") || e instanceof SyntaxError)) throw e;
           meta = { path: "", mtime: 0, size: 0, blob: op.blob_id };
           skipped.push(`op ${op.seq}`);
         }
@@ -394,7 +398,7 @@ async function decryptForReencrypt(s: Session, id: string, ct: Uint8Array): Prom
   try {
     return await s.vc.decryptBlobInfo(id, ct);
   } catch (e) {
-    if (e instanceof CryptoError && /epoch/.test(e.message) && (await refreshKeyring(s))) return s.vc.decryptBlobInfo(id, ct);
+    if (e instanceof CryptoError && e.kind === "environment" && /epoch/.test(e.message) && (await refreshKeyring(s))) return s.vc.decryptBlobInfo(id, ct);
     throw e;
   }
 }

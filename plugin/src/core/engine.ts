@@ -144,6 +144,11 @@ type BlobCache = Map<string, Promise<Uint8Array>>;
 class ConcurrentLocalEdit extends Error {}
 
 /** A write refused because another program holds the file (Windows sharing violation, a read-only or locked file). */
+/** The filesystem refused to write through a folder the volume spells differently; transient once that folder is emptied or renamed. */
+function isAliasRefusal(e: unknown): boolean {
+  return /spelled differently on this volume/.test(String((e as Error)?.message ?? e));
+}
+
 function isFileInUse(e: unknown): boolean {
   return /\b(EBUSY|EPERM|EACCES|EAGAIN|ETXTBSY)\b|sharing violation|being used by another process/i.test(String((e as Error)?.message ?? e));
 }
@@ -865,11 +870,13 @@ export class Engine {
     // (writeRemote); the window bounds how many are held at once.
     const queue: string[] = [];
     const uses = new Map<string, number>(); // ops in this batch still to use each blob
+    const counted = new Set<Decoded>();
     for (const d of ordered) {
       if (this.excluded(d.logical) || !d.op.blob_id) continue;
       if (this.state.files[d.logical]?.hash === d.op.blob_id) continue;
       if (!uses.has(d.op.blob_id)) queue.push(d.op.blob_id);
       uses.set(d.op.blob_id, (uses.get(d.op.blob_id) ?? 0) + 1);
+      counted.add(d);
     }
     const blobs: BlobCache = new Map();
     const window = Math.max(1, Math.min(this.cfg.parallel, 8));
@@ -900,7 +907,7 @@ export class Engine {
         // retried as a whole; everything else is logged and skipped, and the
         // cursor moves on. A later op for the path heals it.
         if (e instanceof NetworkError || (e instanceof HttpError && e.transient)) throw e;
-        if (isFileInUse(e) && this.state.inflight[d.logical]) {
+        if ((isFileInUse(e) || isAliasRefusal(e)) && this.state.inflight[d.logical]) {
           // Another program holds the file open (Windows: EBUSY/EPERM for a
           // note open in an editor or being scanned). The inflight record
           // says what we meant to write; retry at the next cycle instead of
@@ -917,8 +924,9 @@ export class Engine {
         }
       }
       this.setStatus({ progress: { done: ++done, total: last.size } });
-      if (d.op.blob_id) {
-        // One blob under many names is downloaded once per batch, not once per name.
+      if (d.op.blob_id && counted.has(d)) {
+        // One blob under many names is downloaded once per batch, not once
+        // per name; only the ops that were counted release it.
         const left = (uses.get(d.op.blob_id) ?? 1) - 1;
         uses.set(d.op.blob_id, left);
         if (left <= 0) blobs.delete(d.op.blob_id);
@@ -1270,7 +1278,11 @@ export class Engine {
         // next scan then finds the file gone and pushes the delete against
         // it; a tombstone base would make the delete a no-op and leave the
         // bad row as head for everyone.
-        this.state.files[p.logical] = { hash: p.bytes ? null : r.conflict.blob_id, seq: r.conflict.seq, at: r.conflict.created_at, size: 0, mtime: 0 };
+        // "What we had" must be non-null for a delete to be pushed even when
+        // the bad head is itself a tombstone: prefer the version we really
+        // had, else the head's blob, else a sentinel.
+        const prev = this.state.files[p.logical]?.hash;
+        this.state.files[p.logical] = { hash: p.bytes ? null : (prev ?? r.conflict.blob_id ?? "0".repeat(64)), seq: r.conflict.seq, at: r.conflict.created_at, size: 0, mtime: 0 };
         this.markDirty(p.logical);
         return;
       }

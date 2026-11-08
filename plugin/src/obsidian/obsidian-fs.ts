@@ -12,7 +12,7 @@
  * Obsidian notices.
  */
 import { App, TFile, TFolder, normalizePath } from "obsidian";
-import { isSafeDevicePath } from "../core/paths";
+import { isOsJunk, isSafeDevicePath } from "../core/paths";
 import type { FileStat, VaultFS, StateStore } from "../core/fs";
 
 type AdapterExt = App["vault"]["adapter"] & {
@@ -254,7 +254,9 @@ export class ObsidianFS implements VaultFS {
             const twin = folders.find((f) => f.toLowerCase() === want.toLowerCase());
             if (twin) {
               const inside = await this.app.vault.adapter.list(twin);
-              if (inside.files.length === 0 && inside.folders.length === 0) await this.app.vault.adapter.rename(twin, want);
+              // OS junk (.DS_Store, desktop.ini) is never synced or deleted by sync; a folder holding only that is empty here.
+              const files = inside.files.filter((f) => !isOsJunk(normalizePath(f).slice(normalizePath(f).lastIndexOf("/") + 1)));
+              if (files.length === 0 && inside.folders.length === 0) await this.app.vault.adapter.rename(twin, want);
             }
           }
         }

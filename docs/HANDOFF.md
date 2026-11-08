@@ -252,6 +252,25 @@ Obsidian; everything found is fixed and merged:
    plus the epoch floor the plugin review asked for (blob header and
    meta_epoch below min_epoch are refused), clearer pre-check 401 bodies,
    orphan files deleted by path, README on `--trust-proxy 0.0.0.0/0`.
+1g. **Ninth review (2026-11-07 night): the eighth round's fixes. Plugin
+   3.5/5, server 3.5/5 → fixed, released as 0.1.8.** Plugin (5 proofs,
+   `review9-*.test.ts`): HIGH, the round-8 "placeholder on any
+   non-transport error" rule would have let a device without
+   DecompressionStream (older iOS WebKit) replace every compressed blob with
+   a placeholder during a rotation; placeholders are now allowed only for a
+   `CryptoError` of kind "defect" (and SyntaxError for metadata), every
+   environment failure aborts. The delete rebase missed a bad tombstone
+   head; a twin folder holding only .DS_Store counted as non-empty so a
+   case-only folder rename stranded the Mac (OS junk now counts as empty,
+   and a parent-alias refusal is retried like a busy file); the prefetch
+   refcount decremented for uncounted ops. Server (3 proofs,
+   `review9_test.go`): the swap left the blob's name empty between two
+   renames (hard link now, atomic rename over); the aside copy inherited
+   the old mtime so GC could sweep it mid-request (timestamped now); the
+   blob epoch floor is re-checked inside the row transaction. Also: merge
+   property tests (`merge-fuzz.test.ts`), Electron output and exit status
+   kept in the CI artifact (three macOS runner flakes in a row were
+   undiagnosable without it), govulncheck in CI.
 2. **Human security review.** Hand `docs/SECURITY-REVIEW-GUIDE.md` to a
    specialist. When findings come back, fix them in the style of the
    existing review rounds: a failing test first (`security_test.go` for the

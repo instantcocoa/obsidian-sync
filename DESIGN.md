@@ -993,7 +993,12 @@ head whose metadata is inconsistent is rebased on as a tombstone so the
 honest push supersedes it rather than conflicting forever; re-encryption
 carries an undecryptable blob over as a marked placeholder (and unreadable
 metadata as an empty-path placeholder no applier accepts) so one member's
-garbage cannot hold the vault on retired keys; a batch's blobs are fetched a
+garbage cannot hold the vault on retired keys, but only on a proven defect
+of the bytes themselves (`CryptoError` kind "defect": authentication
+failed, id mismatch, bad header, malformed compressed body, over the
+admitted size); a failure that is about this device (kind "environment": a
+key it lacks, a runtime without DecompressionStream, an out-of-memory)
+aborts the re-encryption and replaces nothing; a batch's blobs are fetched a
 bounded window ahead and each download is refused before decryption when it
 is larger than the authenticated size admits.
 Paths carrying `: < > " | ? *` are rejected outright (an NTFS `::$DATA`

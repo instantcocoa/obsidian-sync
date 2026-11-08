@@ -116,6 +116,11 @@ export function foldClash(a: string, b: string): boolean {
   return a !== b && fold(a) === fold(b);
 }
 
+/** Files the OS drops into folders that sync never carries and never deletes (always excluded). */
+export function isOsJunk(name: string): boolean {
+  return name === ".DS_Store" || name === "desktop.ini" || name === "Thumbs.db" || name.endsWith(".obsync-tmp") || name.endsWith(".obsync-conflict-tmp");
+}
+
 /** Is this logical path the config dir or inside it? ("$CONFIGx" is a plain folder.) */
 export function isConfigLogical(logical: string): boolean {
   return logical === CONFIG_TOKEN || logical.startsWith(CONFIG_TOKEN + "/");

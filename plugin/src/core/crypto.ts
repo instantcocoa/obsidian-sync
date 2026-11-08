@@ -119,7 +119,23 @@ async function gcmDecrypt(key: CryptoKey, nonce: Uint8Array, aad: Uint8Array, ct
   }
 }
 
-export class CryptoError extends Error {}
+/**
+ * `kind` says whom the failure is about. "defect": the bytes themselves are
+ * wrong for any key holder (authentication failed, id mismatch, bad header,
+ * malformed compressed body, over the admitted size); re-encryption may
+ * replace such a blob with a placeholder. "environment": this device cannot
+ * read bytes another device may well read (no key for the epoch yet, no
+ * DecompressionStream in this WebView); nothing may be replaced on that
+ * evidence.
+ */
+export class CryptoError extends Error {
+  constructor(
+    message: string,
+    public readonly kind: "defect" | "environment" = "defect",
+  ) {
+    super(message);
+  }
+}
 
 // ---------- keyring ----------
 
@@ -184,7 +200,7 @@ export class VaultCrypto {
 
   private epochKey(epoch: number): Uint8Array {
     const k = this.keyring.epochs.get(epoch);
-    if (!k) throw new CryptoError(`no key for epoch ${epoch}`);
+    if (!k) throw new CryptoError(`no key for epoch ${epoch}`, "environment");
     return k;
   }
 
@@ -658,8 +674,14 @@ export async function deflate(data: Uint8Array): Promise<Uint8Array | null> {
 }
 
 export async function inflate(data: Uint8Array, limit = MAX_PLAIN): Promise<Uint8Array> {
-  if (typeof DecompressionStream === "undefined") throw new CryptoError("compressed blob but no DecompressionStream");
-  return pipe(data, new DecompressionStream("deflate-raw"), limit);
+  if (typeof DecompressionStream === "undefined") throw new CryptoError("compressed blob but no DecompressionStream in this runtime", "environment");
+  try {
+    return await pipe(data, new DecompressionStream("deflate-raw"), limit);
+  } catch (e) {
+    if (e instanceof CryptoError) throw e; // the size limit
+    // The decompressor rejected the body: not deflate, truncated, corrupt.
+    throw new CryptoError(`malformed compressed body: ${(e as Error)?.message ?? e}`);
+  }
 }
 
 export { bytesEqual };

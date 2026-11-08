@@ -5,6 +5,7 @@
  */
 import type { FileStat, StateStore, VaultFS } from "./fs";
 import { promises as fsp, watch, type FSWatcher } from "node:fs";
+import { isOsJunk } from "./paths";
 import * as nodePath from "node:path";
 
 export class NodeFS implements VaultFS {
@@ -127,7 +128,10 @@ export class NodeFS implements VaultFS {
           for (const e of siblings) {
             const es = await fsp.stat(this.abs(rel ? `${rel}/${e}` : e)).catch(() => null);
             if (!es || !es.isDirectory() || es.ino !== st.ino) continue;
-            const inside = await fsp.readdir(this.abs(rel ? `${rel}/${e}` : e)).catch(() => ["?"]);
+            // Finder's .DS_Store and Explorer's desktop.ini are never synced
+            // and never deleted by sync, so a folder holding only those is
+            // empty for this purpose (they move with the rename).
+            const inside = (await fsp.readdir(this.abs(rel ? `${rel}/${e}` : e)).catch(() => ["?"])).filter((n) => !isOsJunk(n));
             if (inside.length === 0) await fsp.rename(this.abs(rel ? `${rel}/${e}` : e), this.abs(want)).catch(() => {});
             break;
           }

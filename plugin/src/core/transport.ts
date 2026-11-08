@@ -12,6 +12,47 @@
 
 import { b64, fromB64 } from "./encoding";
 
+/** Deadlines of responses whose bodies are still to be read (cleared by readBody). */
+const bodyDeadlines = new WeakMap<Response, { settled: () => void }>();
+
+/**
+ * A deadline signal from AbortController and setTimeout alone, forwarding a
+ * caller's abort when one is given. `settled()` stops the timer once the
+ * request, body included, is done.
+ */
+function deadline(ms: number, caller?: AbortSignal): { signal: AbortSignal; settled: () => void } {
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(timeoutReason()), ms);
+  const onCallerAbort = () => ac.abort(caller?.reason);
+  if (caller) {
+    if (caller.aborted) ac.abort(caller.reason);
+    else caller.addEventListener("abort", onCallerAbort, { once: true });
+  }
+  return {
+    signal: ac.signal,
+    settled: () => {
+      clearTimeout(timer);
+      caller?.removeEventListener("abort", onCallerAbort);
+    },
+  };
+}
+
+function timeoutReason(): unknown {
+  try {
+    return new DOMException("request deadline passed", "TimeoutError");
+  } catch {
+    return new Error("request deadline passed");
+  }
+}
+
+/** A connection failure or a deadline we raised, as opposed to a caller's own abort or an HTTP answer. */
+function isNetworkFailure(e: unknown, caller?: AbortSignal): boolean {
+  if (caller?.aborted) return false;
+  if (e instanceof TypeError) return true;
+  const name = (e as { name?: string })?.name;
+  return name === "TimeoutError" || name === "AbortError";
+}
+
 export class HttpError extends Error {
   constructor(
     public status: number,
@@ -172,22 +213,29 @@ export class Client {
     const isBlob = init.raw === true || payload instanceof Uint8Array || path.includes("/blobs/");
     const deadlineMs = init.timeoutMs ?? (isBlob ? 30 * 60_000 : 60_000);
     for (let attempt = 0; ; attempt++) {
-      const timer = AbortSignal.timeout(deadlineMs);
-      const signal = init.signal ? (typeof AbortSignal.any === "function" ? AbortSignal.any([init.signal, timer]) : init.signal) : timer;
+      // Built from AbortController and setTimeout only: AbortSignal.timeout
+      // and AbortSignal.any are newer than the oldest WebKit Obsidian still
+      // ships to, and a missing one must not take the whole plugin offline.
+      // The timer runs until the body has been read (json/getBlob clear it
+      // through `settled`), so a stalled body is cut off too.
+      const dl = deadline(deadlineMs, init.signal);
       try {
-        const res = await this.fetchImpl(this.base + path, { method, headers, body: payload, signal });
+        const res = await this.fetchImpl(this.base + path, { method, headers, body: payload, signal: dl.signal });
+        bodyDeadlines.set(res, dl);
         if (!res.ok) {
           const text = await res.text().catch(() => "");
+          dl.settled();
           const err = new HttpError(res.status, text, path);
           if (err.transient && attempt < max) throw err;
           throw Object.assign(err, { final: true });
         }
         return res;
       } catch (e) {
+        dl.settled();
         if ((e as { final?: boolean }).final || attempt >= max || init.signal?.aborted) {
           // fetch reports every connection problem as a bare TypeError ("Failed
-          // to fetch"); a deadline is a TimeoutError. Both are the network.
-          if (e instanceof TypeError || (e as { name?: string })?.name === "TimeoutError" || ((e as { name?: string })?.name === "AbortError" && !init.signal?.aborted)) throw new NetworkError(this.base, e);
+          // to fetch"); a deadline is an abort we raised. Both are the network.
+          if (isNetworkFailure(e, init.signal)) throw new NetworkError(this.base, e);
           throw e;
         }
         this.opts.onRetry?.(e, attempt);
@@ -198,8 +246,24 @@ export class Client {
 
   private async json<T>(method: string, path: string, body?: unknown, init?: Parameters<Client["request"]>[3]): Promise<T> {
     const res = await this.request(method, path, body, init);
-    if (res.status === 204) return undefined as T;
-    return (await res.json()) as T;
+    if (res.status === 204) {
+      bodyDeadlines.get(res)?.settled();
+      return undefined as T;
+    }
+    return (await this.readBody(res, (r) => r.json(), init?.signal)) as T;
+  }
+
+  /** Read a response body under the request's deadline; a stall or our own abort is a network failure. */
+  private async readBody<T>(res: Response, read: (r: Response) => Promise<T>, callerSignal?: AbortSignal): Promise<T> {
+    const dl = bodyDeadlines.get(res);
+    try {
+      return await read(res);
+    } catch (e) {
+      if (isNetworkFailure(e, callerSignal)) throw new NetworkError(this.base, e);
+      throw e;
+    } finally {
+      dl?.settled();
+    }
   }
 
   // ---------- admin / enrolment ----------
@@ -339,7 +403,7 @@ export class Client {
 
   async getBlob(vaultId: string, id: string, signal?: AbortSignal): Promise<Uint8Array> {
     const res = await this.request("GET", `/v1/vaults/${vaultId}/blobs/${id}`, undefined, { signal });
-    return new Uint8Array(await res.arrayBuffer());
+    return new Uint8Array(await this.readBody(res, (r) => r.arrayBuffer(), signal));
   }
 
   async blobsBelowEpoch(vaultId: string, epoch: number, limit = 500): Promise<string[]> {

@@ -144,12 +144,13 @@ func isHexID(s string) bool {
 }
 
 // SweepStale removes staging, aside and temp files of interrupted uploads
-// older than `age`. "<id>-stage-<nonce>" and "<id>-prev-<nonce>" carry their
-// creation time in the nonce (base-36 UnixNano, minted by putBlob), which is
-// what is aged: an aside copy is a hard link and shares the old blob's mtime,
-// and a touch would need file ownership. ".tmp-<id>-*" from Put is aged by
-// mtime. Nothing else matches those names, so a live upload younger than
-// `age` is the only thing spared.
+// older than `age`. Each class is aged by the clock that tells the truth
+// about it: "<id>-prev-<nonce>" is a hard link that shares the old blob's
+// mtime, so it is aged by the base-36 UnixNano in its name (minted by Swap;
+// an implausible value falls back to mtime); "<id>-stage-<counter>-<nanos>"
+// and ".tmp-<id>-*" are fresh files, so they are aged by mtime (the stage
+// name's nanos are for uniqueness, not for ageing). Nothing else matches
+// those names, so a live upload younger than `age` is the only thing spared.
 func (f *FS) SweepStale(vault string, age time.Duration) (int, error) {
 	root := filepath.Join(f.root, vault)
 	cutoff := time.Now().Add(-age)
@@ -233,9 +234,9 @@ func (f *FS) Promote(vault, stage, id string) error {
 // The aside copy is a hard link, not a rename: the rename of `stage` over
 // `id` then replaces the file atomically and the name is never empty, so a
 // reader fetching the blob at that instant never sees "no such file" (which
-// the plugin would take for a permanent 404 and skip the op). The link's
-// timestamp is set to now, so GC's hour-of-grace sweep for abandoned files
-// counts from this request, not from the old blob's write. On a file system
+// the plugin would take for a permanent 404 and skip the op). The link keeps
+// the old blob's mtime (a touch would need ownership), so SweepStale ages it
+// by the nonce in its name, minted here, not by mtime. On a file system
 // without hard links the rename pair is used instead.
 func (f *FS) Swap(vault, stage, id, prev string) (bool, error) {
 	had := false

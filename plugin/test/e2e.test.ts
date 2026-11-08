@@ -325,12 +325,17 @@ describe("two devices", () => {
     }
     const refused: string[] = [];
     b.engine["hooks"].onSkipped = (p: string) => refused.push(p);
+    const logsBefore = b.logs.length;
     await b.sync();
     const files = await b.files();
     expect(files.filter((f) => /pwned|other\.md/.test(f))).toEqual([]);
-    // Each refusal is reported like any other skipped op: the user learns a
-    // file exists in the vault that this device will never show.
-    expect(refused.sort()).toEqual(["$CONFIG/plugins/obsync/pwned.js", "../escaped.txt", "notes/../$CONFIG/plugins/obsync/pwned.js", "notes/other.md"].sort());
+    // The refusals are reported like any other skipped ops: the user learns
+    // files exist in the vault that this device will never show. A batch
+    // with several is one notice naming the count (round 13: a member's
+    // thousand bad rows must not become a thousand notices), and the log
+    // names every one.
+    expect(refused).toEqual([expect.stringMatching(/^4 changes \(\.\.\/escaped\.txt, notes\/\.\.\/\$CONFIG\/plugins\/obsync\/pwned\.js, \$CONFIG\/plugins\/obsync\/pwned\.js, …\)$/)]);
+    expect(b.logs.slice(logsBefore).filter((l) => /unsafe or mismatched path; refusing to apply it/.test(l)).length).toBe(4);
     expect(await fsp.readFile(join(b.dir, "..", "escaped.txt"), "utf8").catch(() => null)).toBeNull();
     // The honest op at the end was applied; nothing else was.
     expect(await b.read("notes/a.md")).toBe("pwned\n");

@@ -394,7 +394,7 @@ export default class ObsyncPlugin extends Plugin {
             60000,
           ),
         onConflict: (p, sib) => this.routineNotice(`obsync: conflict on ${p}. Your version was saved as ${sib}.`, 10000),
-        onSkipped: (p, why) => new Notice(`obsync: could not apply the latest version of ${p} (${why}). Your local copy was kept and sync continues; the next change to that file on any device will fix it.`, 12000),
+        onSkipped: (p, why) => this.reportSkipped(p, why),
         confirmMassDelete: (paths) =>
           ConfirmModal.ask(
             this.app,
@@ -660,6 +660,30 @@ export default class ObsyncPlugin extends Plugin {
   /** Set the recovery passphrase without the modal (also used by the in-Obsidian tests). */
   async setRecovery(passphrase: string): Promise<void> {
     await setRecoveryPassphrase(this.need(), passphrase);
+  }
+
+  private skipped: { p: string; why: string }[] = [];
+  private skippedTimer: ReturnType<typeof setTimeout> | null = null;
+
+  /**
+   * One notice per burst, not one per row: a member's thousand bad rows
+   * must not become a thousand twelve-second notices on every device. The
+   * full list goes to the console.
+   */
+  private reportSkipped(p: string, why: string): void {
+    this.skipped.push({ p, why });
+    console.warn(`obsync: could not apply the latest version of ${p}: ${why}`);
+    if (this.skippedTimer) return;
+    this.skippedTimer = setTimeout(() => {
+      this.skippedTimer = null;
+      const items = this.skipped.splice(0);
+      if (items.length === 1) {
+        new Notice(`obsync: could not apply the latest version of ${items[0].p} (${items[0].why}). Your local copy was kept and sync continues; the next change to that file on any device will fix it.`, 12000);
+        return;
+      }
+      const shown = items.slice(0, 3).map((i) => i.p).join(", ");
+      new Notice(`obsync: ${items.length} changes could not be applied on this device (${shown}${items.length > 3 ? ", …" : ""}). Local copies were kept and sync continues; the console lists every one and why.`, 12000);
+    }, 1500);
   }
 
   /**

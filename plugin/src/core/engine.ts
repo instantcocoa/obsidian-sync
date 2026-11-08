@@ -178,6 +178,12 @@ export class Engine {
   private excluded: (p: string) => boolean;
   private syncing: Promise<void> | null = null;
   private wantSync = false;
+  /** Paths whose push was held back until the next pull (their conflict head could not be trusted and sat above the cursor). */
+  private pullFirst = new Set<string>();
+  private pullFirstRounds = 0;
+  /** Paths whose current bytes must be pushed even if unchanged, to supersede a head nobody can read. */
+  private supersede = new Set<string>();
+  private healAfterBatch: { logical: string; seq: number; at: number }[] = [];
   private kickTimer: ReturnType<typeof setTimeout> | null = null;
   private pollTimer: ReturnType<typeof setInterval> | null = null;
   private dotTimer: ReturnType<typeof setInterval> | null = null;
@@ -551,6 +557,8 @@ export class Engine {
           await this.retryDeferred();
           try {
             await this.pull();
+            for (const p of this.pullFirst) this.markDirty(p);
+            this.pullFirst.clear();
             await this.push();
           } finally {
             // Acceptance covers one sync: armed and unused, it must not wait
@@ -559,6 +567,7 @@ export class Engine {
           }
           this.setStatus({ phase: "idle", lastSync: Date.now() });
         } while (this.wantSync && !this.stopped);
+        this.pullFirstRounds = 0;
       } catch (err) {
         const offline = err instanceof TypeError || err instanceof NetworkError || (err instanceof HttpError && err.transient);
         let message = String((err as Error).message ?? err);
@@ -675,6 +684,24 @@ export class Engine {
     }
     if (Object.keys(d).length === 0) delete this.state.deferred;
     this.scheduleSave();
+  }
+
+  /**
+   * The newest readable, consistent version of a path beneath a bad head and
+   * above what this device last synced, or null. Used when a conflict head
+   * cannot be trusted: the honest work under it must still be resolved
+   * against, not superseded.
+   */
+  private async newestReadableBelow(logical: string, bad: WireOp): Promise<{ op: WireOp; meta: FileMeta } | null> {
+    const have = this.state.files[logical]?.seq ?? 0;
+    const hist = (await this.client.history(this.cfg.vaultId, bad.path_id)).sort((a, b) => b.seq - a.seq);
+    for (const op of hist) {
+      if (op.seq >= bad.seq) continue;
+      if (op.seq <= have) break;
+      const meta = await this.decodeOp(op, () => {});
+      if (meta) return { op, meta };
+    }
+    return null;
   }
 
   /** How long a deferred op is retried before it is dropped with a notice: a day. */
@@ -924,7 +951,7 @@ export class Engine {
    * alias of the config dir, and the metadata's blob must be the row's. Null
    * (reported) when the op must not be applied on this device.
    */
-  private async decodeOp(op: WireOp): Promise<FileMeta | null> {
+  private async decodeOp(op: WireOp, report: (label: string, why: string) => void = (l, w) => this.hooks.onSkipped?.(l, w)): Promise<FileMeta | null> {
     let meta: FileMeta | null = null;
     try {
       meta = await this.vc.decryptMeta(op.path_id, fromB64(op.meta_enc));
@@ -939,11 +966,11 @@ export class Engine {
           meta = await this.vc.decryptMeta(op.path_id, fromB64(op.meta_enc));
         } catch (e2) {
           this.log("error", `cannot decrypt metadata for op ${op.seq} even after refreshing keys; skipping`, e2);
-          this.hooks.onSkipped?.(`(op ${op.seq})`, "its metadata names a key no device has; the server's record of this change is unusable");
+          report(`(op ${op.seq})`, "its metadata names a key no device has; the server's record of this change is unusable");
         }
       } else {
         this.log("error", `cannot decrypt metadata for op ${op.seq}; skipping`, e);
-        this.hooks.onSkipped?.(`(op ${op.seq})`, "its metadata cannot be read; the server's record of this change is unusable");
+        report(`(op ${op.seq})`, "its metadata cannot be read; the server's record of this change is unusable");
       }
     }
     // The path comes from another device. It must be a plain relative
@@ -954,7 +981,7 @@ export class Engine {
       this.log("error", `op ${op.seq} carries an unsafe or mismatched path; refusing to apply it`, { path: meta.path });
       // Report it like any other skipped op: the user should know a file
       // exists in the vault that this device will never show.
-      this.hooks.onSkipped?.(meta.path, "the name is not allowed on this device");
+      report(meta.path, "the name is not allowed on this device");
       meta = null;
     }
     // The op row (blob_id beside meta_enc) is not authenticated; the
@@ -962,7 +989,7 @@ export class Engine {
     // row has been re-pointed by whoever holds the database.
     if (meta && meta.blob !== undefined && meta.blob !== op.blob_id) {
       this.log("error", `op ${op.seq}: metadata names blob ${meta.blob ?? "null"} but the op carries ${op.blob_id ?? "null"}; refusing to apply it`, { path: meta.path });
-      this.hooks.onSkipped?.(meta.path, "the server's record of this change is inconsistent");
+      report(meta.path, "the server's record of this change is inconsistent");
       meta = null;
     }
     // Paths are keyed by their NFC form (path_id above proves meta.path is
@@ -975,9 +1002,31 @@ export class Engine {
   private async applyBatch(ops: WireOp[]): Promise<void> {
     type Decoded = { op: WireOp; meta: FileMeta | null; logical: string };
     const decoded: Decoded[] = [];
+    // Rejections are reported once per batch, not once per row: a member's
+    // thousand bad rows must not become a thousand notices on every device.
+    const rejected: { label: string; why: string }[] = [];
     for (const op of ops) {
-      const meta = await this.decodeOp(op);
+      const meta = await this.decodeOp(op, (label, why) => rejected.push({ label, why }));
       decoded.push({ op, meta, logical: meta?.path ?? "" });
+    }
+    if (rejected.length === 1) this.hooks.onSkipped?.(rejected[0].label, rejected[0].why);
+    else if (rejected.length > 1) {
+      this.hooks.onSkipped?.(`${rejected.length} changes (${rejected.slice(0, 3).map((r) => r.label).join(", ")}${rejected.length > 3 ? ", …" : ""})`, "the server's records of these changes are unusable on this device; the log lists each one");
+    }
+    // A rejected op that is the newest for its path leaves the path headless
+    // for every device that has not got it yet (a fresh device skips the head
+    // and shows nothing). A device that holds a readable version heals it:
+    // after this batch is applied it re-pushes its bytes over the bad head.
+    const newestByPath = new Map<string, WireOp>();
+    for (const d of decoded) newestByPath.set(d.op.path_id, d.op);
+    const badHeads = decoded.filter((d) => !d.meta && newestByPath.get(d.op.path_id) === d.op).map((d) => d.op);
+    if (badHeads.length) {
+      const byId = new Map<string, string>();
+      for (const logical of Object.keys(this.state.files)) byId.set(await this.vc.pathId(logical), logical);
+      for (const op of badHeads) {
+        const logical = byId.get(op.path_id);
+        if (logical) this.healAfterBatch.push({ logical, seq: op.seq, at: op.created_at });
+      }
     }
     // Only the last op per path in this batch matters. Deletes go first: a
     // rename on a case-insensitive volume ("Note.md" -> "note.md") is a delete
@@ -1062,6 +1111,14 @@ export class Engine {
       prefetch();
     }
     this.setStatus({ progress: undefined });
+    for (const h of this.healAfterBatch.splice(0)) {
+      const e = this.state.files[h.logical];
+      if (!e || e.hash === null) continue;
+      this.log("warn", `op ${h.seq} is an unusable head for ${h.logical}; re-pushing this device's version over it so every device sees the file again`);
+      this.state.files[h.logical] = { ...e, seq: h.seq, at: h.at };
+      this.supersede.add(h.logical);
+      this.markDirty(h.logical);
+    }
   }
 
   private async parallel<T>(items: T[], fn: (t: T) => Promise<void>): Promise<void> {
@@ -1404,8 +1461,45 @@ export class Engine {
       // it. (Merely skipping it would leave this path frozen: every honest
       // edit would conflict with the same bad head forever.)
       if (!meta || meta.path.normalize("NFC") !== p.logical || (meta.blob !== undefined && meta.blob !== r.conflict.blob_id)) {
+        if (r.conflict.seq > this.state.cursor) {
+          // The bad head sits above our cursor: there may be honest versions
+          // between what we pulled and it that we have not seen. Rebasing on
+          // it now would record its seq as seen and let our push supersede
+          // them with no sibling. Leave the file dirty, pull first (the next
+          // round resolves those versions as ordinary conflicts and skips the
+          // bad row), then push again.
+          this.log("info", `conflict head ${r.conflict.seq} for ${p.logical} is unreadable or inconsistent and newer than our cursor ${this.state.cursor}; pulling before resolving`);
+          this.dirty.delete(p.logical); // not this push round: the push loop would only retry into the same head
+          this.pullFirst.add(p.logical);
+          if (this.pullFirstRounds++ < 2) this.wantSync = true; // bounded: a member posting bad heads in a loop cannot keep this sync spinning
+          return;
+        }
         if (meta) this.log("error", `conflict head for ${p.logical} is inconsistent (path ${meta.path}, blob ${meta.blob ?? "null"} vs ${r.conflict.blob_id ?? "null"}); our version will replace it`);
         this.hooks.onSkipped?.(this.device(p.logical), "the server's record of the other version is inconsistent; yours replaces it");
+        // Honest versions may sit beneath the bad head that this device never
+        // resolved against (a dirty path is resolved on push, not on pull).
+        // Resolve against the newest readable one first, so it survives as a
+        // sibling or a merge, then rebase the push on the bad head.
+        const honest = await this.newestReadableBelow(p.logical, r.conflict);
+        if (honest) {
+          if (p.bytes) {
+            try {
+              await this.resolveConflict(p.logical, p.bytes, p.op.blob_id!, honest.op, honest.meta, undefined, p.st ?? null);
+            } catch (e) {
+              if (!(e instanceof ConcurrentLocalEdit)) throw e;
+              this.markDirty(p.logical);
+              return;
+            }
+          } else {
+            await this.applyRemote(p.logical, honest.op, honest.meta, new Map());
+          }
+          const e = this.state.files[p.logical];
+          if (e) {
+            this.state.files[p.logical] = { ...e, seq: r.conflict.seq, at: r.conflict.created_at };
+            this.markDirty(p.logical);
+            return;
+          }
+        }
         // Rebase on the bad head. For an edit, as a tombstone (our bytes are
         // the file). For a delete, as if the bad head were what we had: the
         // next scan then finds the file gone and pushes the delete against
@@ -1438,10 +1532,12 @@ export class Engine {
       }
     } else {
       this.log("error", `op rejected for ${p.logical}: ${r.error}`);
-      // Retry next round: the blob is still on its way, or our keyring is
+      // Retry next round: the blob is still on its way, our keyring is
       // behind the server's epoch window (the next pull adopts the new epoch
-      // and the push re-encrypts). Anything else is final for these bytes.
-      if (/blob not uploaded|min_epoch/.test(r.error ?? "")) return;
+      // and the push re-encrypts), or the header and meta_epoch disagreed
+      // (a rotation raced the op builder; the rebuilt op is consistent).
+      // Anything else is final for these bytes.
+      if (/blob not uploaded|min_epoch|header/.test(r.error ?? "")) return;
       this.dirty.delete(p.logical);
     }
   }
@@ -1465,7 +1561,12 @@ export class Engine {
       const pathId = await this.vc.pathId(logical);
       const e = this.state.files[logical];
       const meta: FileMeta = { path: logical, mtime: st.mtime, size: st.size, blob: hash };
-      const op: OpInput = { op_id: opId(), path_id: pathId, blob_id: hash, meta_enc: await this.vc.encryptMeta(pathId, meta), meta_epoch: this.vc.keyring.current, base_seq: e?.seq ?? 0 };
+      // The epoch is read once and sealed into both the header and meta_epoch:
+      // a rotation landing inside encryptMeta must not split the two (the
+      // server refuses such a row; before 0.1.13 it stored a row no device
+      // could read once that epoch was pruned).
+      const epoch = this.vc.keyring.current;
+      const op: OpInput = { op_id: opId(), path_id: pathId, blob_id: hash, meta_enc: await this.vc.encryptMeta(pathId, meta, { epoch }), meta_epoch: epoch, base_seq: e?.seq ?? 0 };
       let r = (await this.client.postOps(this.cfg.vaultId, [op])).results[0];
       if (r.conflict) {
         // An explicit repair means "these bytes win": rebase onto the current head once.
@@ -1489,23 +1590,27 @@ export class Engine {
     const e = this.state.files[logical];
     const st = await this.fs.stat(devPath);
     const pathId = await this.vc.pathId(logical);
+    // Read once: header and meta_epoch must agree even if a rotation lands
+    // while encryptMeta is in flight (see reupload).
+    const epoch = this.vc.keyring.current;
     if (!st) {
       if (!e || e.hash === null) return null; // nothing to delete
       const meta: FileMeta = { path: logical, mtime: Date.now(), size: 0, blob: null };
-      return { logical, op: { op_id: opId(), path_id: pathId, blob_id: null, meta_enc: await this.vc.encryptMeta(pathId, meta), meta_epoch: this.vc.keyring.current, base_seq: e.seq } };
+      return { logical, op: { op_id: opId(), path_id: pathId, blob_id: null, meta_enc: await this.vc.encryptMeta(pathId, meta, { epoch }), meta_epoch: epoch, base_seq: e.seq } };
     }
     const { bytes, hash } = await this.hashFile(devPath);
-    if (e && e.hash === hash) {
+    if (e && e.hash === hash && !this.supersede.has(logical)) {
       e.size = st.size;
       e.mtime = st.mtime;
       return null; // unchanged after all
     }
+    this.supersede.delete(logical);
     const meta: FileMeta = { path: logical, mtime: st.mtime, size: st.size, blob: hash };
     return {
       logical,
       bytes,
       st,
-      op: { op_id: opId(), path_id: pathId, blob_id: hash, meta_enc: await this.vc.encryptMeta(pathId, meta), meta_epoch: this.vc.keyring.current, base_seq: e?.seq ?? 0 },
+      op: { op_id: opId(), path_id: pathId, blob_id: hash, meta_enc: await this.vc.encryptMeta(pathId, meta, { epoch }), meta_epoch: epoch, base_seq: e?.seq ?? 0 },
     };
   }
 

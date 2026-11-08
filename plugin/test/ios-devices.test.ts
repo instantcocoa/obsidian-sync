@@ -223,10 +223,13 @@ describe.skipIf(!ON)("obsync on a physical iPhone and iPad (real Obsidian for iO
 
   it("an edit on the iPhone while the server is down syncs when it returns", async () => {
     await srv.halt();
-    phone.newNote("notes/outage.md", "# written during the outage\n");
-    await sleep(15_000);
-    phone.screenshot("server-down");
-    await srv.resume();
+    try {
+      phone.newNote("notes/outage.md", "# written during the outage\n");
+      await sleep(15_000);
+      phone.screenshot("server-down");
+    } finally {
+      await srv.resume(); // a failure in between must not leave the unit stopped
+    }
     await waitFor("outage.md on the mac", async () => {
       await mac.sync();
       return mac.exists("notes/outage.md");

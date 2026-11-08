@@ -67,4 +67,17 @@ describe("shipped bundle is mobile-safe", () => {
       expect(ctx, ctx).toMatch(/try\{/);
     }
   });
+
+  it("uses no web API newer than the oldest WebKit Obsidian still ships to", () => {
+    // Obsidian mobile's floor is iOS 15 (WebKit 15). The webkit gate runs in
+    // Playwright's current WebKit and would not notice. Round 13: the request
+    // deadline was first built on AbortSignal.timeout (WebKit 16), which made
+    // every request throw before fetch on an iOS 15 device and showed the
+    // plugin as "offline" for ever. The deadline is AbortController +
+    // setTimeout now; keep it that way.
+    expect(js).not.toMatch(/AbortSignal\.(timeout|any)\b/);
+    expect(js).not.toMatch(/\bstructuredClone\(/); // WebKit 15.4
+    expect(js).not.toMatch(/\.findLast(Index)?\(/); // WebKit 15.4
+    expect(js).not.toMatch(/\.toSorted\(|\.toReversed\(|\.with\(\d/); // WebKit 16
+  });
 });

@@ -8,3 +8,5 @@ dist/
 plugin/node_modules/
 plugin/main.js
 plugin/.cache/
+
+.cache/

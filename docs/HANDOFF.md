@@ -372,6 +372,34 @@ Obsidian; everything found is fixed and merged:
    it nothing; PBKDF2 is 2,000,000); the malicious-server residuals listed
    explicitly in §5.7 (withhold, replay as rollback, split views, a lied
    min_epoch pruning keys, a hidden roster entry).
+1m. **Thirteenth review (2026-11-08): the twelfth round's own fixes, read as
+   hurried fixes with edges. Plugin 3.5/5, server 4.5/5 (first round with no
+   proven server defect). Fixed, released as 0.1.14.** Plugin
+   (`review13-*.test.ts`, report in `plugin/.cache/agent-review13/`): the
+   settle() rebase on an unreadable or inconsistent conflict head assumed
+   every honest version beneath the head had been pulled; in the window
+   between a device's pull and its push a member's garbage row on top of
+   another device's honest edit made that edit vanish with no sibling (a head
+   above the cursor now holds the push and pulls first, bounded to two
+   rounds; a head at or below it is resolved against the newest readable
+   version beneath before the rebase; a device holding a readable version
+   re-pushes over a bad head after the batch); the request deadline was
+   `AbortSignal.timeout` (WebKit 16) on a platform whose floor is iOS 15, so
+   every request would have thrown before fetch (AbortController + setTimeout
+   now, and `bundle-mobile.test.ts` refuses the newer APIs); a body that
+   stalled past the deadline rejected with a raw TimeoutError outside the
+   offline mapping (bodies are read inside the deadline and mapped); one
+   notice per unreadable row, uncapped (one per batch naming the count).
+   Server (`review13_test.go`, report in `plugin/.cache/agent-review13-server/`):
+   no defect; its one LOW was plugin-side and real: the op builder read the
+   keyring epoch twice (encryptMeta's header, then meta_epoch), so a rotation
+   landing between the two produced header N / meta_epoch N+1, exactly the
+   row the round-12 HIGH was about, now refused by the server and parked by
+   the plugin (read once and passed to encryptMeta; a header-mismatch
+   rejection is retried; `review13-epoch-once.test.ts` forces the
+   interleaving with a real rotation). Two stale comments in
+   `blobstore/fs.go` reworded; the device test's outage case restarts the
+   unit in a finally.
 2. **Human security review.** Hand `docs/SECURITY-REVIEW-GUIDE.md` to a
    specialist. When findings come back, fix them in the style of the
    existing review rounds: a failing test first (`security_test.go` for the

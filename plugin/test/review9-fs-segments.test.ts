@@ -24,12 +24,11 @@
  *     folder is refused (by design, as 0.1.5 did).
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { appendFileSync, existsSync, mkdirSync, mkdtempSync, rmSync, promises as fsp } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, promises as fsp } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { TestServer, Device, ADMIN } from "./harness";
 import { NodeFS } from "../src/core/node-fs";
-import { NodeFS as NodeFS016 } from "../.cache/agent-review9/node-fs-016";
 import { createVault, createInviteLink, joinWithLink, type Session } from "../src/core/admin";
 import { utf8 } from "../src/core/encoding";
 
@@ -122,22 +121,19 @@ describe("2. measurement: per-write cost of the per-segment probes", () => {
       rmSync(root, { recursive: true, force: true });
     }
   }
-  it("500 depth-5 writes and 300 writes into a 2,000-file folder, 0.1.7 vs 0.1.6", async () => {
+  it("500 depth-5 writes and 300 writes into a 2,000-file folder stay cheap with the per-segment probe", async () => {
+    // Measured during the ninth review against a copy of the 0.1.6 NodeFS on
+    // APFS: 1.55x per write for depth-5 paths (0.51 vs 0.33 ms) and 1.16x in
+    // a 2,000-file folder. The baseline copy is not in the tree; this keeps
+    // the absolute numbers in the log and a loose ceiling as the regression guard.
     const deep = Array.from({ length: 500 }, (_, i) => `a${i % 5}/b${i % 7}/c${i % 3}/d${i % 2}/${i}.md`);
     const flatPre = Array.from({ length: 2000 }, (_, i) => `flat/pre-${i}.md`);
     const flat = Array.from({ length: 300 }, (_, i) => `flat/new-${i}.md`);
-    const d7 = await time("0.1.7 deep", (r) => new NodeFS(r), deep);
-    const d6 = await time("0.1.6 deep", (r) => new NodeFS016(r), deep);
-    const f7 = await time("0.1.7 flat/2000", (r) => new NodeFS(r), flat, flatPre);
-    const f6 = await time("0.1.6 flat/2000", (r) => new NodeFS016(r), flat, flatPre);
-    const summary = [
-      `0.1.7 deep: ${d7.toFixed(0)} ms (${(d7 / 500).toFixed(2)} ms/write); 0.1.6 deep: ${d6.toFixed(0)} ms (${(d6 / 500).toFixed(2)} ms/write)`,
-      `0.1.7 flat/2000: ${f7.toFixed(0)} ms (${(f7 / 300).toFixed(2)} ms/write); 0.1.6 flat/2000: ${f6.toFixed(0)} ms (${(f6 / 300).toFixed(2)} ms/write)`,
-      `ratio 0.1.7/0.1.6: deep ${(d7 / d6).toFixed(2)}x, flat ${(f7 / f6).toFixed(2)}x (volume ${ci ? "case-insensitive" : "case-sensitive"}, ${process.platform} ${process.arch}, node ${process.version})`,
-    ].join("\n");
-    console.log(summary);
-    appendFileSync(join(__dirname, "../.cache/agent-review9/timings.txt"), `${new Date().toISOString()}\n${summary}\n\n`);
-    expect(d7).toBeGreaterThan(0);
+    const d = await time("deep", (r) => new NodeFS(r), deep);
+    const f = await time("flat/2000", (r) => new NodeFS(r), flat, flatPre);
+    console.log(`volume ${ci ? "case-insensitive" : "case-sensitive"}, ${process.platform} ${process.arch}, node ${process.version}`);
+    expect(d / 500, "ms per deep write").toBeLessThan(20);
+    expect(f / 300, "ms per write into a 2,000-file folder").toBeLessThan(20);
   });
 });
 

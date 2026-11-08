@@ -304,7 +304,12 @@ Obsidian; everything found is fixed and merged:
    unload, and a handler left behind does nothing); the forced unregister
    looked on `app` where Obsidian keeps it on `app.workspace` (both tried,
    and only after a second of retries, since the old instance's own cleanup
-   would wipe an early takeover).
+   would wipe an early takeover). Server 4/5 (`review10_test.go`): the
+   aside hard link carried the old mtime until the touch that followed it,
+   and a concurrent sweep took it in most trials (the current inode is
+   touched before the link now); the no-hard-links fallback compared against
+   errno values Windows never produces (any link failure but "no such file"
+   now falls back to the rename pair).
 2. **Human security review.** Hand `docs/SECURITY-REVIEW-GUIDE.md` to a
    specialist. When findings come back, fix them in the style of the
    existing review rounds: a failing test first (`security_test.go` for the

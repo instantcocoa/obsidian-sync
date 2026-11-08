@@ -218,22 +218,29 @@ func (f *FS) Promote(vault, stage, id string) error {
 func (f *FS) Swap(vault, stage, id, prev string) (bool, error) {
 	had := false
 	cur, prevPath := f.path(vault, id), f.path(vault, prev)
+	// Timestamp the current inode BEFORE the link is made, so the aside copy
+	// is born young: a link that carried the old mtime for even a moment
+	// was taken by a concurrent hour-of-grace sweep in most trials. Nothing
+	// reads a rowed file's mtime (GC ages row-less files only; serving uses
+	// the row's created_at), so touching it is harmless.
+	now := time.Now()
+	if err := os.Chtimes(cur, now, now); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return false, err
+	}
 	switch err := os.Link(cur, prevPath); {
 	case err == nil:
 		had = true
 	case errors.Is(err, os.ErrNotExist):
-	case errors.Is(err, os.ErrPermission) || isNotSupported(err):
+	default:
+		// No hard links here (FAT, exFAT, some network mounts; Windows reports
+		// these with codes Go does not map to a portable errno): fall back to
+		// the rename pair. The link is only what closes the brief window in
+		// which the name would otherwise be empty.
 		if rerr := os.Rename(cur, prevPath); rerr == nil {
 			had = true
 		} else if !errors.Is(rerr, os.ErrNotExist) {
 			return false, rerr
 		}
-	default:
-		return false, err
-	}
-	if had {
-		now := time.Now()
-		os.Chtimes(prevPath, now, now)
 	}
 	if err := f.Promote(vault, stage, id); err != nil {
 		if had {
@@ -242,11 +249,6 @@ func (f *FS) Swap(vault, stage, id, prev string) (bool, error) {
 		return had, err
 	}
 	return had, nil
-}
-
-func isNotSupported(err error) bool {
-	var errno syscall.Errno
-	return errors.As(err, &errno) && (errno == syscall.ENOTSUP || errno == syscall.EXDEV || errno == syscall.EMLINK)
 }
 
 // Restore undoes Swap: the bytes under `prev` become the blob again (or, when

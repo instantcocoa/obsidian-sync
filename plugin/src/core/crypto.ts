@@ -299,10 +299,16 @@ export class VaultCrypto {
     const key = await aesKey(await hkdf(this.epochKey(epoch), salt, INFO_BLOB));
     const aad = concat(utf8("blob"), fromHex(blobId), u32le(epoch));
     const bodyFull = await gcmDecrypt(key, nonce, aad, ct);
+    // Shape guards: the body authenticated, but a member can author any
+    // shape; a short or inconsistent one is a defect of the blob, never an
+    // exception that escapes as something else.
+    if (bodyFull.length < 1) throw new CryptoError("bad blob body: empty");
     const flags = bodyFull[0];
     let body: Uint8Array;
     if (flags & 2) {
+      if (bodyFull.length < 5) throw new CryptoError("bad blob body: padded flag without a length");
       const len = readU32le(bodyFull, 1);
+      if (5 + len > bodyFull.length) throw new CryptoError(`bad blob body: declared length ${len} exceeds the body`);
       body = bodyFull.subarray(5, 5 + len);
     } else {
       body = bodyFull.subarray(1);
@@ -343,8 +349,14 @@ export class VaultCrypto {
     const nonce = metaEnc.subarray(4, 16);
     const aad = concat(utf8("meta"), fromHex(pathId), u32le(epoch));
     const pt = await gcmDecrypt(await this.metaKey(epoch), nonce, aad, metaEnc.subarray(16));
-    const m = JSON.parse(fromUtf8(pt)) as FileMeta;
-    if (typeof m.path !== "string") throw new CryptoError("bad meta json");
+    let m: FileMeta;
+    try {
+      m = JSON.parse(fromUtf8(pt)) as FileMeta;
+    } catch {
+      throw new CryptoError("bad meta json: not JSON");
+    }
+    // `null`, a number, an array: authenticated, but not metadata.
+    if (m === null || typeof m !== "object" || Array.isArray(m) || typeof m.path !== "string") throw new CryptoError("bad meta json");
     // Numbers come from another device; a garbage mtime must not make
     // every device's write throw forever (member DoS). 0 means "now".
     if (typeof m.mtime !== "number" || !Number.isFinite(m.mtime) || m.mtime < 0 || m.mtime > 4_102_444_800_000) m.mtime = 0;
@@ -675,10 +687,20 @@ export async function deflate(data: Uint8Array): Promise<Uint8Array | null> {
 
 export async function inflate(data: Uint8Array, limit = MAX_PLAIN): Promise<Uint8Array> {
   if (typeof DecompressionStream === "undefined") throw new CryptoError("compressed blob but no DecompressionStream in this runtime", "environment");
+  // The constructor failing is about this runtime (a WebView that has the
+  // class but not deflate-raw), never about the bytes: environment.
+  let stream: DecompressionStream;
   try {
-    return await pipe(data, new DecompressionStream("deflate-raw"), limit);
+    stream = new DecompressionStream("deflate-raw");
+  } catch (e) {
+    throw new CryptoError(`this runtime's DecompressionStream cannot inflate deflate-raw: ${(e as Error)?.message ?? e}`, "environment");
+  }
+  try {
+    return await pipe(data, stream, limit);
   } catch (e) {
     if (e instanceof CryptoError) throw e; // the size limit
+    // Running out of memory while collecting the output says nothing about the bytes.
+    if (e instanceof RangeError) throw new CryptoError(`out of memory while decompressing: ${e.message}`, "environment");
     // The decompressor rejected the body: not deflate, truncated, corrupt.
     throw new CryptoError(`malformed compressed body: ${(e as Error)?.message ?? e}`);
   }

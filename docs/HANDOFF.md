@@ -286,6 +286,25 @@ Obsidian; everything found is fixed and merged:
    two refusals distinct messages and retries only the folder one. The one
    genuinely flaky real-Obsidian test is `obsidian-config`'s wait for
    Obsidian's own `app.json` rewrite.
+1i. **Tenth review (2026-11-08): the ninth round's fixes plus 0.1.9 and
+   0.1.10. Plugin 3.5/5 → fixed, released as 0.1.11.** Six proofs
+   (`review10-*.test.ts`): two member-authored byte shapes still threw
+   non-CryptoErrors out of decryption (a padded flag without a length, and
+   metadata that is the JSON literal null) and so aborted every rotation
+   instead of becoming placeholders (shape guards, both now defects); a
+   WebView whose DecompressionStream exists but lacks deflate-raw, and an
+   allocation RangeError, were wrapped as defects (the constructor is
+   outside the try, RangeError is environment); a case-only rename of a
+   folder with a subfolder still stranded the Mac (emptiness is now
+   recursive, junk and empty folders only); the parent-folder retry rewound
+   the cursor every cycle, never gave up, and said "in use by another
+   program" (deferred ops are now retried in place without touching the
+   cursor, dropped after 48 cycles, and the notice names the folder); the
+   join-handler retry timer outlived a disabled instance (cleared at
+   unload, and a handler left behind does nothing); the forced unregister
+   looked on `app` where Obsidian keeps it on `app.workspace` (both tried,
+   and only after a second of retries, since the old instance's own cleanup
+   would wipe an early takeover).
 2. **Human security review.** Hand `docs/SECURITY-REVIEW-GUIDE.md` to a
    specialist. When findings come back, fix them in the style of the
    existing review rounds: a failing test first (`security_test.go` for the

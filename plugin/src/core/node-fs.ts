@@ -136,14 +136,29 @@ export class NodeFS implements VaultFS {
             // Finder's .DS_Store and Explorer's desktop.ini are never synced
             // and never deleted by sync, so a folder holding only those is
             // empty for this purpose (they move with the rename).
-            const inside = (await fsp.readdir(this.abs(rel ? `${rel}/${e}` : e)).catch(() => ["?"])).filter((n) => !isOsJunk(n));
-            if (inside.length === 0) await fsp.rename(this.abs(rel ? `${rel}/${e}` : e), this.abs(want)).catch(() => {});
+            // "Empty": nothing but OS junk and (recursively) empty folders;
+            // Obsidian removes files, not the folders they were in.
+            if (await this.emptyExceptJunk(this.abs(rel ? `${rel}/${e}` : e))) await fsp.rename(this.abs(rel ? `${rel}/${e}` : e), this.abs(want)).catch(() => {});
             break;
           }
         }
       }
       rel = want;
     }
+  }
+
+  private async emptyExceptJunk(absDir: string): Promise<boolean> {
+    const entries = await fsp.readdir(absDir, { withFileTypes: true }).catch(() => null);
+    if (!entries) return false;
+    for (const e of entries) {
+      if (isOsJunk(e.name)) continue;
+      if (e.isDirectory()) {
+        if (!(await this.emptyExceptJunk(nodePath.join(absDir, e.name)))) return false;
+        continue;
+      }
+      return false;
+    }
+    return true;
   }
 
   async write(path: string, data: Uint8Array, mtime: number): Promise<void> {

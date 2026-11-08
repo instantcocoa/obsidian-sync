@@ -259,10 +259,10 @@ export class ObsidianFS implements VaultFS {
           if (!folders.includes(want)) {
             const twin = folders.find((f) => f.toLowerCase() === want.toLowerCase());
             if (twin) {
-              const inside = await this.app.vault.adapter.list(twin);
-              // OS junk (.DS_Store, desktop.ini) is never synced or deleted by sync; a folder holding only that is empty here.
-              const files = inside.files.filter((f) => !isOsJunk(normalizePath(f).slice(normalizePath(f).lastIndexOf("/") + 1)));
-              if (files.length === 0 && inside.folders.length === 0) await this.app.vault.adapter.rename(twin, want);
+              // "Empty": nothing but OS junk (.DS_Store, desktop.ini: never
+              // synced, never deleted by sync) and recursively empty folders
+              // (Obsidian removes files, not the folders they were in).
+              if (await this.emptyExceptJunk(twin)) await this.app.vault.adapter.rename(twin, want);
             }
           }
         }
@@ -271,6 +271,16 @@ export class ObsidianFS implements VaultFS {
       }
       rel = want;
     }
+  }
+
+  private async emptyExceptJunk(folder: string): Promise<boolean> {
+    const l = await this.app.vault.adapter.list(folder);
+    for (const f of l.files) {
+      const p = normalizePath(f);
+      if (!isOsJunk(p.slice(p.lastIndexOf("/") + 1))) return false;
+    }
+    for (const sub of l.folders) if (!(await this.emptyExceptJunk(normalizePath(sub)))) return false;
+    return true;
   }
 
   async write(path: string, data: Uint8Array, mtime: number): Promise<void> {

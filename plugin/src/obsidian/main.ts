@@ -164,20 +164,38 @@ export default class ObsyncPlugin extends Plugin {
    * instance's registration is still being released, and forcing the stale
    * one out when the app offers a way to.
    */
+  private joinHandlerTimer: ReturnType<typeof setTimeout> | null = null;
+  private unloaded = false;
+
   private registerJoinHandler(attempt = 0): void {
+    this.joinHandlerTimer = null;
+    if (this.unloaded) return; // disabled while a retry was pending: a dead instance must not take the handler
+    if (attempt === 0) this.register(() => this.joinHandlerTimer && clearTimeout(this.joinHandlerTimer));
     try {
       this.registerObsidianProtocolHandler(JOIN_ACTION, (params) => void this.joinFromProtocol(String(params.link ?? "")));
     } catch (e) {
-      const app = this.app as App & { unregisterObsidianProtocolHandler?: (action: string) => void };
-      if (attempt === 0 && typeof app.unregisterObsidianProtocolHandler === "function") {
+      // The previous instance normally releases its handler within a tick
+      // (its Component cleanup runs by action name, so registering over it
+      // now would only be wiped by that cleanup a moment later). Retry
+      // while it does; if it is still held after a second, the old instance
+      // is not going to let go: force it out once and take the action.
+      // Obsidian keeps the registry on the workspace (undocumented); older
+      // builds had it on the app.
+      if (attempt === 4) {
+        const ws = this.app.workspace as unknown as { unregisterObsidianProtocolHandler?: (action: string) => void };
+        const ap = this.app as App & { unregisterObsidianProtocolHandler?: (action: string) => void };
         try {
-          app.unregisterObsidianProtocolHandler(JOIN_ACTION);
+          if (typeof ws.unregisterObsidianProtocolHandler === "function") ws.unregisterObsidianProtocolHandler(JOIN_ACTION);
+          else if (typeof ap.unregisterObsidianProtocolHandler === "function") ap.unregisterObsidianProtocolHandler(JOIN_ACTION);
+          else throw new Error("no unregister");
+          this.registerJoinHandler(attempt + 1); // the stale one is out: take the action now, not 250 ms later
+          return;
         } catch {
-          /* fall through to the retry */
+          /* no way to force it out: wait for the old instance to release it */
         }
       }
       if (attempt < 10) {
-        setTimeout(() => this.registerJoinHandler(attempt + 1), 250);
+        this.joinHandlerTimer = setTimeout(() => this.registerJoinHandler(attempt + 1), 250);
         return;
       }
       console.warn("obsync: could not register the obsidian://obsync-join handler; invite QR codes will not open until Obsidian restarts", e);
@@ -185,6 +203,8 @@ export default class ObsyncPlugin extends Plugin {
   }
 
   override async onunload(): Promise<void> {
+    this.unloaded = true;
+    if (this.joinHandlerTimer) clearTimeout(this.joinHandlerTimer);
     // Obsidian does not wait for this. A reload (or an update) constructs
     // the next instance while this engine is still flushing state.json;
     // leave the stop promise where that instance can wait for it, or its
@@ -521,6 +541,7 @@ export default class ObsyncPlugin extends Plugin {
    * asks, names the server, and refuses while this device is in a vault.
    */
   async joinFromProtocol(link: string): Promise<void> {
+    if (this.unloaded) return; // a handler left behind by a disabled instance must do nothing
     if (!link.startsWith("obsync://join#")) {
       new Notice("obsync: that is not an invite link.");
       return;

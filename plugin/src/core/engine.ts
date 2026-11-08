@@ -56,6 +56,14 @@ export interface State {
   files: Record<string, FileEntry>;
   dirty: string[];
   inflight: Record<string, Inflight>;
+  /**
+   * Remote ops the filesystem refused because a folder on their path is
+   * spelled differently on this volume (a case-only rename done elsewhere,
+   * the old folder not yet emptied). Retried each sync without rewinding the
+   * cursor, dropped when a newer op for the path arrives or after `tries`
+   * runs out.
+   */
+  deferred?: Record<string, { op: WireOp; tries: number }>;
 }
 
 export interface EngineConfig {
@@ -540,6 +548,7 @@ export class Engine {
           this.wantSync = false;
           this.setStatus({ phase: "syncing", message: undefined });
           await this.retryBusy();
+          await this.retryDeferred();
           try {
             await this.pull();
             await this.push();
@@ -584,6 +593,53 @@ export class Engine {
    * the write never happened and the cursor rewinds so the pull applies the
    * op again; it fails again while the lock is held and lands once it goes.
    */
+  /** Park a refused op for later (see State.deferred). Reported once, with the folder spellings. */
+  private deferOp(logical: string, op: WireOp, why: string): void {
+    const cur = (this.state.deferred ??= {})[logical];
+    const tries = (cur?.tries ?? 0) + 1;
+    this.state.deferred[logical] = { op, tries };
+    this.scheduleSave();
+    if (tries === 1) {
+      const m = /"([^"]+)" resolves to a folder spelled differently/.exec(why);
+      this.log("warn", `op ${op.seq} for ${logical} waits for a folder to be renamed: ${why}`);
+      this.hooks.onSkipped?.(this.device(logical), `a folder on its path${m ? ` ("${m[1]}")` : ""} exists on this device under a different spelling (case). It will be retried once that folder is emptied or renamed to match`);
+    }
+  }
+
+  /** Retry the ops parked by deferOp, in place, without touching the cursor. */
+  private async retryDeferred(): Promise<void> {
+    const d = this.state.deferred;
+    if (!d) return;
+    for (const [logical, entry] of Object.entries(d)) {
+      if (entry.tries > Engine.DEFERRED_TRIES) {
+        delete d[logical];
+        this.log("error", `op ${entry.op.seq} for ${logical}: gave up after ${Engine.DEFERRED_TRIES} attempts; the folder spelling on this device still differs`);
+        this.hooks.onSkipped?.(this.device(logical), "a folder on its path is still spelled differently on this device after many attempts; rename the folder here to match the other devices, and the next change to the file will bring it over");
+        continue;
+      }
+      try {
+        const meta = await this.vc.decryptMeta(entry.op.path_id, fromB64(entry.op.meta_enc));
+        await this.withLock(logical, () => this.applyRemote(logical, entry.op, meta, new Map()));
+        delete d[logical];
+        this.log("info", `op ${entry.op.seq} for ${logical} applied after ${entry.tries} deferred attempt(s)`);
+      } catch (e) {
+        delete this.state.inflight[logical];
+        if (isAliasRefusal(e)) {
+          entry.tries++;
+          continue;
+        }
+        if (e instanceof NetworkError || (e instanceof HttpError && e.transient)) throw e;
+        delete d[logical];
+        this.log("error", `op ${entry.op.seq} for ${logical} could not be applied on retry; dropping it`, e);
+      }
+    }
+    if (Object.keys(d).length === 0) delete this.state.deferred;
+    this.scheduleSave();
+  }
+
+  /** How many sync cycles a deferred op is retried before it is dropped with a notice. */
+  static readonly DEFERRED_TRIES = 48;
+
   private async retryBusy(): Promise<void> {
     for (const logical of [...this.busy]) {
       this.busy.delete(logical);
@@ -903,6 +959,7 @@ export class Engine {
     prefetch();
     let done = 0;
     for (const d of ordered) {
+      if (this.state.deferred?.[d.logical]) delete this.state.deferred[d.logical]; // superseded by this newer op
       try {
         await this.withLock(d.logical, () => this.applyRemote(d.logical, d.op, d.meta!, blobs));
       } catch (e) {
@@ -912,7 +969,12 @@ export class Engine {
         // retried as a whole; everything else is logged and skipped, and the
         // cursor moves on. A later op for the path heals it.
         if (e instanceof NetworkError || (e instanceof HttpError && e.transient)) throw e;
-        if ((isFileInUse(e) || isAliasRefusal(e)) && this.state.inflight[d.logical]) {
+        if (isAliasRefusal(e)) {
+          // Nothing was written; forget the in-flight record so the busy
+          // path does not rewind the cursor to this op every cycle.
+          delete this.state.inflight[d.logical];
+          this.deferOp(d.logical, d.op, String((e as Error).message));
+        } else if (isFileInUse(e) && this.state.inflight[d.logical]) {
           // Another program holds the file open (Windows: EBUSY/EPERM for a
           // note open in an editor or being scanned). The inflight record
           // says what we meant to write; retry at the next cycle instead of

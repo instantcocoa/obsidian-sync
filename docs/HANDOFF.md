@@ -328,6 +328,19 @@ Obsidian; everything found is fixed and merged:
    files by the base-36 UnixNano nonce in their names (mtime for `.tmp-`
    and for implausible nonces). The reviewer's full crash-state enumeration
    of putBlob passed, and it recommends not re-reading `Swap` again.
+1k. **Device run 11 (2026-11-08 02:17-02:25 UTC): the 0.1.12 build on the
+   iPhone 13 Pro and the iPad Pro, against util's systemd server, 20 of 20.**
+   The first hardware run since 0.1.2: it covers everything added in rounds
+   four to eleven (sealed keys, roster alerts, restore acceptance, the
+   recovery fallback, the fold-aware exclusions, bounded decompression, the
+   swap-and-restore uploads, the epoch floor, the deferral mechanism). The
+   restore-from-backup scenario stopped and rolled back the real util
+   server; every device recovered. 25 files byte-identical across the Mac
+   engine and both devices at the end. `RemoteServer` in
+   `plugin/test/ios-harness.ts` now drives the systemd unit (`sudo systemctl
+   stop|start obsync`, data under /var/lib/private/obsync, backups beside it).
+   Screenshots: `plugin/.cache/ios/` and util's catalog (`~/obsync/shots`,
+   `ssh -L 8088:localhost:8088 util`).
 2. **Human security review.** Hand `docs/SECURITY-REVIEW-GUIDE.md` to a
    specialist. When findings come back, fix them in the style of the
    existing review rounds: a failing test first (`security_test.go` for the

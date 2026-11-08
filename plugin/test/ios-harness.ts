@@ -222,7 +222,8 @@ export class IosDevice {
  * The obsync server on a real host reached over ssh, with the halt/resume/
  * backup/restore surface of TestServer so the recovery scenarios read the
  * same. `host` is an ssh config alias; the server lives in `~/obsync` there
- * with the `run.sh start|stop|status` script, data under `~/obsync/data`.
+ * as the systemd unit `obsync.service` (server/obsync.service), data under
+ * /var/lib/private/obsync (DynamicUser's StateDirectory); the ssh user can sudo.
  */
 export class RemoteServer {
   constructor(
@@ -245,13 +246,15 @@ export class RemoteServer {
     }
   }
 
+  private static readonly DATA = "/var/lib/private/obsync";
+
   async halt(): Promise<void> {
-    this.sh("~/obsync/run.sh stop");
+    this.sh("sudo systemctl stop obsync");
     await waitFor("server down", async () => !(await this.healthy()), 60_000, 2_000);
   }
 
   async resume(): Promise<void> {
-    this.sh("~/obsync/run.sh start");
+    this.sh("sudo systemctl start obsync");
     await waitFor("server up", () => this.healthy(), 90_000, 2_000);
   }
 
@@ -263,22 +266,23 @@ export class RemoteServer {
   /** Snapshot the data directory while stopped (the ACME cache included, so the certificate survives a restore). */
   async backup(): Promise<string> {
     await this.halt();
-    const name = `backup-${Date.now()}`;
-    this.sh(`cp -a ~/obsync/data ~/obsync/${name}`);
+    const name = `obsync-backup-${Date.now()}`;
+    this.sh(`sudo cp -a ${RemoteServer.DATA} /var/lib/private/${name}`);
     await this.resume();
     return name;
   }
 
   async restoreFrom(name: string): Promise<void> {
     await this.halt();
-    this.sh(`rm -rf ~/obsync/data && cp -a ~/obsync/${name} ~/obsync/data`);
+    this.sh(`sudo rm -rf ${RemoteServer.DATA} && sudo cp -a /var/lib/private/${name} ${RemoteServer.DATA}`);
     await this.resume();
   }
 
   /** Remove every vault and blob but keep the ACME cache: a fresh server for the next run. */
   async wipe(): Promise<void> {
     await this.halt();
-    this.sh("cd ~/obsync/data && find . -mindepth 1 -maxdepth 1 ! -name acme -exec rm -rf {} +");
+    // Keep the ACME cache and the admin token (which lives in the data dir under the unit).
+    this.sh(`cd ${RemoteServer.DATA} && sudo find . -mindepth 1 -maxdepth 1 ! -name acme ! -name admin-token -exec rm -rf {} +`);
     await this.resume();
   }
 }

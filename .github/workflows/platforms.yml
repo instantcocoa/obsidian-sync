@@ -25,6 +25,10 @@ jobs:
           go-version-file: server/go.mod
       - run: go test ./...
         working-directory: server
+      # Review agents leave scratch files under plugin/.cache; a test that
+      # imports one passes on the author's machine and nowhere else.
+      - name: No test imports anything under .cache
+        run: '! grep -rnE "from [\"'\''](\.\./)+\.cache/" plugin/test'
 
   # Known-vulnerability scan of the server's Go dependencies, from a runner
   # with egress to vuln.go.dev (the review sandboxes could not reach it).

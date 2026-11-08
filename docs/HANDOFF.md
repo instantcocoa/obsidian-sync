@@ -271,6 +271,21 @@ Obsidian; everything found is fixed and merged:
    property tests (`merge-fuzz.test.ts`), Electron output and exit status
    kept in the CI artifact (three macOS runner flakes in a row were
    undiagnosable without it), govulncheck in CI.
+1h. **Reload bug found by the captured renderer log (2026-11-08): 0.1.9 and
+   0.1.10.** The real-Obsidian harness now writes Electron's stdout, stderr,
+   renderer console and exit status to `plugin/.cache/obsidian-e2e/logs/*.log`,
+   uploaded in the `obsidian-e2e-<os>` artifact (`gh run download <run> -n
+   obsidian-e2e-macos-15`). The first captured log turned three "macOS
+   runner flakes" into a bug: on plugin reload (what a BRAT update does)
+   Obsidian still held the previous instance's `obsidian://obsync-join`
+   handler and threw "already registered" out of `onload`, so the plugin
+   never loaded until a restart. 0.1.9 retries the registration, forces the
+   stale handler out where the app allows, and never fails the load. 0.1.9
+   also over-matched the ninth round's "retry a parent-folder refusal" rule
+   onto file case twins (an op loop on macOS and Windows); 0.1.10 gives the
+   two refusals distinct messages and retries only the folder one. The one
+   genuinely flaky real-Obsidian test is `obsidian-config`'s wait for
+   Obsidian's own `app.json` rewrite.
 2. **Human security review.** Hand `docs/SECURITY-REVIEW-GUIDE.md` to a
    specialist. When findings come back, fix them in the style of the
    existing review rounds: a failing test first (`security_test.go` for the

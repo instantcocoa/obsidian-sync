@@ -340,7 +340,12 @@ Obsidian; everything found is fixed and merged:
    `plugin/test/ios-harness.ts` now drives the systemd unit (`sudo systemctl
    stop|start obsync`, data under /var/lib/private/obsync, backups beside it).
    Screenshots: `plugin/.cache/ios/` and util's catalog (`~/obsync/shots`,
-   `ssh -L 8088:localhost:8088 util`).
+   `ssh -L 8088:localhost:8088 util`). Real Obsidian on Linux (dev.frob.io,
+   0.1.12, `test/linux-joins.test.ts`) then joined the same vault with the
+   invite the run left (3 of 3), and its note `notes/from-linux.md` was read
+   back from both devices over USB: four platforms in one vault on the
+   current build. Device file paths for `test/ios-afc.py` are
+   `/Documents/<vault>/…`.
 2. **Human security review.** Hand `docs/SECURITY-REVIEW-GUIDE.md` to a
    specialist. When findings come back, fix them in the style of the
    existing review rounds: a failing test first (`security_test.go` for the

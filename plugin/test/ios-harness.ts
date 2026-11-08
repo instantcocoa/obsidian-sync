@@ -248,7 +248,14 @@ export class RemoteServer {
 
   private static readonly DATA = "/var/lib/private/obsync";
 
+  /** The server must carry an operator-placed marker before this harness stops, wipes or restores it. */
+  private assertTestServer(): void {
+    const r = spawnSync("ssh", ["-o", "BatchMode=yes", this.host, "test -f ~/obsync/.allow-device-tests"], { encoding: "utf8", timeout: 60_000 });
+    if (r.status !== 0) throw new Error(`${this.host} has no ~/obsync/.allow-device-tests marker; refusing to stop or alter it (create the file on the host to allow device runs)`);
+  }
+
   async halt(): Promise<void> {
+    this.assertTestServer();
     this.sh("sudo systemctl stop obsync");
     await waitFor("server down", async () => !(await this.healthy()), 60_000, 2_000);
   }

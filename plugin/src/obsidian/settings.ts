@@ -193,7 +193,7 @@ export class ObsyncSettingTab extends PluginSettingTab {
           try {
             if (v === "pin") {
               const r = await PromptModal.ask(this.app, "Set a PIN", [
-                { name: "PIN (6+ characters; longer is better)", secret: true },
+                { name: "PIN (8+ characters; letters and digits)", secret: true },
                 { name: "Repeat", secret: true },
               ]);
               if (!r) return this.display();
@@ -238,7 +238,7 @@ export class ObsyncSettingTab extends PluginSettingTab {
       );
     new Setting(el)
       .setName("Sync notices")
-      .setDesc("Show a notice when sync resolves a conflict, enables or reloads a synced plugin, or applies settings from another device. Errors and anything that needs your decision are always shown.")
+      .setDesc("Show a notice when sync resolves a conflict or applies settings from another device. Errors, anything that needs your decision, and a synced plugin being enabled or reloaded on this device (code from another device starting to run) are always shown.")
       .addToggle((t) => t.setValue(s.syncNotices).onChange(async (v) => ((s.syncNotices = v), await this.plugin.saveSettings())));
     new Setting(el)
       .setName("Compress text before encrypting")

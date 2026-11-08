@@ -346,6 +346,32 @@ Obsidian; everything found is fixed and merged:
    back from both devices over USB: four platforms in one vault on the
    current build. Device file paths for `test/ios-afc.py` are
    `/Documents/<vault>/…`.
+1l. **Twelfth review (2026-11-08): round-11 fixes plus the first whole-system
+   read since round 6. Delta: plugin 3/5, server one proof; whole system
+   4/5. Fixed, released as 0.1.13.** Delta plugin (`review12-*.test.ts`): a
+   HIGH older than every round, a row whose metadata header names an epoch
+   nobody has threw out of the pull after the key refresh and stopped every
+   device at that row (decodeOp never throws now, and the server refuses a
+   header that disagrees with meta_epoch); history was oldest-first and cut
+   at 5000, so the deferred retry could take version 5000 as the head
+   (newest first now); a dropped head went unreported; a re-defer restarted
+   its age; the device-run harness could `rm -rf` the server's data on a
+   bad name (validated, moved aside, started again in a finally, and
+   refused without the host marker `~/obsync/.allow-device-tests`). Delta
+   server (`review12_test.go`): stage filenames minted outside the lock
+   could collide in one nanosecond (per-process counter; stage files aged
+   by mtime again, aside copies by nonce). Whole system
+   (`review12w-*.test.ts`, `review12w_test.go`, report in
+   `plugin/.cache/agent-review12-whole/`): the "enabled/reloaded plugin"
+   notices were silenceable by the Sync-notices switch (never now); no
+   request had a deadline (60 s, 30 min for blobs; a timeout is a network
+   error and retried); a settings save while locked erased the sealed keys
+   (kept now); PIN floor 8 with a plain statement of offline strength; the
+   §5.7/§5.8 sentences that overstated the contract corrected (authority
+   header travels on every write; a token thief can add self rows that hand
+   it nothing; PBKDF2 is 2,000,000); the malicious-server residuals listed
+   explicitly in §5.7 (withhold, replay as rollback, split views, a lied
+   min_epoch pruning keys, a hidden roster entry).
 2. **Human security review.** Hand `docs/SECURITY-REVIEW-GUIDE.md` to a
    specialist. When findings come back, fix them in the style of the
    existing review rounds: a failing test first (`security_test.go` for the

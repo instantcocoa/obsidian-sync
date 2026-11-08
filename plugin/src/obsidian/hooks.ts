@@ -96,7 +96,9 @@ export class ConfigHooks {
         if (running(p, id)) {
           await p.disablePlugin(id);
           await p.enablePlugin(id);
-          this.notify(`obsync: reloaded plugin ${id}`);
+          // Code from another device just started running here: never a
+          // routine notice, whatever the "Sync notices" toggle says.
+          new Notice(`obsync: reloaded plugin ${id}`, 10000);
           continue;
         }
         // Seen on Android: community-plugins.json arrives before the plugin's
@@ -141,8 +143,9 @@ export class ConfigHooks {
     // enablePlugin() loads without recording; record it so later reconciles
     // and reloads see it as running (the synced list already says so).
     p.enabledPlugins.add(id);
-    // Code from another device just started running here. Say so.
-    this.notify(`obsync: enabled plugin "${id}" because it is enabled in the vault`);
+    // Code from another device just started running here. Say so, always:
+    // §5.7's residual "a member can run code on every device" rests on this.
+    new Notice(`obsync: enabled plugin "${id}" because it is enabled in the vault`, 10000);
     return true;
   }
 

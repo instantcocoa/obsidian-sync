@@ -682,21 +682,33 @@ not need to know it is happening. History does not carry over except through
 | Adversary | Gets | Cannot | Mitigation / residual |
 | --- | --- | --- | --- |
 | Reads server disk or backups | ciphertext, path and blob IDs, op timing, ciphertext sizes, device IDs, roster public keys | content, paths, names, mtimes, which human owns which device | padding flag for sizes; timing is inherent |
-| Steals a device token (proxy log, copied `data.json` with sealed keys) | read ciphertext and the op log; see which device is online | write anything: no ops, no blobs, no rotation, revocation, recovery, invites, keybox rows (its own included, once written), or a device name (names need authority and authenticate under the device's own id) | vault authority (§5.8) gates every write; revoke device → rotate |
+| Steals a device token (proxy log, copied `data.json` with sealed keys) | read ciphertext and the op log; see which device is online; add keybox rows addressed to itself for epochs it lacks (which hand it nothing: it cannot replace an existing row, and a row it wrote is only ciphertext it already cannot read) | write anything else: no ops, no blobs, no rotation, revocation, recovery, invites, keybox rows for other devices, or a device name (names need authority and authenticate under the device's own id) | vault authority (§5.8) gates every write; revoke device → rotate |
 | Steals an unused invite link, or holds any member's keys | joins as a device with full read/write, **which means code execution on every device**: a synced `.obsidian/plugins/*/main.js` is reloaded, and `community-plugins.json` enables plugins, automatically (§7.3) | write outside the vault, under a path other than the one an op is keyed by, under a spelling the volume folds onto an excluded or existing name, or with a blob other than the one its metadata names (§6.5 validation); make a device inflate more than the metadata's `size` (§5.1) | 1 h TTL, one-time; unexpected or unnamed device is flagged in the roster; remove + rotate; turn "sync config folder" off if vault members are not fully trusted |
 | Holds the admin token (or the server's config) | create and list vaults, install an authority hash, invite the *first* device into an empty vault (there is no delete route and no admin way to revoke a device: a vault whose first invite was redeemed by a stranger is frozen with `obsync vault auth` and abandoned) | invite into a populated vault, so it cannot plant a key-less device for the owner's next rotation to wrap keys to; read or forge anything | invites into a populated vault need vault authority; rotation wraps only to devices whose name authenticates (proof they held the keys) and revokes the rest, reporting them |
 | Takes a device (phone with Obsidian) | everything that device has, including `K_id` and current keys | anything after rotation; anything at all after re-encryption, given the token is revoked | OS disk encryption; per-device key protection (§5.5a); remove + rotate from another device |
-| Guesses the recovery passphrase | one online attempt per request, rate-limited (behind a proxy with `--trust-proxy`, keyed on the address the proxy appended, not one the client wrote); the derived `rc_` token opens the join route only, never the vault's read routes | an offline attack: the server hands out only the KDF salt; the wrapped key is released only against the derived auth token | PBKDF2-600k plus the limiter; someone with the server's disk can still attack offline, so pick a long passphrase |
+| Guesses the recovery passphrase | one online attempt per request, rate-limited (behind a proxy with `--trust-proxy`, keyed on the address the proxy appended, not one the client wrote); the derived `rc_` token opens the join route only, never the vault's read routes | an offline attack: the server hands out only the KDF salt; the wrapped key is released only against the derived auth token | PBKDF2 at 2,000,000 iterations (600,000 for passphrases set before 0.1.3, re-set at 2,000,000 on first use) plus the limiter; someone with the server's disk can still attack offline, so pick a long passphrase |
 | Server operator (honest but curious) | the "reads server disk" row, live, plus which device is online when | content, paths, names, mtimes; cannot alter any ciphertext, and cannot re-point an op at another stored blob (the metadata names its blob and size; the applier refuses a mismatch) | by assumption (§4.6) they do not tamper; curiosity gains nothing beyond metadata. A tampering server could still withhold ops or roll the epoch back (§6.8 detects a rewound log) |
 | Passive network | nothing beyond TLS metadata | | TLS |
 
 Accepted residual exposure:
 
+0. **A tampering server is out of scope (§4.6), but for the record:** the
+   code already catches a rewound log (§6.8), an epoch regression, a blob
+   re-pointed at another blob, and a planted device (unproven at rotation).
+   It does not catch a server that withholds ops, replays an old op for a
+   path as if it were new (a silent per-path rollback: no key material is
+   needed, which is also how the owner's own restore works), shows different
+   devices different views, lies about `min_epoch` (every device prunes the
+   keys below it, irreversibly) or hides a roster entry from the hash. Each
+   would need per-device tamper evidence over the op log, which is the
+   mechanism §6.8 names and the one thing dropping the assumption would cost.
+
 1. **Op timing** and the put-vs-delete bit per op are visible. Hiding them
    needs cover traffic or batching delays; not worth it for this threat model.
 2. **Vault write access is code execution** on every device that syncs the
    config folder (§7.3). That is the point of syncing plugins; the roster is
-   the trust boundary, and the plugin announces every plugin it enables.
+   the trust boundary, and the plugin announces every plugin it enables or
+   reloads with a notice that the "Sync notices" switch cannot silence.
 3. **All members are equal.** Any member can rotate, revoke any other member
    including the owner, invite, and restore. There is no owner role; the
    roster is the whole access-control list, which is why every device is
@@ -755,7 +767,7 @@ replacing the recovery identity, and minting invites. A device token alone
 is read-only.
 
 What this buys: a device *token* and the device *keys* are different
-secrets, and only the token ever travels or sits in a log. A token-only
+secrets, and only the device token sits in a log or a copied data.json with sealed keys; the authority token travels in a header on every write, over TLS, and is derived from keys that are never written in the clear once protection is on. A token-only
 attacker (proxy access log, a copied `data.json` whose keys are sealed under
 a PIN or the OS keychain) can fetch ciphertext, which it cannot read, and
 nothing else: it cannot post ops, upload a blob under an id the vault will

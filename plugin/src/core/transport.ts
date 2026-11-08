@@ -146,7 +146,7 @@ export class Client {
     method: string,
     path: string,
     body?: unknown,
-    init: { raw?: boolean; headers?: Record<string, string>; retry?: boolean; signal?: AbortSignal; token?: string; authority?: boolean } = {},
+    init: { raw?: boolean; headers?: Record<string, string>; retry?: boolean; signal?: AbortSignal; token?: string; authority?: boolean; timeoutMs?: number } = {},
   ): Promise<Response> {
     const headers: Record<string, string> = { ...(init.headers ?? {}) };
     const tok = init.token ?? this.token;
@@ -164,9 +164,18 @@ export class Client {
       payload = JSON.stringify(body);
     }
     const max = init.retry === false ? 0 : (this.opts.maxRetries ?? 4);
+    // Every request has a deadline: one connection that never answers (a
+    // network switch mid-request, a half-open TCP session after sleep) must
+    // not leave sync() pending until Obsidian restarts. Blob transfers get
+    // long enough for a large file on a slow link; the server's own idle
+    // rule covers them from the other side.
+    const isBlob = init.raw === true || payload instanceof Uint8Array || path.includes("/blobs/");
+    const deadlineMs = init.timeoutMs ?? (isBlob ? 30 * 60_000 : 60_000);
     for (let attempt = 0; ; attempt++) {
+      const timer = AbortSignal.timeout(deadlineMs);
+      const signal = init.signal ? (typeof AbortSignal.any === "function" ? AbortSignal.any([init.signal, timer]) : init.signal) : timer;
       try {
-        const res = await this.fetchImpl(this.base + path, { method, headers, body: payload, signal: init.signal });
+        const res = await this.fetchImpl(this.base + path, { method, headers, body: payload, signal });
         if (!res.ok) {
           const text = await res.text().catch(() => "");
           const err = new HttpError(res.status, text, path);
@@ -176,8 +185,9 @@ export class Client {
         return res;
       } catch (e) {
         if ((e as { final?: boolean }).final || attempt >= max || init.signal?.aborted) {
-          // fetch reports every connection problem as a bare TypeError ("Failed to fetch").
-          if (e instanceof TypeError) throw new NetworkError(this.base, e);
+          // fetch reports every connection problem as a bare TypeError ("Failed
+          // to fetch"); a deadline is a TimeoutError. Both are the network.
+          if (e instanceof TypeError || (e as { name?: string })?.name === "TimeoutError" || ((e as { name?: string })?.name === "AbortError" && !init.signal?.aborted)) throw new NetworkError(this.base, e);
           throw e;
         }
         this.opts.onRetry?.(e, attempt);

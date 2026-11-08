@@ -90,7 +90,7 @@ const DEFAULT_SETTINGS: Settings = {
  * would fall in seconds despite the 600k-iteration KDF. Six characters is the
  * floor; the settings text says to use more.
  */
-export const MIN_PIN_LENGTH = 6;
+export const MIN_PIN_LENGTH = 8;
 
 /** Something that tells devices apart by default: the hostname on desktop, the platform on mobile. */
 function defaultDeviceName(): string {
@@ -234,8 +234,13 @@ export default class ObsyncPlugin extends Plugin {
       if (!this.wrapKey) throw new Error("key store is locked; cannot save");
       onDisk.sealed = await sealKeystore(s.identity, s.protection.method, this.wrapKey, s.protection.method === "pin" ? this.pinSalt : undefined);
       onDisk.identity = null;
-    } else {
+    } else if (s.protection.method === "none") {
       onDisk.sealed = null;
+    } else {
+      // Locked (protection on, identity not yet unlocked): a settings save
+      // must keep the sealed keys exactly as loaded, never erase them.
+      onDisk.sealed = s.sealed;
+      onDisk.identity = null;
     }
     await this.saveData(onDisk);
   }
@@ -469,12 +474,12 @@ export default class ObsyncPlugin extends Plugin {
       const want = await ConfirmModal.ask(
         this.app,
         "Protect the vault keys with a PIN?",
-        "Without one, the keys sit in data.json inside this vault's plugin folder, readable by anything that can read the vault: a backup, a computer this phone trusts, another app. A PIN is asked once per launch; six characters or more, longer is better. You can change this later under Protect keys.",
+        "Without one, the keys sit in data.json inside this vault's plugin folder, readable by anything that can read the vault: a backup, a computer this phone trusts, another app. A PIN is asked once per launch; eight characters or more. A short all-digit PIN protects a copied file for about a minute against one graphics card, so mix in letters. You can change this later under Protect keys.",
         "Set a PIN",
       );
       if (!want) return;
       const r = await PromptModal.ask(this.app, "Set a PIN", [
-        { name: "PIN (6+ characters; longer is better)", secret: true },
+        { name: "PIN (8+ characters; letters and digits)", secret: true },
         { name: "Repeat", secret: true },
       ]);
       if (!r) return;

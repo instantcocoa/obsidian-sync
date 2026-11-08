@@ -78,7 +78,7 @@ The codebase is small. Everything security-relevant is in these files
   wrapping `K_e ‖ K_id`. The invite link carries a one-time server token and
   a secret; check what a link leaks and what an expired or used link can
   still do. 1 h TTL, single use.
-- Recovery passphrase: PBKDF2-SHA-256, 600,000 iterations, 16-byte salt,
+- Recovery passphrase: PBKDF2-SHA-256, 2,000,000 iterations (600,000 for passphrases set before 0.1.3; a join tries both and re-sets at the new count), 16-byte salt,
   64-byte output split into a wrap key and an auth token. The server returns
   only the salt without authentication, and the wrapped key only against the
   auth token, rate-limited. Confirm the split does not let the auth half

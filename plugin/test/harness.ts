@@ -47,7 +47,13 @@ export class TestServer {
     this.proc = spawn(process.env.OBSYNC_SERVER_BIN!, this.args, { stdio: ["ignore", "ignore", "pipe"] });
     let log = "";
     this.proc.stderr!.on("data", (d) => (log += d));
-    for (let i = 0; i < 100; i++) {
+    // A fresh Go binary on a loaded Windows runner can sit in an antivirus
+    // scan for longer than the 5 s this once allowed (CI run 42446013287:
+    // "server did not start" with an empty log). Wait up to 30 s, but give
+    // up at once if the process has exited.
+    const deadline = Date.now() + 30_000;
+    while (Date.now() < deadline) {
+      if (this.proc.exitCode !== null) break;
       try {
         if ((await fetch(this.url + "/healthz")).ok) return;
       } catch {
@@ -55,7 +61,7 @@ export class TestServer {
       }
       await new Promise((r) => setTimeout(r, 50));
     }
-    throw new Error("server did not start: " + log);
+    throw new Error(`server did not start (exit ${this.proc.exitCode}): ` + log);
   }
 
   /** Kill the process but keep its data: the "server went away" half of a restart. */

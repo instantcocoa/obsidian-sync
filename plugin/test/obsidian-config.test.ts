@@ -155,6 +155,17 @@ describe.skipIf(!OBSIDIAN_BIN)("real Obsidian, config conflict root cause", () =
     await b.eval((_p, app) => app.vault.setConfig("showLineNumber", true));
     await b.eval((_p, app) => app.vault.setConfig("readableLineLength", false));
     await b.eval((_p, app) => app.vault.setConfig("spellcheck", false));
+    // setConfig only schedules Obsidian's debounced save; on a loaded runner
+    // the flush has taken longer than the 40 s below (macOS, then ubuntu in
+    // CI run 42446013287). Ask for the save directly when the internal
+    // method exists; the polling loop stays as the fallback.
+    await b.eval(async (_p, app) => {
+      try {
+        await (app.vault as unknown as { saveConfig?: () => unknown }).saveConfig?.();
+      } catch {
+        /* best effort */
+      }
+    });
     const ownB = await (async () => {
       const deadline = Date.now() + 40_000; // a loaded CI runner can take a while to flush app.json
       const ja = await appJson(a);

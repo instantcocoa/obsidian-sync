@@ -63,7 +63,7 @@ export interface State {
    * cursor, dropped when a newer op for the path arrives or after `tries`
    * runs out.
    */
-  deferred?: Record<string, { op: WireOp; tries: number }>;
+  deferred?: Record<string, { path_id: string; seq: number; since: number; tries: number; op?: WireOp }>;
 }
 
 export interface EngineConfig {
@@ -593,11 +593,16 @@ export class Engine {
    * the write never happened and the cursor rewinds so the pull applies the
    * op again; it fails again while the lock is held and lands once it goes.
    */
-  /** Park a refused op for later (see State.deferred). Reported once, with the folder spellings. */
+  /**
+   * Park a refused op for later (see State.deferred): only what identifies
+   * the path and the version seen, never the row itself, because a key
+   * rotation may re-encrypt the row meanwhile. Reported once, naming the
+   * folder spelling.
+   */
   private deferOp(logical: string, op: WireOp, why: string): void {
     const cur = (this.state.deferred ??= {})[logical];
     const tries = (cur?.tries ?? 0) + 1;
-    this.state.deferred[logical] = { op, tries };
+    this.state.deferred[logical] = { path_id: op.path_id, seq: op.seq, since: cur?.since ?? Date.now(), tries };
     this.scheduleSave();
     if (tries === 1) {
       const m = /"([^"]+)" resolves to a folder spelled differently/.exec(why);
@@ -606,39 +611,71 @@ export class Engine {
     }
   }
 
-  /** Retry the ops parked by deferOp, in place, without touching the cursor. */
+  /**
+   * Retry the ops parked by deferOp, in place, without touching the cursor.
+   * Each is first probed (nothing downloaded while the folder is still
+   * misspelled), then fetched fresh from the server's history (the row may
+   * have been re-encrypted by a rotation) and run through the same checks
+   * as a pulled op. Dropped with a notice after DEFERRED_MAX_AGE, or when
+   * the server no longer has the version.
+   */
   private async retryDeferred(): Promise<void> {
     const d = this.state.deferred;
     if (!d) return;
     for (const [logical, entry] of Object.entries(d)) {
-      if (entry.tries > Engine.DEFERRED_TRIES) {
+      const pathId = entry.path_id ?? entry.op?.path_id;
+      const seq = entry.seq ?? entry.op?.seq ?? 0;
+      const since = entry.since ?? Date.now();
+      if (!pathId) {
         delete d[logical];
-        this.log("error", `op ${entry.op.seq} for ${logical}: gave up after ${Engine.DEFERRED_TRIES} attempts; the folder spelling on this device still differs`);
-        this.hooks.onSkipped?.(this.device(logical), "a folder on its path is still spelled differently on this device after many attempts; rename the folder here to match the other devices, and the next change to the file will bring it over");
+        continue;
+      }
+      if (Date.now() - since > Engine.DEFERRED_MAX_AGE) {
+        delete d[logical];
+        this.log("error", `op ${seq} for ${logical}: gave up after ${Math.round((Date.now() - since) / 3_600_000)} h; the folder spelling on this device still differs`);
+        this.hooks.onSkipped?.(this.device(logical), 'a folder on its path has been spelled differently on this device for a day; rename the folder here to match the other devices, then run "Rebuild local sync state"');
+        continue;
+      }
+      // Cheap probe first: while the folder is still misspelled there is
+      // nothing to download, decrypt or write.
+      const why = await this.fs.aliasRefusal?.(this.device(logical));
+      if (why && isAliasRefusal(new Error(why))) {
+        entry.tries = (entry.tries ?? 0) + 1;
         continue;
       }
       try {
-        const meta = await this.vc.decryptMeta(entry.op.path_id, fromB64(entry.op.meta_enc));
-        await this.withLock(logical, () => this.applyRemote(logical, entry.op, meta, new Map()));
+        const head = (await this.client.history(this.cfg.vaultId, pathId)).sort((a, b) => b.seq - a.seq)[0];
+        if (!head) {
+          delete d[logical];
+          this.hooks.onSkipped?.(this.device(logical), "the server no longer has this version; the next change to the file will bring it over");
+          continue;
+        }
+        const meta = await this.decodeOp(head);
+        if (!meta) {
+          delete d[logical]; // decodeOp reported why
+          continue;
+        }
+        await this.withLock(logical, () => this.applyRemote(logical, head, meta, new Map()));
         delete d[logical];
-        this.log("info", `op ${entry.op.seq} for ${logical} applied after ${entry.tries} deferred attempt(s)`);
+        this.log("info", `op ${head.seq} for ${logical} applied after ${entry.tries} deferred attempt(s)`);
       } catch (e) {
-        delete this.state.inflight[logical];
         if (isAliasRefusal(e)) {
-          entry.tries++;
+          delete this.state.inflight[logical]; // nothing was written
+          entry.tries = (entry.tries ?? 0) + 1;
           continue;
         }
         if (e instanceof NetworkError || (e instanceof HttpError && e.transient)) throw e;
         delete d[logical];
-        this.log("error", `op ${entry.op.seq} for ${logical} could not be applied on retry; dropping it`, e);
+        this.log("error", `op ${seq} for ${logical} could not be applied on retry; dropping it`, e);
+        this.hooks.onSkipped?.(this.device(logical), `it could not be applied (${String((e as Error).message ?? e)}); the next change to the file will bring it over`);
       }
     }
     if (Object.keys(d).length === 0) delete this.state.deferred;
     this.scheduleSave();
   }
 
-  /** How many sync cycles a deferred op is retried before it is dropped with a notice. */
-  static readonly DEFERRED_TRIES = 48;
+  /** How long a deferred op is retried before it is dropped with a notice: a day. */
+  static readonly DEFERRED_MAX_AGE = 24 * 60 * 60 * 1000;
 
   private async retryBusy(): Promise<void> {
     for (const logical of [...this.busy]) {
@@ -878,44 +915,55 @@ export class Engine {
   }
 
   /** Decrypt metadata, prefetch needed blobs in parallel, then apply in order. */
+  /**
+   * Decrypt and validate one remote op's metadata (DESIGN.md §6.5): the path
+   * must be a plain relative vault path, the one the op is keyed by, not an
+   * alias of the config dir, and the metadata's blob must be the row's. Null
+   * (reported) when the op must not be applied on this device.
+   */
+  private async decodeOp(op: WireOp): Promise<FileMeta | null> {
+    let meta: FileMeta | null = null;
+    try {
+      meta = await this.vc.decryptMeta(op.path_id, fromB64(op.meta_enc));
+    } catch (e) {
+      if (e instanceof CryptoError && /epoch/.test(e.message)) {
+        await this.refreshKeys();
+        meta = await this.vc.decryptMeta(op.path_id, fromB64(op.meta_enc));
+      } else {
+        this.log("error", `cannot decrypt metadata for op ${op.seq}; skipping`, e);
+      }
+    }
+    // The path comes from another device. It must be a plain relative
+    // vault path and it must be the path this op is actually keyed by;
+    // otherwise a compromised member could write outside the vault or
+    // smuggle a file past the exclusion rules under another path's id.
+    if (meta && (!isSafeLogicalPath(meta.path) || (await this.vc.pathId(meta.path)) !== op.path_id || logicalAliasesConfigDir(meta.path, this.fs.configDir) || aliasesConfigDir(this.device(meta.path), this.fs.configDir))) {
+      this.log("error", `op ${op.seq} carries an unsafe or mismatched path; refusing to apply it`, { path: meta.path });
+      // Report it like any other skipped op: the user should know a file
+      // exists in the vault that this device will never show.
+      this.hooks.onSkipped?.(meta.path, "the name is not allowed on this device");
+      meta = null;
+    }
+    // The op row (blob_id beside meta_enc) is not authenticated; the
+    // metadata is. An op whose metadata names a different blob than the
+    // row has been re-pointed by whoever holds the database.
+    if (meta && meta.blob !== undefined && meta.blob !== op.blob_id) {
+      this.log("error", `op ${op.seq}: metadata names blob ${meta.blob ?? "null"} but the op carries ${op.blob_id ?? "null"}; refusing to apply it`, { path: meta.path });
+      this.hooks.onSkipped?.(meta.path, "the server's record of this change is inconsistent");
+      meta = null;
+    }
+    // Paths are keyed by their NFC form (path_id above proves meta.path is
+    // already NFC, since pathId normalises); keep the string NFC too so the
+    // on-disk name matches what the scanner will see.
+    if (meta) meta.path = meta.path.normalize("NFC");
+    return meta;
+  }
+
   private async applyBatch(ops: WireOp[]): Promise<void> {
     type Decoded = { op: WireOp; meta: FileMeta | null; logical: string };
     const decoded: Decoded[] = [];
     for (const op of ops) {
-      let meta: FileMeta | null = null;
-      try {
-        meta = await this.vc.decryptMeta(op.path_id, fromB64(op.meta_enc));
-      } catch (e) {
-        if (e instanceof CryptoError && /epoch/.test(e.message)) {
-          await this.refreshKeys();
-          meta = await this.vc.decryptMeta(op.path_id, fromB64(op.meta_enc));
-        } else {
-          this.log("error", `cannot decrypt metadata for op ${op.seq}; skipping`, e);
-        }
-      }
-      // The path comes from another device. It must be a plain relative
-      // vault path and it must be the path this op is actually keyed by;
-      // otherwise a compromised member could write outside the vault or
-      // smuggle a file past the exclusion rules under another path's id.
-      if (meta && (!isSafeLogicalPath(meta.path) || (await this.vc.pathId(meta.path)) !== op.path_id || logicalAliasesConfigDir(meta.path, this.fs.configDir) || aliasesConfigDir(this.device(meta.path), this.fs.configDir))) {
-        this.log("error", `op ${op.seq} carries an unsafe or mismatched path; refusing to apply it`, { path: meta.path });
-        // Report it like any other skipped op: the user should know a file
-        // exists in the vault that this device will never show.
-        this.hooks.onSkipped?.(meta.path, "the name is not allowed on this device");
-        meta = null;
-      }
-      // The op row (blob_id beside meta_enc) is not authenticated; the
-      // metadata is. An op whose metadata names a different blob than the
-      // row has been re-pointed by whoever holds the database.
-      if (meta && meta.blob !== undefined && meta.blob !== op.blob_id) {
-        this.log("error", `op ${op.seq}: metadata names blob ${meta.blob ?? "null"} but the op carries ${op.blob_id ?? "null"}; refusing to apply it`, { path: meta.path });
-        this.hooks.onSkipped?.(meta.path, "the server's record of this change is inconsistent");
-        meta = null;
-      }
-      // Paths are keyed by their NFC form (path_id above proves meta.path is
-      // already NFC, since pathId normalises); keep the string NFC too so the
-      // on-disk name matches what the scanner will see.
-      if (meta) meta.path = meta.path.normalize("NFC");
+      const meta = await this.decodeOp(op);
       decoded.push({ op, meta, logical: meta?.path ?? "" });
     }
     // Only the last op per path in this batch matters. Deletes go first: a

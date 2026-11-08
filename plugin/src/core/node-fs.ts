@@ -81,6 +81,12 @@ export class NodeFS implements VaultFS {
    * ObsidianFS.refuseCaseClash; the engine skips and reports.
    */
   private async refuseAliasClash(path: string): Promise<void> {
+    const why = await this.aliasRefusal(path);
+    if (why) throw new Error(why);
+  }
+
+  /** See VaultFS.aliasRefusal. */
+  async aliasRefusal(path: string): Promise<string | null> {
     // Every segment, not just the last: "notes/A.md" written through a
     // folder the volume resolves to "Notes/" would replace Notes/A.md. An
     // empty twin folder has been renamed by alignParentSpelling before this
@@ -93,7 +99,7 @@ export class NodeFS implements VaultFS {
         () => true,
         () => false,
       );
-      if (!resolves) return; // nothing answers for this name here or below: new entries
+      if (!resolves) return null; // nothing answers for this name here or below: new entries
       const entries = await fsp.readdir(this.abs(rel)).catch(() => null);
       if (entries) {
         const nfc = seg.normalize("NFC");
@@ -102,12 +108,13 @@ export class NodeFS implements VaultFS {
           // is transient (it empties or gets renamed; the engine retries),
           // a differently spelled FILE at the end is the case twin the
           // engine skips and reports, as it always has.
-          if (i < segs.length - 1) throw new Error(`"${want}" resolves to a folder spelled differently on this volume; refusing to write through it`);
-          throw new Error(`"${want}" resolves to an entry spelled differently on this volume; refusing to replace it`);
+          if (i < segs.length - 1) return `"${want}" resolves to a folder spelled differently on this volume; refusing to write through it`;
+          return `"${want}" resolves to an entry spelled differently on this volume; refusing to replace it`;
         }
       }
       rel = want;
     }
+    return null;
   }
 
   /**

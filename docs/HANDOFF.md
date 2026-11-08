@@ -310,6 +310,24 @@ Obsidian; everything found is fixed and merged:
    touched before the link now); the no-hard-links fallback compared against
    errno values Windows never produces (any link failure but "no such file"
    now falls back to the rename pair).
+1j. **Eleventh review (2026-11-08): the tenth round's fixes. Plugin 3.5/5,
+   server 4/5 → fixed, released as 0.1.12.** The first partial convergence:
+   the crypto shape guards, the join-handler lifecycle and the folder
+   emptiness check came back clean; the four plugin proofs
+   (`review11-deferred.test.ts`) were all in the new deferral mechanism:
+   every retry downloaded and flushed state before the folder check (a
+   `VaultFS.aliasRefusal` probe now runs first); a key rotation while an op
+   was parked made its stored row undecryptable and it was dropped silently
+   (the entry now holds only path id, seq and age, refetches the head from
+   history and runs it through the same `decodeOp` checks as a pulled op;
+   every drop is reported); the budget counted sync cycles (now a day); the
+   in-flight record was deleted on any error (now only on the alias
+   refusal). Server (`review11_test.go`, one LOW): the pre-link touch needed
+   file ownership and failed every replacing upload of a blob the service
+   could not utimes; the touch is gone and `SweepStale` ages stage and aside
+   files by the base-36 UnixNano nonce in their names (mtime for `.tmp-`
+   and for implausible nonces). The reviewer's full crash-state enumeration
+   of putBlob passed, and it recommends not re-reading `Swap` again.
 2. **Human security review.** Hand `docs/SECURITY-REVIEW-GUIDE.md` to a
    specialist. When findings come back, fix them in the style of the
    existing review rounds: a failing test first (`security_test.go` for the

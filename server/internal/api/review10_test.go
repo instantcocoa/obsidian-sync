@@ -16,6 +16,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -91,8 +92,10 @@ func TestR10SweepCanStillTakeThePrevFileBetweenLinkAndChtimes(t *testing.T) {
 	hits, swaps := 0, 0
 	var firstHit string
 	for deadline := time.Now().Add(4 * time.Second); time.Now().Before(deadline); swaps++ {
-		stage := fmt.Sprintf("%s-stage-%d", id, swaps)
-		prev := fmt.Sprintf("%s-prev-%d", id, swaps)
+		// Nonces as putBlob mints them (base-36 UnixNano): the sweep ages these files by that nonce.
+		nonce := strconv.FormatInt(time.Now().UnixNano()+int64(swaps), 36)
+		stage := fmt.Sprintf("%s-stage-%s", id, nonce)
+		prev := fmt.Sprintf("%s-prev-%s", id, nonce)
 		r10put(t, bs, vault, stage, fmt.Sprintf("new bytes %d", swaps))
 		had, err := bs.Swap(vault, stage, id, prev)
 		if err != nil || !had {
@@ -143,18 +146,23 @@ func TestR10HardLinkSwapIsConsistentForReadersAndMtimeIsNotServed(t *testing.T) 
 	}
 	defer early.Close()
 
-	r10put(t, bs, vault, id+"-stage-a", "version 2 is longer")
-	had, err := bs.Swap(vault, id+"-stage-a", id, id+"-prev-a")
+	nonce := strconv.FormatInt(time.Now().UnixNano(), 36) // as putBlob mints it; the sweep ages the aside copy by it
+	r10put(t, bs, vault, id+"-stage-"+nonce, "version 2 is longer")
+	had, err := bs.Swap(vault, id+"-stage-"+nonce, id, id+"-prev-"+nonce)
 	if err != nil || !had {
 		t.Fatalf("Swap: had=%v err=%v", had, err)
 	}
-	prevPath := filepath.Join(filepath.Dir(cur), id+"-prev-a")
-	pst, err := os.Stat(prevPath)
-	if err != nil {
+	prevPath := filepath.Join(filepath.Dir(cur), id+"-prev-"+nonce)
+	if _, err := os.Stat(prevPath); err != nil {
 		t.Fatal(err)
 	}
-	if age := time.Since(pst.ModTime()); age > time.Minute {
-		t.Fatalf("the -prev- file still carries the old mtime (%s old): the sweep grace would not apply", age)
+	// The aside copy is aged by the nonce in its name, not by the inode's
+	// mtime it shares with the old blob: a sweep now must spare it.
+	if n, err := bs.SweepStale(vault, time.Hour); err != nil || n != 0 {
+		t.Fatalf("a sweep right after the swap must spare the aside copy: removed %d, err %v", n, err)
+	}
+	if _, err := os.Stat(prevPath); err != nil {
+		t.Fatalf("the -prev- file was swept although its nonce is fresh: %v", err)
 	}
 	if got, _ := io.ReadAll(early); string(got) != "version 1" {
 		t.Fatalf("a reader opened before the swap must read the old version whole, got %q", got)
@@ -162,7 +170,7 @@ func TestR10HardLinkSwapIsConsistentForReadersAndMtimeIsNotServed(t *testing.T) 
 	if got := r10read(t, bs, vault, id); got != "version 2 is longer" {
 		t.Fatalf("a reader opened after the swap must read the new version, got %q", got)
 	}
-	if err := bs.Restore(vault, id+"-prev-a", id, had); err != nil {
+	if err := bs.Restore(vault, id+"-prev-"+nonce, id, had); err != nil {
 		t.Fatal(err)
 	}
 	if got := r10read(t, bs, vault, id); got != "version 1" {

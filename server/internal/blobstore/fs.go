@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -142,9 +143,12 @@ func isHexID(s string) bool {
 	return true
 }
 
-// SweepStale removes staging and temp files of interrupted uploads older
-// than `age` (names "<id>-stage-<nonce>" from putBlob and ".tmp-<id>-*" from
-// Put). Nothing else matches those names, so a live upload younger than
+// SweepStale removes staging, aside and temp files of interrupted uploads
+// older than `age`. "<id>-stage-<nonce>" and "<id>-prev-<nonce>" carry their
+// creation time in the nonce (base-36 UnixNano, minted by putBlob), which is
+// what is aged: an aside copy is a hard link and shares the old blob's mtime,
+// and a touch would need file ownership. ".tmp-<id>-*" from Put is aged by
+// mtime. Nothing else matches those names, so a live upload younger than
 // `age` is the only thing spared.
 func (f *FS) SweepStale(vault string, age time.Duration) (int, error) {
 	root := filepath.Join(f.root, vault)
@@ -161,11 +165,26 @@ func (f *FS) SweepStale(vault string, age time.Duration) (int, error) {
 			return nil
 		}
 		name := d.Name()
-		if !strings.Contains(name, "-stage-") && !strings.Contains(name, "-prev-") && !strings.HasPrefix(name, ".tmp-") {
+		if !strings.HasPrefix(name, ".tmp-") && !strings.Contains(name, "-stage-") && !strings.Contains(name, "-prev-") {
 			return nil
 		}
-		info, err := d.Info()
-		if err != nil || info.ModTime().After(cutoff) {
+		info, ierr := d.Info()
+		if ierr != nil {
+			return nil
+		}
+		born := info.ModTime()
+		// A stage or aside file carries its creation time in its nonce; the
+		// ".tmp-" files Put makes (whose names embed the stage name plus a
+		// random suffix) and anything whose nonce does not decode to a
+		// plausible time are aged by mtime instead.
+		if !strings.HasPrefix(name, ".tmp-") {
+			if ns, perr := strconv.ParseInt(name[strings.LastIndex(name, "-")+1:], 36, 64); perr == nil {
+				if t := time.Unix(0, ns); t.After(time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)) && t.Before(time.Now().Add(24*time.Hour)) {
+					born = t
+				}
+			}
+		}
+		if born.After(cutoff) {
 			return nil
 		}
 		if os.Remove(p) == nil {
@@ -218,15 +237,9 @@ func (f *FS) Promote(vault, stage, id string) error {
 func (f *FS) Swap(vault, stage, id, prev string) (bool, error) {
 	had := false
 	cur, prevPath := f.path(vault, id), f.path(vault, prev)
-	// Timestamp the current inode BEFORE the link is made, so the aside copy
-	// is born young: a link that carried the old mtime for even a moment
-	// was taken by a concurrent hour-of-grace sweep in most trials. Nothing
-	// reads a rowed file's mtime (GC ages row-less files only; serving uses
-	// the row's created_at), so touching it is harmless.
-	now := time.Now()
-	if err := os.Chtimes(cur, now, now); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return false, err
-	}
+	// The aside copy's age is read from the nonce in its name by SweepStale,
+	// never from its mtime (a hard link shares the old inode's timestamp, and
+	// a touch needs file ownership that link and rename do not).
 	switch err := os.Link(cur, prevPath); {
 	case err == nil:
 		had = true

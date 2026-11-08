@@ -177,7 +177,13 @@ export class ObsidianFS implements VaultFS {
    * device keeps both; this one keeps the first).
    */
   private async refuseCaseClash(path: string): Promise<void> {
-    if (!(await this.volumeIgnoresCase())) return;
+    const why = await this.aliasRefusal(path);
+    if (why) throw new Error(why);
+  }
+
+  /** See VaultFS.aliasRefusal. */
+  async aliasRefusal(path: string): Promise<string | null> {
+    if (!(await this.volumeIgnoresCase())) return null;
     // Every segment: a folder the volume resolves under another spelling
     // would route the write into that folder's files. The adapter lists a
     // folder's children under the spelling it was asked with, so each level
@@ -186,7 +192,7 @@ export class ObsidianFS implements VaultFS {
     let rel = "";
     for (const [i, seg] of segs.entries()) {
       const want = rel ? `${rel}/${seg}` : seg;
-      if (!(await this.app.vault.adapter.exists(want))) return;
+      if (!(await this.app.vault.adapter.exists(want))) return null;
       let names: string[];
       try {
         const l = await this.app.vault.adapter.list(rel);
@@ -195,17 +201,18 @@ export class ObsidianFS implements VaultFS {
           return p.slice(p.lastIndexOf("/") + 1);
         });
       } catch {
-        return; // listing failed: let the write decide
+        return null; // listing failed: let the write decide
       }
       if (!names.includes(seg)) {
         // A differently spelled folder on the way is transient (the engine
         // retries); a differently spelled file at the end is the case twin
         // the engine skips and reports.
-        if (i < segs.length - 1) throw new Error(`"${want}" resolves to a folder spelled differently on this volume; refusing to write through it`);
-        throw new Error(`"${want}" resolves to an entry spelled differently on this volume; refusing to replace it`);
+        if (i < segs.length - 1) return `"${want}" resolves to a folder spelled differently on this volume; refusing to write through it`;
+        return `"${want}" resolves to an entry spelled differently on this volume; refusing to replace it`;
       }
       rel = want;
     }
+    return null;
   }
 
   private async exactName(path: string): Promise<boolean> {

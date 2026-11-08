@@ -33,6 +33,13 @@ export interface VaultFS {
   write(path: string, data: Uint8Array, mtime: number): Promise<void>;
   /** Remove a file; implementations may move it to a trash. */
   remove(path: string): Promise<void>;
+  /**
+   * Optional: the reason `write(path)` would be refused because the volume
+   * resolves `path`, or a folder on the way to it, to an existing entry
+   * spelled differently (see the refusal messages), or null. Lets the engine
+   * check a parked op before downloading anything for it.
+   */
+  aliasRefusal?(path: string): Promise<string | null>;
   /** Change hints. The engine only uses them to schedule a stat+hash. */
   onChange(cb: (path: string) => void): () => void;
 }

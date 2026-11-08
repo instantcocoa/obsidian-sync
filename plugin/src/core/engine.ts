@@ -144,9 +144,14 @@ type BlobCache = Map<string, Promise<Uint8Array>>;
 class ConcurrentLocalEdit extends Error {}
 
 /** A write refused because another program holds the file (Windows sharing violation, a read-only or locked file). */
-/** The filesystem refused to write through a folder the volume spells differently; transient once that folder is emptied or renamed. */
+/**
+ * The filesystem refused to write through a FOLDER the volume spells
+ * differently; transient once that folder is emptied or renamed. A file
+ * twin at the end of the path ("refusing to replace it") is not matched: it
+ * is skipped and reported, never retried, or a case-only rename would loop.
+ */
 function isAliasRefusal(e: unknown): boolean {
-  return /spelled differently on this volume/.test(String((e as Error)?.message ?? e));
+  return /folder spelled differently on this volume; refusing to write through it/.test(String((e as Error)?.message ?? e));
 }
 
 function isFileInUse(e: unknown): boolean {

@@ -184,7 +184,7 @@ export class ObsidianFS implements VaultFS {
     // is checked by its own basename against its parent's listing.
     const segs = path.split("/");
     let rel = "";
-    for (const seg of segs) {
+    for (const [i, seg] of segs.entries()) {
       const want = rel ? `${rel}/${seg}` : seg;
       if (!(await this.app.vault.adapter.exists(want))) return;
       let names: string[];
@@ -197,7 +197,13 @@ export class ObsidianFS implements VaultFS {
       } catch {
         return; // listing failed: let the write decide
       }
-      if (!names.includes(seg)) throw new Error(`"${want}" resolves to an entry spelled differently on this volume; refusing to write through it`);
+      if (!names.includes(seg)) {
+        // A differently spelled folder on the way is transient (the engine
+        // retries); a differently spelled file at the end is the case twin
+        // the engine skips and reports.
+        if (i < segs.length - 1) throw new Error(`"${want}" resolves to a folder spelled differently on this volume; refusing to write through it`);
+        throw new Error(`"${want}" resolves to an entry spelled differently on this volume; refusing to replace it`);
+      }
       rel = want;
     }
   }

@@ -87,7 +87,7 @@ export class NodeFS implements VaultFS {
     // runs, so a differently spelled parent that still resolves has contents.
     const segs = (this.raw.get(path) ?? path).split("/");
     let rel = "";
-    for (const seg of segs) {
+    for (const [i, seg] of segs.entries()) {
       const want = rel ? `${rel}/${seg}` : seg;
       const resolves = await fsp.stat(this.abs(want)).then(
         () => true,
@@ -98,7 +98,12 @@ export class NodeFS implements VaultFS {
       if (entries) {
         const nfc = seg.normalize("NFC");
         if (!entries.some((e) => e === seg || e.normalize("NFC") === nfc)) {
-          throw new Error(`"${want}" resolves to an entry spelled differently on this volume; refusing to write through it`);
+          // Two different refusals: a differently spelled FOLDER on the way
+          // is transient (it empties or gets renamed; the engine retries),
+          // a differently spelled FILE at the end is the case twin the
+          // engine skips and reports, as it always has.
+          if (i < segs.length - 1) throw new Error(`"${want}" resolves to a folder spelled differently on this volume; refusing to write through it`);
+          throw new Error(`"${want}" resolves to an entry spelled differently on this volume; refusing to replace it`);
         }
       }
       rel = want;

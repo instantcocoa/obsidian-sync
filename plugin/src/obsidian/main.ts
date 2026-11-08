@@ -812,7 +812,7 @@ export default class ObsyncPlugin extends Plugin {
       new ListModal(
         this.app,
         `History: ${f.path}`,
-        ops.reverse().map((o) => ({
+        ops.sort((a, b) => b.seq - a.seq).map((o) => ({
           label: new Date(o.created_at).toLocaleString(),
           detail: o.blob_id ? `version ${o.seq}` : `deleted (${o.seq})`,
           action: o.blob_id

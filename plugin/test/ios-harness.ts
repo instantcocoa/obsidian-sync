@@ -264,26 +264,36 @@ export class RemoteServer {
   }
 
   /** Snapshot the data directory while stopped (the ACME cache included, so the certificate survives a restore). */
-  async backup(): Promise<string> {
+  /** Run `fn` with the unit stopped; the unit is started again whatever happens. */
+  private async whileStopped(fn: () => void): Promise<void> {
     await this.halt();
-    const name = `obsync-backup-${Date.now()}`;
-    this.sh(`sudo cp -a ${RemoteServer.DATA} /var/lib/private/${name}`);
-    await this.resume();
+    try {
+      fn();
+    } finally {
+      await this.resume();
+    }
+  }
+
+  private static backupName(name: string): string {
+    if (!/^obsync-backup-\d{10,16}$/.test(name)) throw new Error(`not a backup name this harness made: ${JSON.stringify(name)}`);
     return name;
   }
 
-  async restoreFrom(name: string): Promise<void> {
-    await this.halt();
-    this.sh(`sudo rm -rf ${RemoteServer.DATA} && sudo cp -a /var/lib/private/${name} ${RemoteServer.DATA}`);
-    await this.resume();
+  async backup(): Promise<string> {
+    const name = `obsync-backup-${Date.now()}`;
+    await this.whileStopped(() => this.sh(`sudo cp -a ${RemoteServer.DATA} /var/lib/private/${name}`));
+    return name;
   }
 
-  /** Remove every vault and blob but keep the ACME cache: a fresh server for the next run. */
+  /** Restore a backup made by `backup()`: the live data directory is moved aside, never deleted. */
+  async restoreFrom(name: string): Promise<void> {
+    const n = RemoteServer.backupName(name);
+    await this.whileStopped(() => this.sh(`sudo test -d /var/lib/private/${n} && sudo mv ${RemoteServer.DATA} ${RemoteServer.DATA}.replaced-${Date.now()} && sudo cp -a /var/lib/private/${n} ${RemoteServer.DATA}`));
+  }
+
+  /** Remove every vault and blob but keep the ACME cache and the admin token: a fresh server for the next run. */
   async wipe(): Promise<void> {
-    await this.halt();
-    // Keep the ACME cache and the admin token (which lives in the data dir under the unit).
-    this.sh(`cd ${RemoteServer.DATA} && sudo find . -mindepth 1 -maxdepth 1 ! -name acme ! -name admin-token -exec rm -rf {} +`);
-    await this.resume();
+    await this.whileStopped(() => this.sh(`sudo find ${RemoteServer.DATA} -mindepth 1 -maxdepth 1 ! -name acme ! -name admin-token -exec rm -rf {} +`));
   }
 }
 

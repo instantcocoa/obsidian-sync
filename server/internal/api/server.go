@@ -18,6 +18,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/coder/websocket"
@@ -69,6 +70,9 @@ type Server struct {
 	unauth   *limiter
 	authFail *limiter
 }
+
+// stageSeq distinguishes stage files of uploads that began in the same nanosecond.
+var stageSeq atomic.Uint64
 
 func (s *Server) blobLock(id string) *sync.Mutex {
 	h := fnv.New32a()
@@ -1026,7 +1030,11 @@ func (s *Server) putBlob(w http.ResponseWriter, r *http.Request) {
 	// Write to a staging name first; only after the index accepts it do we
 	// move it into place, so a concurrent higher-epoch upload can't be
 	// clobbered by a lower one.
-	stage := id + "-stage-" + strconv.FormatInt(time.Now().UnixNano(), 36)
+	// Unique per upload, not just per nanosecond: two uploads of the same id
+	// can start in the same tick before either holds the per-blob lock, and
+	// a shared stage name would let one upload's bytes be promoted under the
+	// other's row. (Stage files are aged by mtime; the time stays last in the name for anything that reads it.)
+	stage := id + "-stage-" + strconv.FormatUint(stageSeq.Add(1), 36) + "-" + strconv.FormatInt(time.Now().UnixNano(), 36)
 	n, err := s.blobs.Put(v, stage, io.MultiReader(bytes.NewReader(head), body))
 	if err != nil {
 		s.blobs.Delete(v, stage)

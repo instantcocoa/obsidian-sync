@@ -15,6 +15,7 @@ import (
 	"crypto/subtle"
 	"database/sql"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -515,6 +516,21 @@ func (s *Store) RosterHash(ctx context.Context, vault string) (string, error) {
 // MaxMetaEnc bounds one op's encrypted metadata: 16 KiB holds the longest
 // allowed path many times over.
 const MaxMetaEnc = 16 << 10
+
+// metaHeaderMatches checks the one plaintext field of meta_enc the server
+// can read: its 4-byte little-endian epoch header, which every client
+// decrypts by. A row whose header names an epoch no device holds would
+// throw out of every client's pull; the row's meta_epoch is validated
+// against the vault, so the header must agree with it.
+func metaHeaderMatches(metaEnc []byte, metaEpoch int64) error {
+	if len(metaEnc) < 32 {
+		return fmt.Errorf("%w: meta_enc too short", ErrBadRequest)
+	}
+	if hdr := int64(binary.LittleEndian.Uint32(metaEnc[:4])); hdr != metaEpoch {
+		return fmt.Errorf("%w: meta_enc header epoch %d does not match meta_epoch %d", ErrBadRequest, hdr, metaEpoch)
+	}
+	return nil
+}
 
 // MaxOpaque bounds the other client-supplied ciphertexts the server stores
 // and hands to every device: a device name and a keybox row (about 60 and
@@ -1128,6 +1144,9 @@ func (s *Store) validateOp(o Op) error {
 	if o.MetaEpoch < 1 || o.BaseSeq < 0 {
 		return fmt.Errorf("%w: bad meta_epoch or base_seq", ErrBadRequest)
 	}
+	if err := metaHeaderMatches(o.MetaEnc, o.MetaEpoch); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -1263,8 +1282,11 @@ func (s *Store) Snapshot(ctx context.Context, vault string, since int64, limit i
 	return s.queryOps(ctx, `SELECT `+opCols+` FROM ops WHERE vault_id=? AND seq>? AND seq IN (SELECT seq FROM heads WHERE vault_id=?) ORDER BY seq LIMIT ?`, vault, since, vault, limit)
 }
 
+// History returns a path's ops newest first, so a page cut at `limit` keeps
+// the head: a client resolving "the current version" from a long history
+// must never be handed version 5000 of 5002.
 func (s *Store) History(ctx context.Context, vault, pathID string, limit int) ([]Op, error) {
-	return s.queryOps(ctx, `SELECT `+opCols+` FROM ops WHERE vault_id=? AND path_id=? ORDER BY seq LIMIT ?`, vault, pathID, limit)
+	return s.queryOps(ctx, `SELECT `+opCols+` FROM ops WHERE vault_id=? AND path_id=? ORDER BY seq DESC LIMIT ?`, vault, pathID, limit)
 }
 
 func (s *Store) OpsByTime(ctx context.Context, vault string, from, to int64, limit int) ([]Op, error) {
@@ -1292,6 +1314,9 @@ func (s *Store) OpsBelowMetaEpoch(ctx context.Context, vault string, epoch int64
 func (s *Store) PatchMeta(ctx context.Context, vault string, by Actor, seq int64, metaEnc []byte, metaEpoch int64) error {
 	if len(metaEnc) == 0 || len(metaEnc) > MaxMetaEnc {
 		return fmt.Errorf("%w: meta_enc required", ErrBadRequest)
+	}
+	if err := metaHeaderMatches(metaEnc, metaEpoch); err != nil {
+		return err
 	}
 	return s.writeTx(ctx, func(tx *sql.Tx) error {
 		if err := s.actorLiveTx(ctx, tx, vault, by); err != nil {

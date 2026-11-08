@@ -173,11 +173,14 @@ func (f *FS) SweepStale(vault string, age time.Duration) (int, error) {
 			return nil
 		}
 		born := info.ModTime()
-		// A stage or aside file carries its creation time in its nonce; the
-		// ".tmp-" files Put makes (whose names embed the stage name plus a
-		// random suffix) and anything whose nonce does not decode to a
-		// plausible time are aged by mtime instead.
-		if !strings.HasPrefix(name, ".tmp-") {
+		// An aside ("-prev-") copy is a hard link that shares the old blob's
+		// mtime, so it is aged by the nonce putBlob put in its name. A stage
+		// file is still being written for as long as the upload lasts (which
+		// can exceed the hour: idleReader extends the deadline while bytes
+		// arrive), so it is aged by its mtime, which that write keeps fresh;
+		// so are the ".tmp-" files Put makes. A nonce that does not decode to
+		// a plausible time falls back to mtime too.
+		if strings.Contains(name, "-prev-") {
 			if ns, perr := strconv.ParseInt(name[strings.LastIndex(name, "-")+1:], 36, 64); perr == nil {
 				if t := time.Unix(0, ns); t.After(time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)) && t.Before(time.Now().Add(24*time.Hour)) {
 					born = t

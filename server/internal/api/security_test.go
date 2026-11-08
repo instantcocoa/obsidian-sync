@@ -99,7 +99,7 @@ func TestTokenOnlyAttackerCannotDestroyOrEscalate(t *testing.T) {
 	e.do("POST", base+"/rotate", b.token, map[string]any{"epoch": 2, "revoke": []string{a.id}, "keybox": rows, "auth_next": newAuthTok()}, nil).expect(t, 401)
 	e.do("POST", base+"/rotate", b.token, map[string]any{"epoch": 2, "revoke": []string{a.id}, "keybox": rows, "auth_next": newAuthTok()}, map[string]string{"X-Obsync-Vault-Auth": newAuthTok()}).expect(t, 401)
 	e.do("PUT", base+"/recovery", b.token, map[string]any{"pub_kex": testPubKex(), "recovery_enc": randBytes(80), "salt": randBytes(16), "auth": "rc_mine"}, nil).expect(t, 401)
-	e.do("PATCH", base+"/ops/1/meta", b.token, map[string]any{"meta_enc": randBytes(40), "meta_epoch": 1}, nil).expect(t, 401)
+	e.do("PATCH", base+"/ops/1/meta", b.token, map[string]any{"meta_enc": metaEnc(1, 40), "meta_epoch": 1}, nil).expect(t, 401)
 	e.do("POST", base+"/invites", b.token, map[string]any{"keybox_enc": randBytes(8)}, nil).expect(t, 401)
 	e.do("POST", base+"/auth", b.token, map[string]any{"auth": newAuthTok()}, nil).expect(t, 401) // a wrong authority token, charged as one
 	// Ciphertext cannot be replaced in place without the keys, even with a higher epoch header.
@@ -346,8 +346,8 @@ func TestInputValidation(t *testing.T) {
 	e.do("POST", base+"/keybox", a.token, map[string]any{"keybox": []store.KeyboxRow{{Epoch: 1, RecipientID: "nobody", Wrapped: randBytes(9)}}}, authHdr(vault)).expect(t, 400)
 	// Restore needs a positive time; patch needs a real seq.
 	e.do("POST", base+"/restore", a.token, map[string]any{"at": 0}, authHdr(vault)).expect(t, 400)
-	e.do("PATCH", base+"/ops/999/meta", a.token, map[string]any{"meta_enc": randBytes(4), "meta_epoch": 1}, authHdr(vault)).expect(t, 404)
-	e.do("PATCH", base+"/ops/abc/meta", a.token, map[string]any{"meta_enc": randBytes(4), "meta_epoch": 1}, authHdr(vault)).expect(t, 400)
+	e.do("PATCH", base+"/ops/999/meta", a.token, map[string]any{"meta_enc": metaEnc(1, 32), "meta_epoch": 1}, authHdr(vault)).expect(t, 404)
+	e.do("PATCH", base+"/ops/abc/meta", a.token, map[string]any{"meta_enc": metaEnc(1, 32), "meta_epoch": 1}, authHdr(vault)).expect(t, 400)
 }
 
 func TestBlobSizeLimit(t *testing.T) {

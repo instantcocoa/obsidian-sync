@@ -184,7 +184,15 @@ type feed struct {
 }
 
 func put(path string, blobID *string, base int64) opIn {
-	return opIn{OpID: "op-" + hex.EncodeToString(randBytes(8)), PathID: hexID(path), BlobID: blobID, MetaEnc: randBytes(40), MetaEpoch: 1, BaseSeq: base}
+	return opIn{OpID: "op-" + hex.EncodeToString(randBytes(8)), PathID: hexID(path), BlobID: blobID, MetaEnc: metaEnc(1, 40), MetaEpoch: 1, BaseSeq: base}
+}
+
+// metaEnc is opaque metadata of n bytes whose 4-byte little-endian header
+// names `epoch`, the one plaintext field of meta_enc the server validates.
+func metaEnc(epoch int64, n int) []byte {
+	b := randBytes(n)
+	binary.LittleEndian.PutUint32(b[:4], uint32(epoch))
+	return b
 }
 
 func str(s string) *string { return &s }
@@ -544,7 +552,7 @@ func TestRotateReencryptAndRecovery(t *testing.T) {
 	rot(2, []string{b.id}, a.id, rec.DeviceID).expect(t, 200)
 	e.do("GET", base, b.token, nil, nil).expect(t, 401)
 	// The old authority token died with epoch 1; the new one is live.
-	e.do("PATCH", base+"/ops/1/meta", a.token, map[string]any{"meta_enc": randBytes(40), "meta_epoch": 2}, authHdr(vault)).expect(t, 401)
+	e.do("PATCH", base+"/ops/1/meta", a.token, map[string]any{"meta_enc": metaEnc(2, 40), "meta_epoch": 2}, authHdr(vault)).expect(t, 401)
 	authTok[vault] = nextAuth
 	var v store.Vault
 	e.do("GET", base, a.token, nil, nil).expect(t, 200).json(t, &v)
@@ -589,10 +597,10 @@ func TestRotateReencryptAndRecovery(t *testing.T) {
 	if len(seqs.Seqs) != 1 {
 		t.Fatalf("meta worklist: %+v", seqs)
 	}
-	e.do("PATCH", base+"/ops/1/meta", a.token, map[string]any{"meta_enc": randBytes(40), "meta_epoch": 2}, nil).expect(t, 401)
-	e.do("PATCH", base+"/ops/1/meta", a.token, map[string]any{"meta_enc": randBytes(40), "meta_epoch": 1}, authHdr(vault)).expect(t, 409)
-	e.do("PATCH", base+"/ops/1/meta", a.token, map[string]any{"meta_enc": randBytes(40), "meta_epoch": 2}, authHdr(vault)).expect(t, 204)
-	e.do("PATCH", base+"/ops/1/meta", a.token, map[string]any{"meta_enc": randBytes(40), "meta_epoch": 2}, authHdr(vault)).expect(t, 409)
+	e.do("PATCH", base+"/ops/1/meta", a.token, map[string]any{"meta_enc": metaEnc(2, 40), "meta_epoch": 2}, nil).expect(t, 401)
+	e.do("PATCH", base+"/ops/1/meta", a.token, map[string]any{"meta_enc": metaEnc(1, 40), "meta_epoch": 1}, authHdr(vault)).expect(t, 409)
+	e.do("PATCH", base+"/ops/1/meta", a.token, map[string]any{"meta_enc": metaEnc(2, 40), "meta_epoch": 2}, authHdr(vault)).expect(t, 204)
+	e.do("PATCH", base+"/ops/1/meta", a.token, map[string]any{"meta_enc": metaEnc(2, 40), "meta_epoch": 2}, authHdr(vault)).expect(t, 409)
 	e.do("GET", base, a.token, nil, nil).expect(t, 200).json(t, &v)
 	if v.MinEpoch != 2 {
 		t.Fatalf("min_epoch should advance to 2: %+v", v)
@@ -699,7 +707,12 @@ func TestGCAndRestore(t *testing.T) {
 	// (seq 2 used v2 which is gone; restore to just after seq 2 picks v2.)
 	var hist struct{ Ops []store.Op }
 	e.do("GET", base+"/history?path_id="+hexID("n.md"), a.token, nil, nil).expect(t, 200).json(t, &hist)
-	tAfterSeq2 := hist.Ops[1].CreatedAt
+	var tAfterSeq2 int64
+	for _, o := range hist.Ops { // history is newest first
+		if o.Seq == 2 {
+			tAfterSeq2 = o.CreatedAt
+		}
+	}
 	e.do("POST", base+"/restore", a.token, map[string]any{"at": tAfterSeq2}, authHdr(vault)).expect(t, 200).json(t, &rs)
 	if rs.Emitted != 0 || len(rs.Skipped) != 1 || rs.Skipped[0] != hexID("n.md") {
 		t.Fatalf("restore with collected blob: %+v", rs)

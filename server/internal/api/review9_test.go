@@ -502,7 +502,7 @@ func TestR9OpsFloorRestoreAndPatchMetaRespectMinEpoch(t *testing.T) {
 	e.upload(vault, a, bid1, blob(2, "doc v1 re")).expect(t, 201)
 	e.upload(vault, a, bid2, blob(2, "doc v2 re")).expect(t, 201)
 	for _, seq := range []int64{seq1, seq2, seq3} {
-		e.do("PATCH", fmt.Sprintf("%s/ops/%d/meta", base, seq), a.token, map[string]any{"meta_enc": randBytes(40), "meta_epoch": 2}, authHdr(vault)).expect(t, 204)
+		e.do("PATCH", fmt.Sprintf("%s/ops/%d/meta", base, seq), a.token, map[string]any{"meta_enc": metaEnc(2, 40), "meta_epoch": 2}, authHdr(vault)).expect(t, 204)
 	}
 	if v := e.vault(vault, a); v.MinEpoch != 2 {
 		t.Fatalf("min_epoch should be 2 after re-encryption: %+v", v)
@@ -518,6 +518,7 @@ func TestR9OpsFloorRestoreAndPatchMetaRespectMinEpoch(t *testing.T) {
 	}
 	t.Logf("per-op refusal body: %q", r4.Results[0].Error)
 	low.MetaEpoch = 2
+	low.MetaEnc = metaEnc(2, 40) // the header must agree with meta_epoch
 	low.OpID = "op-" + hexID("r9-low-retry")[:16]
 	r5 := e.ops(vault, b, low)
 	if r5.Results[0].Seq == 0 || r5.Results[0].Error != "" {
@@ -527,8 +528,8 @@ func TestR9OpsFloorRestoreAndPatchMetaRespectMinEpoch(t *testing.T) {
 	e.upload(vault, b, hexID("r9-late-blob"), blob(1, "late")).expect(t, 400)
 
 	// PatchMeta cannot lower or hold an op's epoch.
-	e.do("PATCH", fmt.Sprintf("%s/ops/%d/meta", base, seq1), a.token, map[string]any{"meta_enc": randBytes(40), "meta_epoch": 1}, authHdr(vault)).expect(t, 409)
-	e.do("PATCH", fmt.Sprintf("%s/ops/%d/meta", base, seq1), a.token, map[string]any{"meta_enc": randBytes(40), "meta_epoch": 2}, authHdr(vault)).expect(t, 409)
+	e.do("PATCH", fmt.Sprintf("%s/ops/%d/meta", base, seq1), a.token, map[string]any{"meta_enc": metaEnc(1, 40), "meta_epoch": 1}, authHdr(vault)).expect(t, 409)
+	e.do("PATCH", fmt.Sprintf("%s/ops/%d/meta", base, seq1), a.token, map[string]any{"meta_enc": metaEnc(2, 40), "meta_epoch": 2}, authHdr(vault)).expect(t, 409)
 
 	// Restore to just after v1: the emitted op copies the (patched) epoch-2
 	// metadata; min_epoch stays 2.

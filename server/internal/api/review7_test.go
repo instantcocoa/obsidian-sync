@@ -162,7 +162,7 @@ func TestR7EveryDeviceWriteRouteRechecksTheWriterAtCommit(t *testing.T) {
 			}},
 		{"meta", "PATCH", func(v string, a, b device, seq int64) string { return fmt.Sprintf("/v1/vaults/%s/ops/%d/meta", v, seq) },
 			func(v string, a, b device) ([]byte, map[string]string) {
-				bb, _ := jsonBytes(map[string]any{"meta_enc": randBytes(40), "meta_epoch": 2})
+				bb, _ := jsonBytes(map[string]any{"meta_enc": metaEnc(2, 40), "meta_epoch": 2})
 				return bb, jsonHdr(v)
 			},
 			func(e *env, v string, a, b device, seq int64) string {
@@ -364,7 +364,7 @@ func TestR7IndexCommittedBeforeFileLosesTheOldEpochKey(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Metadata re-encryption may still have run for this op; it does not move min_epoch while the blob row is behind.
-	e.do("PATCH", fmt.Sprintf("%s/ops/%d/meta", base, seq), a.token, map[string]any{"meta_enc": randBytes(40), "meta_epoch": 2}, authHdr(vault)).expect(t, 204)
+	e.do("PATCH", fmt.Sprintf("%s/ops/%d/meta", base, seq), a.token, map[string]any{"meta_enc": metaEnc(2, 40), "meta_epoch": 2}, authHdr(vault)).expect(t, 204)
 	f, err := bs.Open(vault, id)
 	if err != nil {
 		t.Fatal(err)

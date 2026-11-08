@@ -645,7 +645,10 @@ export class Engine {
       }
       try {
         const head = (await this.client.history(this.cfg.vaultId, pathId)).sort((a, b) => b.seq - a.seq)[0];
-        if (!head) {
+        if (!head || head.seq < seq) {
+          // Gone, or the server now has only something older than what was
+          // parked (a restore from backup): the ordinary rewind handling and
+          // the next change to the file take it from here.
           delete d[logical];
           this.hooks.onSkipped?.(this.device(logical), "the server no longer has this version; the next change to the file will bring it over");
           continue;
@@ -927,10 +930,20 @@ export class Engine {
       meta = await this.vc.decryptMeta(op.path_id, fromB64(op.meta_enc));
     } catch (e) {
       if (e instanceof CryptoError && /epoch/.test(e.message)) {
+        // A key we may simply not have fetched yet: refresh once. If the
+        // row still names an epoch nobody has (a member's garbage header),
+        // it is skipped like any other bad op; it must never throw out of
+        // the pull, or the cursor would stop here for every device.
         await this.refreshKeys();
-        meta = await this.vc.decryptMeta(op.path_id, fromB64(op.meta_enc));
+        try {
+          meta = await this.vc.decryptMeta(op.path_id, fromB64(op.meta_enc));
+        } catch (e2) {
+          this.log("error", `cannot decrypt metadata for op ${op.seq} even after refreshing keys; skipping`, e2);
+          this.hooks.onSkipped?.(`(op ${op.seq})`, "its metadata names a key no device has; the server's record of this change is unusable");
+        }
       } else {
         this.log("error", `cannot decrypt metadata for op ${op.seq}; skipping`, e);
+        this.hooks.onSkipped?.(`(op ${op.seq})`, "its metadata cannot be read; the server's record of this change is unusable");
       }
     }
     // The path comes from another device. It must be a plain relative
@@ -1007,9 +1020,9 @@ export class Engine {
     prefetch();
     let done = 0;
     for (const d of ordered) {
-      if (this.state.deferred?.[d.logical]) delete this.state.deferred[d.logical]; // superseded by this newer op
       try {
         await this.withLock(d.logical, () => this.applyRemote(d.logical, d.op, d.meta!, blobs));
+        if (this.state.deferred?.[d.logical]) delete this.state.deferred[d.logical]; // superseded: the newer op is on disk
       } catch (e) {
         // One bad op must never wedge the vault: an undecryptable blob (a
         // key holder uploaded garbage under a real id), a name the local
@@ -1378,15 +1391,20 @@ export class Engine {
         this.state.cursorOp = p.op.op_id;
       }
     } else if (r.conflict) {
-      const meta = await this.vc.decryptMeta(r.conflict.path_id, fromB64(r.conflict.meta_enc));
+      let meta: FileMeta | null = null;
+      try {
+        meta = await this.vc.decryptMeta(r.conflict.path_id, fromB64(r.conflict.meta_enc));
+      } catch (e) {
+        this.log("error", `conflict head for ${p.logical} cannot be decrypted; our version will replace it`, e);
+      }
       // The head the server hands back gets the same checks as a pulled op:
       // its metadata must be ours by path and must name the blob the row
-      // carries. An inconsistent head must lose: rebase our version on it
-      // as if it were a tombstone, so the next push supersedes it. (Merely
-      // skipping it would leave this path frozen: every honest edit would
-      // conflict with the same bad head forever.)
-      if (meta.path.normalize("NFC") !== p.logical || (meta.blob !== undefined && meta.blob !== r.conflict.blob_id)) {
-        this.log("error", `conflict head for ${p.logical} is inconsistent (path ${meta.path}, blob ${meta.blob ?? "null"} vs ${r.conflict.blob_id ?? "null"}); our version will replace it`);
+      // carries. An inconsistent (or unreadable) head must lose: rebase our
+      // version on it as if it were a tombstone, so the next push supersedes
+      // it. (Merely skipping it would leave this path frozen: every honest
+      // edit would conflict with the same bad head forever.)
+      if (!meta || meta.path.normalize("NFC") !== p.logical || (meta.blob !== undefined && meta.blob !== r.conflict.blob_id)) {
+        if (meta) this.log("error", `conflict head for ${p.logical} is inconsistent (path ${meta.path}, blob ${meta.blob ?? "null"} vs ${r.conflict.blob_id ?? "null"}); our version will replace it`);
         this.hooks.onSkipped?.(this.device(p.logical), "the server's record of the other version is inconsistent; yours replaces it");
         // Rebase on the bad head. For an edit, as a tombstone (our bytes are
         // the file). For a delete, as if the bad head were what we had: the

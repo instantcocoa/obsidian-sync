@@ -7,7 +7,7 @@
  * data.json, which the default exclusions keep out of sync.
  */
 import { parseInviteLink } from "../core/crypto";
-import { Notice, Plugin, Platform } from "obsidian";
+import { Notice, Plugin, Platform, type App } from "obsidian";
 import { Engine, type EngineConfig, type Status } from "../core/engine";
 import type { VaultInfo } from "../core/transport";
 import { DEFAULT_EXCLUSIONS, CONFIG_TOKEN } from "../core/paths";
@@ -136,8 +136,12 @@ export default class ObsyncPlugin extends Plugin {
     this.addCommand({ id: "apply-held-deletes", name: "Apply held deletions", callback: () => this.engine?.applyHeldDeletes() });
     this.addCommand({ id: "unlock", name: "Unlock vault keys", callback: () => void this.unlock() });
     this.addCommand({ id: "accept-restore", name: "Accept server restore (after the server was restored from a backup)", callback: () => this.cmdAcceptRestore() });
-    // A scanned invite QR (or a tapped obsidian:// link) lands here.
-    this.registerObsidianProtocolHandler(JOIN_ACTION, (params) => void this.joinFromProtocol(String(params.link ?? "")));
+    // A scanned invite QR (or a tapped obsidian:// link) lands here. Never
+    // let this registration fail the whole plugin load: on a reload (an
+    // update through BRAT is a disable/enable) Obsidian has been seen to
+    // still hold the previous instance's handler for a moment and throw
+    // "already registered", which left the plugin dead until a restart.
+    this.registerJoinHandler();
 
     // Lifecycle: flush edits when a file is opened/closed, resync on resume and reconnect.
     this.registerEvent(this.app.workspace.on("file-open", () => this.engine?.kick(300)));
@@ -152,6 +156,31 @@ export default class ObsyncPlugin extends Plugin {
       this.locked = true;
       this.statusEl.setText("obsync 🔒");
       this.app.workspace.onLayoutReady(() => void this.unlock());
+    }
+  }
+
+  /**
+   * Register the obsidian://obsync-join handler, retrying while a previous
+   * instance's registration is still being released, and forcing the stale
+   * one out when the app offers a way to.
+   */
+  private registerJoinHandler(attempt = 0): void {
+    try {
+      this.registerObsidianProtocolHandler(JOIN_ACTION, (params) => void this.joinFromProtocol(String(params.link ?? "")));
+    } catch (e) {
+      const app = this.app as App & { unregisterObsidianProtocolHandler?: (action: string) => void };
+      if (attempt === 0 && typeof app.unregisterObsidianProtocolHandler === "function") {
+        try {
+          app.unregisterObsidianProtocolHandler(JOIN_ACTION);
+        } catch {
+          /* fall through to the retry */
+        }
+      }
+      if (attempt < 10) {
+        setTimeout(() => this.registerJoinHandler(attempt + 1), 250);
+        return;
+      }
+      console.warn("obsync: could not register the obsidian://obsync-join handler; invite QR codes will not open until Obsidian restarts", e);
     }
   }
 

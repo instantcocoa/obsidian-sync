@@ -45,8 +45,9 @@ describe.skipIf(!OBSIDIAN_BIN || process.platform !== "darwin")("real Obsidian o
   const rootNames = async (inst: ObsidianInstance, re: RegExp) => (await fsp.readdir(inst.vault)).filter((f) => re.test(f.normalize("NFC"))).sort();
   const conflicts = async (inst: ObsidianInstance) => (await fsp.readdir(inst.vault)).filter((f) => / \(conflict /.test(f));
   const headSeq = async () => (await a.eval(async (plugin, _app, v) => (await plugin.engine.client.vault(v)).seq, vaultId)) as number;
+  // The server returns history newest first (so a long history is never cut at the wrong end); these assertions read it oldest first.
   const history = async (path: string): Promise<{ seq: number; blob_id: string | null }[]> =>
-    a.eval(async (plugin, _app, v, p) => plugin.engine.client.history(v, await plugin.engine.vc.pathId(p)), vaultId, path);
+    (await a.eval(async (plugin, _app, v, p) => plugin.engine.client.history(v, await plugin.engine.vc.pathId(p)), vaultId, path)).sort((x: { seq: number }, y: { seq: number }) => x.seq - y.seq);
   const settle = async (ms: number) => new Promise((r) => setTimeout(r, ms));
   /** Wait until a predicate over both vaults holds, polling disk. */
   const until = async (fn: () => Promise<boolean>, timeoutMs = 45_000) => {

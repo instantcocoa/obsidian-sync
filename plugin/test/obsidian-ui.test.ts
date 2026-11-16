@@ -43,7 +43,7 @@ describe.skipIf(!OBSIDIAN_BIN)("real Obsidian, settings UI onboarding, rate limi
     await a.closeSettings();
   }, 60_000);
 
-  it("second device: Settings → paste invite link → Join", async () => {
+  it("second device: Settings → paste invite link → Connect", async () => {
     // Generate via the UI on A: the modal shows the link in a textarea.
     await a.openSettings();
     await a.clickButton("Generate");
@@ -53,12 +53,12 @@ describe.skipIf(!OBSIDIAN_BIN)("real Obsidian, settings UI onboarding, rate limi
     await a.closeSettings();
 
     await b.openSettings();
-    await b.fill("obsync://join#…", link);
-    await b.clickButton("Join");
+    await b.fill("obsync://join#… or obsync://create#…", link);
+    await b.clickButton("Connect");
     const joined = await b.waitFor(() => Boolean((globalThis as any).app.plugins.plugins.obsync.settings.identity), 20_000);
     if (!joined) {
       const notices = await b.eval(() => Array.from(document.querySelectorAll(".notice")).map((n) => n.textContent));
-      const field = await (await b.locator('input[placeholder="obsync://join#…"]')).inputValue().catch(() => "?");
+      const field = await (await b.locator('input[placeholder="obsync://join#… or obsync://create#…"]')).inputValue().catch(() => "?");
       throw new Error(`UI join failed. notices=${JSON.stringify(notices)} field=${field.slice(0, 40)}…\n${await b.diagnostics()}`);
     }
     await b.closeSettings();

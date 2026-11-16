@@ -41,8 +41,8 @@ describe.skipIf(!ON)("real Obsidian on Linux joins the vault the iPhone and iPad
 
   it("joins with the invite the iOS run left and receives the shared vault", async () => {
     await o.openSettings();
-    await o.fill("obsync://join#…", LINK);
-    await o.clickButton("Join");
+    await o.fill("obsync://join#… or obsync://create#…", LINK);
+    await o.clickButton("Connect");
     const joined = await o.waitFor(() => Boolean((globalThis as any).app.plugins.plugins.obsync.settings.identity), 30_000);
     if (!joined) throw new Error(`join failed\n${await o.diagnostics()}`);
     await o.closeSettings();

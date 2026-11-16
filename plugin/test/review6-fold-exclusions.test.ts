@@ -26,7 +26,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { TestServer, Device, ADMIN } from "./harness";
+import { TestServer, Device } from "./harness";
 import { createVault, createInviteLink, joinWithLink, type Session } from "../src/core/admin";
 import { DEFAULT_EXCLUSIONS, compileExclusions, fold, isSafeLogicalPath, logicalAliasesConfigDir } from "../src/core/paths";
 import { utf8 } from "../src/core/encoding";
@@ -74,7 +74,7 @@ async function evilPut(s: Session, path: string, content: string): Promise<void>
 }
 
 async function pair(): Promise<[Device, Device]> {
-  const sa = await createVault(srv.url, ADMIN, "attacker");
+  const sa = await createVault(await srv.createLink(), "attacker");
   const link = await createInviteLink(sa);
   const sb = await joinWithLink(link, "victim");
   const a = await new Device("attacker", sa).start();

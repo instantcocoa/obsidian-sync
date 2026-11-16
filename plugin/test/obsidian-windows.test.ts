@@ -19,7 +19,7 @@ import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { mkdtempSync, promises as fsp } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { TestServer, Device, ADMIN } from "./harness";
+import { TestServer, Device } from "./harness";
 import { ObsidianInstance, OBSIDIAN_BIN } from "./obsidian-harness";
 import { joinWithLink, type Session } from "../src/core/admin";
 import { fromB64, hex, randomBytes, utf8 } from "../src/core/encoding";
@@ -145,7 +145,7 @@ describe.skipIf(!OBSIDIAN_BIN || !WIN)("real Obsidian on Windows", () => {
   beforeAll(async () => {
     srv = await TestServer.start();
     w = await ObsidianInstance.launch("win");
-    await w.eval((plugin, _app, url, admin) => plugin.createVault(url, admin), srv.url, ADMIN);
+    await w.eval((plugin, _app, link) => plugin.createVault(link), await srv.createLink());
     expect((await w.eval((p) => p.settings.identity)).vaultId).toMatch(/^[0-9a-f]{32}$/);
     expect(await w.waitFor(() => (globalThis as any).app.plugins.plugins.obsync.engine?.ws?.readyState === 1, 20_000)).toBe(true);
     const link: string = await w.eval((plugin) => plugin.inviteLink());

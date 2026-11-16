@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="referrer" content="no-referrer">
+<meta name="color-scheme" content="light dark">
+<title>obsync admin</title>
+<link rel="stylesheet" href="/admin/app.css">
+</head>
+<body>
+<main>
+  <header>
+    <h1>obsync</h1>
+    <p class="sub" id="origin"></p>
+  </header>
+
+  <section id="loading" class="card">
+    <p>Loading…</p>
+  </section>
+
+  <section id="unsupported" class="card hidden">
+    <h2>This browser cannot use security keys</h2>
+    <p>Open this page in Safari, Chrome, Edge or Firefox over HTTPS. On an iPhone, Safari works with a YubiKey held to the top of the phone (NFC) or plugged in (USB&#8209;C or Lightning).</p>
+  </section>
+
+  <section id="no-key" class="card hidden">
+    <h2>No security key is registered yet</h2>
+    <p>On the server, run</p>
+    <pre>obsync admin register --data /var/lib/obsync</pre>
+    <p>and open the link it prints in this browser. The link is valid for an hour and works once.</p>
+  </section>
+
+  <section id="register" class="card hidden">
+    <h2>Register a security key</h2>
+    <p>This key will be able to sign in here and create new vaults. It cannot open any vault: that takes the vault keys, which live only on your devices.</p>
+    <label for="key-name">A name for this key</label>
+    <input id="key-name" type="text" maxlength="64" autocomplete="off" placeholder="yubikey 5 nfc">
+    <button id="register-btn" class="primary">Register key</button>
+    <p class="hint">Your browser will ask you to touch or tap the key.</p>
+  </section>
+
+  <section id="login" class="card hidden">
+    <h2>Sign in</h2>
+    <p>Touch your security key to sign in. The session lasts fifteen minutes.</p>
+    <button id="login-btn" class="primary">Sign in with security key</button>
+  </section>
+
+  <section id="home" class="hidden">
+    <div class="card">
+      <div class="row">
+        <h2>Create a new vault</h2>
+        <button id="logout-btn" class="quiet">Sign out</button>
+      </div>
+      <p>A create link lets one device make one new vault and become its first member. It lasts an hour and works once. Scan the QR with the new device's camera, or tap <em>Open in Obsidian</em> on this device.</p>
+      <button id="create-btn" class="primary">Create link</button>
+      <div id="link-box" class="hidden">
+        <div id="qr" class="qr"></div>
+        <a id="open-link" class="button primary" href="#">Open in Obsidian</a>
+        <div class="row">
+          <code id="link-text"></code>
+          <button id="copy-btn" class="quiet">Copy</button>
+        </div>
+        <p class="hint" id="expires"></p>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Vaults</h2>
+      <p class="hint">What the server knows about each vault. It holds no keys, so this is all there is to see.</p>
+      <table id="vaults">
+        <thead><tr><th>Vault id</th><th>Devices</th><th>Ops</th><th>Created</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+
+    <div class="card">
+      <h2>Security keys</h2>
+      <p class="hint">Add another with <code>obsync admin register</code> on the server; remove one with <code>obsync admin remove NAME</code>.</p>
+      <table id="keys">
+        <thead><tr><th>Name</th><th>Registered</th><th>Last used</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </section>
+
+  <p id="error" class="error hidden" role="alert"></p>
+</main>
+<script src="/admin/app.js"></script>
+</body>
+</html>

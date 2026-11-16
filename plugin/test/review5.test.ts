@@ -11,7 +11,7 @@
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { rmSync } from "node:fs";
-import { TestServer, Device, ADMIN } from "./harness";
+import { TestServer, Device } from "./harness";
 import { createVault, createInviteLink, joinWithLink, joinWithPassphrase, rotate } from "../src/core/admin";
 import { generateKeypair, recoveryAuthToken, wrapEpochKey, RECOVERY_ITERATIONS } from "../src/core/crypto";
 import { Client } from "../src/core/transport";
@@ -70,7 +70,7 @@ describe("recovery passphrase across the KDF change (aca5ce1: 600k -> 2M iterati
   it("a passphrase set by a 0.1.2 client still opens the vault for a 0.1.3 client", async () => {
     expect(RECOVERY_ITERATIONS).not.toBe(600_000); // the change under test
     const pass = "correct horse battery staple";
-    const sa = await createVault(srv.url, ADMIN, "laptop");
+    const sa = await createVault(await srv.createLink(), "laptop");
     const v = sa.identity.vaultId;
     const rec = await createRecovery012(pass);
     const { device_id } = await sa.client.setRecovery(v, rec.pub, rec.recoveryEnc, rec.salt, rec.authToken);
@@ -100,7 +100,7 @@ describe("restore acceptance (engine.ts restoreAccepted)", () => {
    */
   it("an acceptance with no regression pending is spent, not kept for the next one", async () => {
     const own = await TestServer.start();
-    const sa = await createVault(own.url, ADMIN, "laptop");
+    const sa = await createVault(await own.createLink(), "laptop");
     const regressions: string[] = [];
     const a = await new Device("laptop", sa, { hooks: { onEpochRegressed: (f, t) => regressions.push(`${f}->${t}`) } }).start();
     await a.write("note.md", "epoch 1\n");
@@ -133,7 +133,7 @@ describe("restore acceptance (engine.ts restoreAccepted)", () => {
   /** Holds (confirmation). After acceptance the device restarts into the restored epoch and keeps syncing. */
   it("a device that accepted a restore is still correct after a restart", async () => {
     const own = await TestServer.start();
-    const sa = await createVault(own.url, ADMIN, "laptop");
+    const sa = await createVault(await own.createLink(), "laptop");
     const a = await new Device("laptop", sa).start();
     const sb = await joinWithLink(await createInviteLink(sa), "phone");
     const b = await new Device("phone", sb).start();
@@ -177,7 +177,7 @@ describe("roster watch (engine.ts watchRoster)", () => {
    * device that joined meanwhile is absorbed as if it had always been there.
    */
   it("a device that joined while this device's state.json was lost is still announced", async () => {
-    const sa = await createVault(srv.url, ADMIN, "laptop");
+    const sa = await createVault(await srv.createLink(), "laptop");
     const seen: { id: string; name: string }[][] = [];
     const a = await new Device("laptop", sa, { hooks: { onNewDevices: (ds) => seen.push(ds) } }).start();
     await a.write("note.md", "hello\n");

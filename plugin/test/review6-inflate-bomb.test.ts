@@ -18,7 +18,7 @@
  * decompressor emitted.
  */
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
-import { TestServer, Device, ADMIN } from "./harness";
+import { TestServer, Device } from "./harness";
 import { createVault, createInviteLink, joinWithLink, type Session } from "../src/core/admin";
 import { VaultCrypto, newKeyring, CryptoError, MAX_PLAIN } from "../src/core/crypto";
 import { utf8 } from "../src/core/encoding";
@@ -89,7 +89,7 @@ describe("through the engine: a bomb op is skipped and reported, and sync carrie
   });
 
   it("the victim inflates under 1 MiB, reports the file, keeps its cursor moving", async () => {
-    const sa = await createVault(srv.url, ADMIN, "attacker");
+    const sa = await createVault(await srv.createLink(), "attacker");
     const sb = await joinWithLink(await createInviteLink(sa), "victim");
     const skipped: string[] = [];
     const a = await new Device("attacker", sa).start();

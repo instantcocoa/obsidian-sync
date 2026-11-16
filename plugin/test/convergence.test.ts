@@ -16,7 +16,7 @@
  */
 import { describe, expect, it } from "vitest";
 import { promises as fsp } from "node:fs";
-import { TestServer, Device, ADMIN } from "./harness";
+import { TestServer, Device } from "./harness";
 import { createVault, createInviteLink, joinWithLink } from "../src/core/admin";
 import { CONFLICT_RE } from "../src/core/paths";
 import { utf8 } from "../src/core/encoding";
@@ -76,7 +76,7 @@ describe("randomised multi-device convergence", () => {
       const pick = <T>(xs: T[]): T => xs[Math.floor(r() * xs.length)];
       const chance = (p: number) => r() < p;
       const srv = await TestServer.start();
-      const sa = await createVault(srv.url, ADMIN, "d0");
+      const sa = await createVault(await srv.createLink(), "d0");
       const devs = [await new Device("d0", sa).start()];
       for (let i = 1; i < cfg.devices; i++) devs.push(await new Device(`d${i}`, await joinWithLink(await createInviteLink(sa), `d${i}`)).start());
       // What each device last wrote per path, and whether it deleted the path afterwards.

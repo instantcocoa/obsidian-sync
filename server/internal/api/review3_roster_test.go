@@ -9,7 +9,9 @@ package api_test
 
 import (
 	"bytes"
+	"context"
 	"testing"
+	"time"
 
 	"obsync/internal/store"
 )
@@ -101,11 +103,17 @@ func TestZzTokenOnlyCannotReplayAnotherDevicesName(t *testing.T) {
 // do nothing to content beyond deletion (guide §C). Expected: the admin may
 // mint an invite only while the vault has no device (the first-enrolment
 // case the route exists for).
-func TestZzAdminCannotMintInviteOnPopulatedVault(t *testing.T) {
+func TestZzOnlyMembersMintInvites(t *testing.T) {
 	e := newEnv(t)
 	vault, _, _ := e.setup()
-	r := e.do("POST", "/v1/vaults/"+vault+"/invites", adminTok, map[string]any{"keybox_enc": randBytes(64)}, nil)
-	if r.code == 201 {
-		t.Fatalf("admin minted an invite on a vault that already has devices (201); a planted device will be wrapped K_e||K_id at the owner's next rotation")
+	// Nothing an operator holds (a create link, a register link, nothing at all) mints an invite into an existing vault.
+	rg, err := e.st.CreateLink(context.Background(), store.LinkRegister, "test", time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tok := range []string{"", e.createLink(), rg.Token} {
+		if r := e.do("POST", "/v1/vaults/"+vault+"/invites", tok, map[string]any{"keybox_enc": randBytes(64)}, nil); r.code != 401 {
+			t.Fatalf("non-member minted an invite on a populated vault (%d); a planted device will be wrapped K_e||K_id at the owner's next rotation", r.code)
+		}
 	}
 }

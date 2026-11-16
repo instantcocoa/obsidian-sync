@@ -29,7 +29,7 @@
  *     parked for ever and re-announced each time. Fails on HEAD (low).
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { TestServer, Device, ADMIN } from "./harness";
+import { TestServer, Device } from "./harness";
 import { createVault, createInviteLink, joinWithLink, type Session } from "../src/core/admin";
 import { Engine } from "../src/core/engine";
 import { CryptoError } from "../src/core/crypto";
@@ -120,7 +120,7 @@ async function fixFolder(s: Stuck): Promise<void> {
 
 /** A Mac whose `Notes/` holds something sync never removes, while Linux writes `notes/x0.md`: the put is deferred. */
 async function stuck(): Promise<Stuck> {
-  const sa = await createVault(srv.url, ADMIN, "linux");
+  const sa = await createVault(await srv.createLink(), "linux");
   const sb = await joinWithLink(await createInviteLink(sa), "mac");
   const skipped: [string, string][] = [];
   const mac = await new Device("mac", sb, { hooks: { onSkipped: (p, why) => skipped.push([p, why]) } }).start();
@@ -182,7 +182,7 @@ async function garbageRow(s: Session, path: string, header: "valid-epoch" | "ran
 
 describe("B0. a row whose meta_enc header names an epoch nobody has", () => {
   it("is refused by the server, and a device that meets one anyway skips it and keeps syncing; a fresh device joins fine", async () => {
-    const sa = await createVault(srv.url, ADMIN, "linux");
+    const sa = await createVault(await srv.createLink(), "linux");
     const sb = await joinWithLink(await createInviteLink(sa), "mac");
     const skipped: [string, string][] = [];
     const mac = await new Device("mac", sb, { hooks: { onSkipped: (p, why) => skipped.push([p, why]) } }).start();

@@ -15,7 +15,7 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { build } from "esbuild";
 import { resolve } from "node:path";
-import { TestServer, ADMIN } from "./harness";
+import { TestServer } from "./harness";
 
 const ON = process.env.WEBKIT === "1";
 
@@ -46,7 +46,7 @@ describe.skipIf(!ON)("plugin core under WebKit (the iOS engine)", () => {
       const page = await browser.newPage();
       const logs: string[] = [];
       page.on("console", (m) => logs.push(`[${m.type()}] ${m.text()}`));
-      await page.goto(`${srv.url}/?admin=${encodeURIComponent(ADMIN)}`);
+      await page.goto(`${srv.url}/?create=${encodeURIComponent(await srv.createLink())}`);
       await page.addScriptTag({ content: js });
       const result = (await page.evaluate("window.__obsync")) as Record<string, unknown>;
       if (result.error) throw new Error(`${result.error}\n--- console ---\n${logs.join("\n")}`);

@@ -9,7 +9,7 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { TestServer, Device, ADMIN } from "./harness";
+import { TestServer, Device } from "./harness";
 import { createVault, createInviteLink, joinWithLink, rotate } from "../src/core/admin";
 import { generateKeypair, parseInviteLink } from "../src/core/crypto";
 import { Client } from "../src/core/transport";
@@ -33,7 +33,7 @@ describe("epoch authority", () => {
    * at least stop sync with an error the user must acknowledge.
    */
   it("a server-reported epoch regression is adopted silently and the newer key is thrown away", async () => {
-    const sa = await createVault(srv.url, ADMIN, "laptop");
+    const sa = await createVault(await srv.createLink(), "laptop");
     const a = await new Device("laptop", sa).start();
     await a.write("note.md", "under epoch 1");
     await a.sync();
@@ -72,18 +72,19 @@ describe("plain http gate", () => {
    */
   it("the invite-link join path confirms before using plain http like the other two entry points do", () => {
     const src = readFileSync(join(__dirname, "../src/obsidian/settings.ts"), "utf8");
-    const start = src.indexOf("Join with invite link");
+    const start = src.indexOf("Join or create with a link");
     const end = src.indexOf("Join with recovery passphrase");
     expect(start).toBeGreaterThan(0);
     const joinBlock = src.slice(start, end);
     expect(joinBlock).toContain("joinWithLink(");
+    expect(joinBlock).toContain("createVault(");
     expect(joinBlock, "the invite-link Join handler calls joinWithLink without plainHttpOk; the passphrase and create flows both gate on it").toContain("plainHttpOk");
   });
 });
 
 describe("roster alerts", () => {
   it("a device that joins the roster is announced to every other device on its next sync, and the first look after joining announces nothing", async () => {
-    const sa = await createVault(srv.url, ADMIN, "laptop");
+    const sa = await createVault(await srv.createLink(), "laptop");
     const seen: { id: string; name: string }[][] = [];
     const a = await new Device("laptop", sa, { hooks: { onNewDevices: (ds) => seen.push(ds) } }).start();
     await a.write("note.md", "hello\n");
@@ -111,7 +112,7 @@ describe("roster alerts", () => {
 
 describe("invite hygiene", () => {
   it("a vault holds at most twenty unused invites", async () => {
-    const sa = await createVault(srv.url, ADMIN, "laptop");
+    const sa = await createVault(await srv.createLink(), "laptop");
     for (let i = 0; i < 20; i++) await createInviteLink(sa);
     await expect(createInviteLink(sa)).rejects.toThrow(/409/);
     await rotate(sa); // ends them all

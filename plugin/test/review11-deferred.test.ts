@@ -36,7 +36,7 @@
  *     passes). Fails on HEAD.
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { TestServer, Device, ADMIN } from "./harness";
+import { TestServer, Device } from "./harness";
 import { createVault, createInviteLink, joinWithLink, removeDevice, type Session } from "../src/core/admin";
 import { Engine } from "../src/core/engine";
 import { utf8 } from "../src/core/encoding";
@@ -110,7 +110,7 @@ async function fixFolder(s: Stuck): Promise<void> {
 
 /** A Mac whose `Notes/` holds something sync never removes, while Linux writes `notes/…`: the puts are deferred. */
 async function stuck(n = 1): Promise<Stuck> {
-  const sa = await createVault(srv.url, ADMIN, "linux");
+  const sa = await createVault(await srv.createLink(), "linux");
   const sb = await joinWithLink(await createInviteLink(sa), "mac");
   const skipped: [string, string][] = [];
   const fetched: string[] = [];
@@ -262,7 +262,7 @@ describe("D. a write that fails after touching the file: the deferred path forge
   });
 
   it("D2. (soundness) through applyBatch: the inflight record survives and the partial bytes are overwritten, no sibling", async () => {
-    const sa = await createVault(srv.url, ADMIN, "linux");
+    const sa = await createVault(await srv.createLink(), "linux");
     const sb = await joinWithLink(await createInviteLink(sa), "mac");
     const mac = await new Device("mac", sb).start();
     try {

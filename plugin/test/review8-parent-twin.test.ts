@@ -26,7 +26,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { TestServer, Device, ADMIN } from "./harness";
+import { TestServer, Device } from "./harness";
 import { createVault, createInviteLink, joinWithLink, type Session } from "../src/core/admin";
 import { utf8 } from "../src/core/encoding";
 
@@ -71,7 +71,7 @@ async function headBlob(s: Session, path: string): Promise<string | null | undef
 
 describe.skipIf(!volumeIgnoresCase())("a case-twin parent folder from a case-sensitive device overwrites the honest file", () => {
   it("Notes/A.md is replaced by notes/A.md's bytes on the Mac, then pushed back as an edit of Notes/A.md", async () => {
-    const sa = await createVault(srv.url, ADMIN, "linux");
+    const sa = await createVault(await srv.createLink(), "linux");
     const sb = await joinWithLink(await createInviteLink(sa), "mac");
     const mac = await new Device("mac", sb).start();
     try {

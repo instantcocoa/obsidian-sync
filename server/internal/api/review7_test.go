@@ -40,7 +40,7 @@ func r7env(t *testing.T) (*env, *blobstore.FS, string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv := api.New(api.Config{AdminToken: adminTok, MaxWait: 5 * time.Second, InviteTTL: time.Hour, AuthRatePerMinute: -1}, st, bs)
+	srv := api.New(api.Config{MaxWait: 5 * time.Second, InviteTTL: time.Hour, AuthRatePerMinute: -1}, st, bs)
 	ts := httptest.NewServer(srv)
 	t.Cleanup(func() { ts.Close(); st.Close() })
 	return &env{t: t, ts: ts, srv: srv, st: st}, bs, dir
@@ -429,7 +429,7 @@ func TestR7TrustProxyHonoursXFFFromAnyPeer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv := api.New(api.Config{AdminToken: adminTok, InviteTTL: time.Hour, MaxWait: 5 * time.Second, AuthRatePerMinute: 60, AuthBurst: 5, TrustedProxies: []string{"10.0.0.0/8"}}, st, bs)
+	srv := api.New(api.Config{InviteTTL: time.Hour, MaxWait: 5 * time.Second, AuthRatePerMinute: 60, AuthBurst: 5, TrustedProxies: []string{"10.0.0.0/8"}}, st, bs)
 	ts := httptest.NewServer(srv)
 	t.Cleanup(func() { ts.Close(); st.Close() })
 	e := &env{t: t, ts: ts, srv: srv, st: st}

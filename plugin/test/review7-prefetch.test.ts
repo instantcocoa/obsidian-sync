@@ -17,7 +17,7 @@
  * write. With on-demand fetching (or a byte budget) at most `parallel` are.
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { TestServer, Device, ADMIN } from "./harness";
+import { TestServer, Device } from "./harness";
 import { createVault, createInviteLink, joinWithLink } from "../src/core/admin";
 
 let srv: TestServer;
@@ -30,7 +30,7 @@ afterAll(async () => {
 
 describe("applyBatch holds a whole batch of blobs in memory", () => {
   it("every blob of the batch is downloaded before the first file is written", async () => {
-    const sa = await createVault(srv.url, ADMIN, "desktop");
+    const sa = await createVault(await srv.createLink(), "desktop");
     const sb = await joinWithLink(await createInviteLink(sa), "phone");
     const a = await new Device("desktop", sa).start();
     const b = await new Device("phone", sb).start();

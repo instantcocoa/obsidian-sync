@@ -49,7 +49,8 @@ Keep every file you create inside the repo under `plugin/.cache/mobile/`
    ```sh
    ./server/obsync serve --data plugin/.cache/mobile/data --listen 0.0.0.0:8080
    ```
-   Note the admin token it prints. Try plain `http://10.0.2.2:8080` first.
+   Then `./server/obsync vault create --data plugin/.cache/mobile/data --url http://10.0.2.2:8080`
+   prints the create link for the first device. Try plain `http://10.0.2.2:8080` first.
    If Obsidian's WebView refuses cleartext or mixed content (you will see a
    `Could not reach` notice or a `TypeError: Failed to fetch` in the console),
    the plugin README says mobile needs HTTPS with a publicly trusted
@@ -67,7 +68,7 @@ available, the Node-side engine used by `plugin/test/e2e.test.ts` through
 `plugin/test/harness.ts` is an acceptable stand-in for file content, but it
 does not exercise Obsidian's own config rewrites, so say so in the report.
 
-On the desktop peer: create the vault (server URL + admin token), generate
+On the desktop peer: create the vault (paste the create link), generate
 an invite link, and copy it somewhere you can paste from.
 
 ## 3. Install on the phone

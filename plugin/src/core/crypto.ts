@@ -549,22 +549,47 @@ export function buildInviteLink(server: string, token: string, inviteKey: Uint8A
 export function parseInviteLink(link: string): { server: string; token: string; inviteKey: Uint8Array } {
   const m = /^obsync:\/\/join#([^,]+),([^,]+),([A-Za-z0-9_-]+)$/.exec(link.trim());
   if (!m) throw new Error("not an obsync invite link");
-  const server = decodeURIComponent(m[1]).replace(/\/+$/, "");
-  // The server must be a bare http(s) origin (plus an optional path). The
-  // string is shown to the person before anything is sent, so a userinfo
-  // prefix ("https://sync.owner.example@evil.example") must not be able to
-  // dress the attacker's host up as the owner's, and no other scheme makes
-  // sense for a fetch target.
+  return { server: linkServer(m[1], "invite"), token: m[2], inviteKey: fromB64url(m[3]) };
+}
+
+/**
+ * A create link, `obsync://create#<server>,<cr_token>`, minted on the server
+ * host (`obsync vault create`) or on its admin page after a security-key
+ * sign-in. It carries no key: the first device makes the vault keys itself.
+ */
+export function buildCreateLink(server: string, token: string): string {
+  return `obsync://create#${encodeURIComponent(server.replace(/\/+$/, ""))},${token}`;
+}
+
+export function parseCreateLink(link: string): { server: string; token: string } {
+  const m = /^obsync:\/\/create#([^,]+),(cr_[A-Za-z0-9_-]+)$/.exec(link.trim());
+  if (!m) throw new Error("not an obsync create link");
+  return { server: linkServer(m[1], "create"), token: m[2] };
+}
+
+export function isCreateLink(link: string): boolean {
+  return link.trim().startsWith("obsync://create#");
+}
+
+/**
+ * The server must be a bare http(s) origin (plus an optional path). The
+ * string is shown to the person before anything is sent, so a userinfo
+ * prefix ("https://sync.owner.example@evil.example") must not be able to
+ * dress the attacker's host up as the owner's, and no other scheme makes
+ * sense for a fetch target.
+ */
+function linkServer(encoded: string, kind: string): string {
+  const server = decodeURIComponent(encoded).replace(/\/+$/, "");
   let u: URL;
   try {
     u = new URL(server);
   } catch {
-    throw new Error("the invite link does not name a valid server");
+    throw new Error(`the ${kind} link does not name a valid server`);
   }
   if ((u.protocol !== "https:" && u.protocol !== "http:") || u.username || u.password || u.search || u.hash || !u.hostname) {
-    throw new Error("the invite link's server must be a plain http(s) address");
+    throw new Error(`the ${kind} link's server must be a plain http(s) address`);
   }
-  return { server, token: m[2], inviteKey: fromB64url(m[3]) };
+  return server;
 }
 
 /** See VaultCrypto.authToken. */

@@ -13,8 +13,6 @@ import { NodeFS, FileStateStore } from "../src/core/node-fs";
 import { openSession, syncIdentityKeys, type Session } from "../src/core/admin";
 import { DEFAULT_EXCLUSIONS } from "../src/core/paths";
 
-export const ADMIN = "ad_test-admin";
-
 async function freePort(): Promise<number> {
   return new Promise((res) => {
     const s = createServer();
@@ -38,7 +36,9 @@ export class TestServer {
     t.dir = mkdtempSync(join(tmpdir(), "obsync-srv-"));
     const port = await freePort();
     t.url = `http://127.0.0.1:${port}`;
-    t.args = ["serve", "--data", t.dir, "--listen", `127.0.0.1:${port}`, "--admin-token", ADMIN, "--gc-interval", "0", "--auth-rate", opts.rateLimit ? "10" : "-1"];
+    // --public-url names the relying party for the admin page and completes
+    // the links `vault create` prints; here it is the test listener itself.
+    t.args = ["serve", "--data", t.dir, "--listen", `127.0.0.1:${port}`, "--public-url", t.url, "--gc-interval", "0", "--auth-rate", opts.rateLimit ? "10" : "-1"];
     await t.launch();
     return t;
   }
@@ -106,6 +106,23 @@ export class TestServer {
   async stop(): Promise<void> {
     await this.halt();
     rmSync(this.dir, { recursive: true, force: true });
+  }
+
+  /**
+   * Mint a create link the way an operator does: `obsync vault create` on the
+   * host, a second process writing to the same database.
+   */
+  async createLink(): Promise<string> {
+    const out = await new Promise<string>((res, rej) => {
+      const p = spawn(process.env.OBSYNC_SERVER_BIN!, ["vault", "create", "--data", this.dir, "--url", this.url], { stdio: ["ignore", "pipe", "pipe"] });
+      let o = "", e = "";
+      p.stdout.on("data", (d) => (o += d));
+      p.stderr.on("data", (d) => (e += d));
+      p.on("exit", (c) => (c === 0 ? res(o) : rej(new Error("vault create failed: " + e))));
+    });
+    const m = /obsync:\/\/create#\S+/.exec(out);
+    if (!m) throw new Error("vault create printed no link: " + out);
+    return m[0];
   }
 
   /** Run the server's gc with the given retention (seconds) via a second process. */

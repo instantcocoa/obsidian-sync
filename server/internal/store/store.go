@@ -137,6 +137,25 @@ CREATE TABLE IF NOT EXISTS blobs (
   PRIMARY KEY (vault_id, blob_id)
 );
 CREATE INDEX IF NOT EXISTS blobs_epoch ON blobs(vault_id, epoch);
+CREATE TABLE IF NOT EXISTS links (
+  token_hash BLOB PRIMARY KEY,
+  kind TEXT NOT NULL,
+  created_by TEXT NOT NULL,
+  expires_at INTEGER NOT NULL,
+  used_at INTEGER,
+  vault_id TEXT
+);
+CREATE TABLE IF NOT EXISTS settings (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS admin_credentials (
+  id BLOB PRIMARY KEY,
+  name TEXT NOT NULL UNIQUE,
+  cred BLOB NOT NULL,
+  created_at INTEGER NOT NULL,
+  last_used INTEGER
+);
 `
 
 func (s *Store) migrate() error {
@@ -229,6 +248,9 @@ type Vault struct {
 	// (DESIGN.md §5.8); such a vault accepts no writes until an admin runs
 	// `obsync vault auth`.
 	HasAuth bool `json:"has_auth"`
+	// Devices is the live (unrevoked, non-recovery) device count; only
+	// ListVaults fills it, for the operator.
+	Devices int `json:"devices,omitempty"`
 }
 
 func (s *Store) CreateVault(ctx context.Context) (*Vault, error) {
@@ -426,16 +448,20 @@ func (s *Store) minEpoch(ctx context.Context, q queryer, vault string, cur int64
 	return m, nil
 }
 
+// ListVaults is for the operator (CLI and admin page): every vault with its
+// live device count. Devices never see it.
 func (s *Store) ListVaults(ctx context.Context) ([]Vault, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, epoch, seq, created_at FROM vaults ORDER BY created_at`)
+	rows, err := s.db.QueryContext(ctx, `SELECT id, epoch, seq, created_at, auth_hash IS NOT NULL,
+		(SELECT COUNT(*) FROM devices d WHERE d.vault_id=vaults.id AND d.revoked_at IS NULL AND d.recovery=0)
+		FROM vaults ORDER BY created_at`)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var out []Vault
+	out := []Vault{}
 	for rows.Next() {
 		var v Vault
-		if err := rows.Scan(&v.ID, &v.Epoch, &v.Seq, &v.CreatedAt); err != nil {
+		if err := rows.Scan(&v.ID, &v.Epoch, &v.Seq, &v.CreatedAt, &v.HasAuth, &v.Devices); err != nil {
 			return nil, err
 		}
 		out = append(out, v)
@@ -600,9 +626,9 @@ type Invite struct {
 	ExpiresAt int64  `json:"expires_at"`
 }
 
-// CreateInvite mints a one-time invite. `by` is the inviting device, or an
-// empty Actor for the admin's first-device invite into an empty vault (the
-// handler has already checked that case). A device is re-checked inside the
+// CreateInvite mints a one-time invite. `by` is the inviting device; an
+// empty Actor is accepted only so tests can model a vault whose rows were
+// written by an older server. A device is re-checked inside the
 // transaction like every other writer: an invite minted by a device whose
 // revocation landed while its request was in flight would outlive the
 // rotation (rotation ends only the invites that exist when it runs) and
@@ -612,7 +638,7 @@ func (s *Store) CreateInvite(ctx context.Context, vault string, by Actor, keybox
 	inv := &Invite{Token: token, ExpiresAt: now() + ttl.Milliseconds()}
 	createdBy := by.Device
 	if createdBy == "" {
-		createdBy = "admin"
+		createdBy = "legacy"
 	}
 	err := s.writeTx(ctx, func(tx *sql.Tx) error {
 		if by.Device != "" {

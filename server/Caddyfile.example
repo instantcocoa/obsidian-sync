@@ -1,0 +1,24 @@
+# Caddy in front of obsync. Caddy obtains and renews the certificate for the
+# site, terminates TLS, and proxies everything (WebSockets included) to the
+# server on loopback. Start the server with
+#   obsync serve --data /var/lib/obsync --listen 127.0.0.1:8080 \
+#     --public-url https://sync.example.com --trust-proxy 127.0.0.1,::1
+# so it knows its public origin (for the /admin security-key page and the
+# links it prints) and believes Caddy's X-Forwarded-For for rate limiting.
+sync.example.com {
+	encode zstd gzip
+	# Blobs can be large; give uploads the same patience the server has.
+	request_body {
+		max_size 1GB
+	}
+	reverse_proxy 127.0.0.1:8080 {
+		transport http {
+			read_timeout 15m
+			write_timeout 15m
+		}
+	}
+	header {
+		Strict-Transport-Security "max-age=63072000"
+		-Server
+	}
+}

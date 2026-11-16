@@ -257,9 +257,13 @@ Three ideas carry the whole design:
   mode for the op log and blob index, blobs as files on disk under
   `data/blobs/<xx>/<id>`. Cross-compiles for every host. (Rust + rusqlite is an
   equally fine choice; Go is suggested for the smaller build surface.)
-- Built-in TLS via ACME (`--acme-domain`) or plain HTTP behind Caddy/Traefik.
+- Built-in TLS via ACME (`--acme-domain`) or plain HTTP behind Caddy/Traefik
+  (`--listen 127.0.0.1:8080 --public-url https://… --trust-proxy 127.0.0.1`).
   Mobile Obsidian requires a publicly trusted certificate.
-- One process serves many vaults. A vault is created with an admin token.
+- One process serves many vaults. There is no admin token: a vault is created
+  when its first device redeems a one-time *create link* minted by the
+  operator, on the host (`obsync vault create`) or on the server's `/admin`
+  page after a security-key sign-in (§5.9).
 
 ### 4.2 Data model
 
@@ -268,6 +272,9 @@ vaults   (id, epoch, min_epoch, created_at)
 devices  (id, vault_id, name_enc BLOB, pub_kex BLOB,
           token_hash, created_at, last_seen, revoked_at)
 invites  (token_hash, vault_id, keybox_enc BLOB, expires_at, used)
+links    (token_hash, kind create|register, created_by, expires_at, used_at, vault_id)
+admin_credentials (id, name, cred BLOB /* WebAuthn public key, counter */, created_at, last_used)
+settings (key, value)                      -- public_url, so the CLI can print links
 keybox   (vault_id, epoch, recipient_id, wrapped BLOB, author_id)
 ops      (vault_id, seq INTEGER, op_id TEXT UNIQUE, device_id, path_id,
           blob_id NULL, meta_enc BLOB, meta_epoch, base_seq, created_at)
@@ -299,8 +306,8 @@ blobs    (vault_id, blob_id, epoch, ct_size, created_at, last_ref_at)
 
 | Method | Path | Purpose |
 | --- | --- | --- |
-| `POST` | `/v1/vaults` | Create a vault (admin token). |
-| `POST` | `/v1/vaults/{v}/invites` | Mint a one-time invite. Body carries the invite keybox (§5.3). Needs vault authority (§5.8); the admin token works only while the vault has no device (the first enrolment). |
+| `POST` | `/v1/create/{t}` | Redeem a create link (§5.9): body has the first device's `pub_kex` and `name_enc` → a new vault at epoch 1 and that device's token. No auth, one-time, rate-limited. |
+| `POST` | `/v1/vaults/{v}/invites` | Mint a one-time invite. Body carries the invite keybox (§5.3). Needs vault authority (§5.8): only a member holding the keys can add a device. |
 | `POST` | `/v1/invites/{t}` | Redeem: body has the new device's `pub_kex` and `name_enc` → device token + invite keybox. |
 | `GET` | `/v1/vaults/{v}/devices` | Roster: `id, name_enc, pub_kex, revoked_at`. |
 | `PATCH` | `/v1/vaults/{v}/devices/me` | Set the calling device's `name_enc` (after enrolment, once it holds the keys; needs vault authority). |
@@ -381,9 +388,15 @@ with 2× free disk.
   the user pastes is `obsync://join#<server>,<invite>,<I>`; `I` is the invite
   key (§5.3). Everything after `#` is a fragment and never reaches the server
   in a request line or log.
-- Rate-limit invite redemption and failed auth.
-- CORS: `Access-Control-Allow-Origin: *`, safe because auth is a bearer header
-  and never a cookie.
+- Rate-limit invite and create-link redemption and failed auth.
+- CORS: `Access-Control-Allow-Origin: *` on the device API, safe because its
+  auth is a bearer header and never a cookie. The `/admin` page (§5.9) is the
+  one place a cookie exists; it gets no CORS header at all and a strict CSP.
+- The operator is not a party to any vault. Running the binary on the host,
+  or signing in to `/admin` with a registered security key, mints create
+  links (a new vault, nothing more) and lists vault ids with device counts.
+  There is no admin token, no admin bearer on any device route, and no admin
+  way into an existing vault (§5.9).
 
 ---
 
@@ -684,7 +697,7 @@ not need to know it is happening. History does not carry over except through
 | Reads server disk or backups | ciphertext, path and blob IDs, op timing, ciphertext sizes, device IDs, roster public keys | content, paths, names, mtimes, which human owns which device | padding flag for sizes; timing is inherent |
 | Steals a device token (proxy log, copied `data.json` with sealed keys) | read ciphertext and the op log; see which device is online; add keybox rows addressed to itself for epochs it lacks (which hand it nothing: it cannot replace an existing row, and a row it wrote is only ciphertext it already cannot read) | write anything else: no ops, no blobs, no rotation, revocation, recovery, invites, keybox rows for other devices, or a device name (names need authority and authenticate under the device's own id) | vault authority (§5.8) gates every write; revoke device → rotate |
 | Steals an unused invite link, or holds any member's keys | joins as a device with full read/write, **which means code execution on every device**: a synced `.obsidian/plugins/*/main.js` is reloaded, and `community-plugins.json` enables plugins, automatically (§7.3) | write outside the vault, under a path other than the one an op is keyed by, under a spelling the volume folds onto an excluded or existing name, or with a blob other than the one its metadata names (§6.5 validation); make a device inflate more than the metadata's `size` (§5.1) | 1 h TTL, one-time; unexpected or unnamed device is flagged in the roster; remove + rotate; turn "sync config folder" off if vault members are not fully trusted |
-| Holds the admin token (or the server's config) | create and list vaults, install an authority hash, invite the *first* device into an empty vault (there is no delete route and no admin way to revoke a device: a vault whose first invite was redeemed by a stranger is frozen with `obsync vault auth` and abandoned) | invite into a populated vault, so it cannot plant a key-less device for the owner's next rotation to wrap keys to; read or forge anything | invites into a populated vault need vault authority; rotation wraps only to devices whose name authenticates (proof they held the keys) and revokes the rest, reporting them |
+| Holds a create link, or an admin session (a registered security key, or a shell on the host) | make a *new* empty vault and be its first device (link); list vault ids and device counts and mint such links (session); install an authority hash on a pre-§5.8 vault (shell only, `obsync vault auth`) | join, read, invite into, or alter any existing vault, so it cannot plant a key-less device for the owner's next rotation to wrap keys to; register a further security key without a register link from the host | links are one-time, 1 h, hashed at rest; invites need vault authority; rotation wraps only to devices whose name authenticates (proof they held the keys) and revokes the rest, reporting them; the admin page's session is a 15-minute HttpOnly, SameSite=Strict cookie behind an Origin check |
 | Takes a device (phone with Obsidian) | everything that device has, including `K_id` and current keys | anything after rotation; anything at all after re-encryption, given the token is revoked | OS disk encryption; per-device key protection (§5.5a); remove + rotate from another device |
 | Guesses the recovery passphrase | one online attempt per request, rate-limited (behind a proxy with `--trust-proxy`, keyed on the address the proxy appended, not one the client wrote); the derived `rc_` token opens the join route only, never the vault's read routes | an offline attack: the server hands out only the KDF salt; the wrapped key is released only against the derived auth token | PBKDF2 at 2,000,000 iterations (600,000 for passphrases set before 0.1.3, re-set at 2,000,000 on first use) plus the limiter; someone with the server's disk can still attack offline, so pick a long passphrase |
 | Server operator (honest but curious) | the "reads server disk" row, live, plus which device is online when | content, paths, names, mtimes; cannot alter any ciphertext, and cannot re-point an op at another stored blob (the metadata names its blob and size; the applier refuses a mismatch) | by assumption (§4.6) they do not tamper; curiosity gains nothing beyond metadata. A tampering server could still withhold ops or roll the epoch back (§6.8 detects a rewound log) |
@@ -798,6 +811,58 @@ the repair for a blob whose bytes turn out to be undecryptable.
   (native `CompressionStream`), signalled by the body flag byte. Optional, off
   by default until measured; LiveSync measured only ~9 % savings on mixed
   data at 3× CPU cost.
+
+### 5.9 Creating a vault: create links and the security-key admin page
+
+The first device of a vault has nothing to be invited by, and the design
+refuses an admin bearer token: a bearer is a secret that has to be copied to
+a device, sits in a file the whole host can read, and once pasted into the
+wrong box is gone for good. Instead the operator mints a **create link**:
+
+    obsync://create#<server>,<cr_token>
+
+a one-time token (256-bit random, SHA-256 at rest, one hour) whose only
+power is to make one new vault. `POST /v1/create/{t}` with the device's
+`pub_kex` creates the vault at epoch 1 and enrols the caller as its first
+device in one transaction; the device has already generated `K_id` and
+`K_1` locally, writes its own keybox rows, claims vault authority (§5.8) and
+sets its name, exactly as after an invite. The server never learns a key.
+Everything after `#` is a fragment and never reaches a request line; the
+link also travels as a QR code of `obsidian://obsync-join?link=…`, which the
+plugin confirms before acting on (it names the server and refuses while the
+device is already in a vault).
+
+Two ways to mint one, both proving "I am the operator" without a shared secret:
+
+1. **On the host.** `obsync vault create --data DIR` writes the row to the
+   database directly and prints the link and its QR code. Shell access to
+   the data directory is the credential (the CLI drops from root to the
+   directory's owner first, so a `sudo` run leaves the files owned by the
+   service user). This path always works, with or without a security key.
+2. **The admin page**, `https://<server>/admin`, for the operator away from
+   a shell (an iPhone, say). It is a small same-origin app served by the
+   binary and authenticated with WebAuthn: a roaming security key such as a
+   YubiKey over USB or NFC, or a platform authenticator. Registration needs
+   a **register link** (`rg_`, same shape and lifetime as a create link)
+   printed by `obsync admin register` on the host; the browser's
+   `navigator.credentials.create()` answers it and the server stores the
+   credential's public key, id and signature counter. Sign-in is an
+   assertion over a fresh server challenge, verified against the stored
+   public key, the relying-party id (the host of `--public-url`) and the
+   origin, with the counter required to increase (a clone is refused).
+   A successful sign-in sets a 15-minute HttpOnly, Secure, SameSite=Strict
+   cookie scoped to `/admin`; every state-changing call also checks the
+   `Origin` header. The page then lists vaults (id, device count, op count:
+   all the server knows) and mints create links. Adding or removing a key
+   is CLI-only, so a stolen session cannot make itself permanent. Up to ten
+   keys may be registered; two is the sensible number.
+
+What the server stores for all this is public keys and token hashes. Its
+disk and backups contain nothing that signs in, mints a link or opens a
+vault. The page is off unless `--public-url` names a domain (WebAuthn binds
+to a domain, not an address), and it sends no CORS header and a CSP that
+allows only its own script, so Obsidian's wildcard-CORS device API and the
+cookie never meet. `GET /admin` is the only HTML the server serves.
 
 ---
 

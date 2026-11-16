@@ -20,7 +20,7 @@
  *     the run and replaces nothing. Recorded so nobody re-derives it.
  */
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
-import { TestServer, Device, ADMIN } from "./harness";
+import { TestServer, Device } from "./harness";
 import { createVault, createInviteLink, joinWithLink, removeDevice } from "../src/core/admin";
 import { utf8 } from "../src/core/encoding";
 
@@ -36,7 +36,7 @@ const text = "# Notes\n" + "the same line, again and again, compresses well\n".r
 
 describe("reencrypt() turns a device-side failure into a placeholder", () => {
   it("A. 'Rotate keys' on a device without DecompressionStream replaces every compressed blob", async () => {
-    const sa = await createVault(srv.url, ADMIN, "mac");
+    const sa = await createVault(await srv.createLink(), "mac");
     const sb = await joinWithLink(await createInviteLink(sa), "old-iphone");
     const a = await new Device("mac", sa, { compress: true }).start();
     const b = await new Device("old-iphone", sb).start();
@@ -78,7 +78,7 @@ describe("reencrypt() turns a device-side failure into a placeholder", () => {
   });
 
   it("A2 (soundness). a body-read TypeError from getBlob aborts the run and replaces nothing", async () => {
-    const sa = await createVault(srv.url, ADMIN, "mac");
+    const sa = await createVault(await srv.createLink(), "mac");
     const a = await new Device("mac", sa).start();
     try {
       await a.rawWrite("n.md", utf8("hello\n"));

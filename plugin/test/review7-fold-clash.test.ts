@@ -25,7 +25,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync, promises as fsp } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { TestServer, Device, ADMIN } from "./harness";
+import { TestServer, Device } from "./harness";
 import { createVault, createInviteLink, joinWithLink } from "../src/core/admin";
 import { foldClash } from "../src/core/paths";
 import { utf8 } from "../src/core/encoding";
@@ -62,7 +62,7 @@ function distinctOnVolume(a: string, b: string): boolean {
 }
 
 async function pair(): Promise<[Device, Device]> {
-  const sa = await createVault(srv.url, ADMIN, "linux");
+  const sa = await createVault(await srv.createLink(), "linux");
   const link = await createInviteLink(sa);
   const sb = await joinWithLink(link, "mac");
   const a = await new Device("linux", sa).start();

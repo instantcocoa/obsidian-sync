@@ -17,7 +17,7 @@
  * encryptMeta; the proof is on what the engine hands to postOps.
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { TestServer, Device, ADMIN } from "./harness";
+import { TestServer, Device } from "./harness";
 import { createVault, rotate } from "../src/core/admin";
 import { VaultCrypto } from "../src/core/crypto";
 import type { OpInput } from "../src/core/transport";
@@ -32,7 +32,7 @@ afterAll(async () => {
 
 describe("op builder: the epoch is read once", () => {
   it("a rotation that lands inside encryptMeta cannot produce header N / meta_epoch N+1", async () => {
-    const s = await createVault(srv.url, ADMIN, "laptop");
+    const s = await createVault(await srv.createLink(), "laptop");
     const { vc, client } = s;
     const before = vc.keyring.current;
     // A real rotation (the owner's "Rotate vault keys", run without stopping

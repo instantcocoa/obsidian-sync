@@ -229,8 +229,15 @@ export class RemoteServer {
   constructor(
     public url: string,
     public host: string,
-    public admin: string,
   ) {}
+
+  /** Mint a create link on the host: `sudo obsync vault create` (the CLI drops to the service user before touching the database). */
+  createLink(): string {
+    const out = this.sh(`sudo /usr/local/bin/obsync vault create --data ${RemoteServer.DATA} --url ${this.url}`);
+    const m = /obsync:\/\/create#\S+/.exec(out);
+    if (!m) throw new Error("vault create printed no link: " + out);
+    return m[0];
+  }
 
   sh(cmd: string): string {
     const r = spawnSync("ssh", ["-o", "BatchMode=yes", this.host, cmd], { encoding: "utf8", timeout: 120_000 });
@@ -298,9 +305,9 @@ export class RemoteServer {
     await this.whileStopped(() => this.sh(`sudo test -d /var/lib/private/${n} && sudo mv ${RemoteServer.DATA} ${RemoteServer.DATA}.replaced-${Date.now()} && sudo cp -a /var/lib/private/${n} ${RemoteServer.DATA}`));
   }
 
-  /** Remove every vault and blob but keep the ACME cache and the admin token: a fresh server for the next run. */
+  /** Remove every vault and blob but keep the ACME cache: a fresh server for the next run. */
   async wipe(): Promise<void> {
-    await this.whileStopped(() => this.sh(`sudo find ${RemoteServer.DATA} -mindepth 1 -maxdepth 1 ! -name acme ! -name admin-token -exec rm -rf {} +`));
+    await this.whileStopped(() => this.sh(`sudo find ${RemoteServer.DATA} -mindepth 1 -maxdepth 1 ! -name acme -exec rm -rf {} +`));
   }
 }
 

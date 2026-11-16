@@ -266,22 +266,27 @@ export class Client {
     }
   }
 
-  // ---------- admin / enrolment ----------
+  // ---------- enrolment ----------
 
-  /** Create a vault with the admin token. */
-  static async createVault(server: string, adminToken: string, fetchImpl?: typeof fetch): Promise<VaultInfo> {
-    const c = new Client(server, adminToken, { fetchImpl });
+  /**
+   * Redeem a create link: the server makes a new vault and enrols this
+   * device as its first member, in one step. No auth; the link is the
+   * credential, single use.
+   */
+  static async redeemCreate(server: string, token: string, pubKex: Uint8Array, nameEnc: Uint8Array, fetchImpl?: typeof fetch): Promise<Redeemed> {
+    const c = new Client(server, "", { fetchImpl });
     try {
-      return await c.json<VaultInfo>("POST", "/v1/vaults", undefined, { retry: false });
+      return await c.json<Redeemed>("POST", `/v1/create/${token}`, { pub_kex: b64(pubKex), name_enc: b64(nameEnc) }, { retry: false });
     } catch (e) {
-      if (e instanceof HttpError && e.status === 401) throw new Error(`Admin token rejected by ${c.base}.`);
+      if (e instanceof HttpError && e.status === 401) throw new Error("This create link was already used or has expired. Make a new one on the server (obsync vault create) or on its admin page.");
+      if (e instanceof HttpError && (e.status === 404 || e.status === 405)) throw new Error(`${c.base} is an older obsync server that does not know create links; update it.`);
       throw e;
     }
   }
 
+  /** Mint an invite for another device. Needs vault authority: only a member with the keys can add a device. */
   async createInvite(vaultId: string, keyboxEnc: Uint8Array, ttlSeconds?: number): Promise<{ token: string; expires_at: number }> {
-    // The admin token may mint the very first invite; devices need vault authority.
-    return this.json("POST", `/v1/vaults/${vaultId}/invites`, { keybox_enc: b64(keyboxEnc), ttl_seconds: ttlSeconds ?? 0 }, { authority: Boolean(this.opts.vaultAuth) });
+    return this.json("POST", `/v1/vaults/${vaultId}/invites`, { keybox_enc: b64(keyboxEnc), ttl_seconds: ttlSeconds ?? 0 }, { authority: true });
   }
 
   /** Register the vault authority hash (first enrolment); 401 (or 409 from servers before 0.1.5) means a different one is already set. */

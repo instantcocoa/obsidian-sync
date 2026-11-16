@@ -15,7 +15,7 @@
  * rotating device is wedged. Fails on HEAD (16dba52).
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { TestServer, Device, ADMIN } from "./harness";
+import { TestServer, Device } from "./harness";
 import { createVault, createInviteLink, joinWithLink, removeDevice, type Session } from "../src/core/admin";
 import { utf8 } from "../src/core/encoding";
 
@@ -44,7 +44,7 @@ async function plantBadBlob(s: Session, path: string): Promise<void> {
 
 describe("re-encryption has no failure isolation", () => {
   it("one undecryptable blob from a member: every rotation afterwards errors and min_epoch never advances", async () => {
-    const sa = await createVault(srv.url, ADMIN, "owner");
+    const sa = await createVault(await srv.createLink(), "owner");
     const sb = await joinWithLink(await createInviteLink(sa), "member");
     const a = await new Device("owner", sa).start();
     const b = await new Device("member", sb).start();

@@ -4,7 +4,7 @@
  * Platform-free so the tests and the Obsidian UI share it exactly.
  *
  * Flows (DESIGN.md §5.3–5.6):
- *   createVault      admin token → vault, keys, first device
+ *   createVault      create link → vault, keys, first device
  *   createInviteLink device → obsync://join#server,token,I
  *   joinWithLink     link → device (keys from the invite keybox)
  *   removeDevice     rotate without it, re-encrypt everything
@@ -24,6 +24,7 @@ import {
   deriveRecovery,
   openRecoveryWith,
   parseInviteLink,
+  parseCreateLink,
   buildInviteLink,
   unwrapEpochKey,
   wrapEpochKey,
@@ -110,17 +111,18 @@ async function finishEnrol(server: string, vaultId: string, deviceName: string, 
   return s;
 }
 
-/** First device: create the vault on the server (needs the admin token) and enrol. */
-export async function createVault(server: string, adminToken: string, deviceName: string, fetchImpl?: typeof fetch): Promise<Session> {
-  server = server.replace(/\/+$/, "");
-  const v = await Client.createVault(server, adminToken, fetchImpl);
+/**
+ * First device: redeem a create link (`obsync://create#…`, minted on the
+ * server host or its admin page). The vault keys are made here and never
+ * leave this device except wrapped to devices it later invites; the server
+ * gets a public key and hands back a vault and a device token.
+ */
+export async function createVault(link: string, deviceName: string, fetchImpl?: typeof fetch): Promise<Session> {
+  const { server, token } = parseCreateLink(link);
   const keyring = newKeyring();
   const kp = await generateKeypair();
-  const inviteKey = randomBytes(32);
-  const admin = new Client(server, adminToken, { fetchImpl });
-  const inv = await admin.createInvite(v.vault_id, await encryptInviteKeybox(inviteKey, keyring), 600);
-  const red = await Client.redeemInvite(server, inv.token, kp.pub, new Uint8Array(0), fetchImpl);
-  return finishEnrol(server, v.vault_id, deviceName, keyring, kp, red, fetchImpl);
+  const red = await Client.redeemCreate(server, token, kp.pub, new Uint8Array(0), fetchImpl);
+  return finishEnrol(server, red.vault_id, deviceName, keyring, kp, red, fetchImpl);
 }
 
 /** Mint an invite link for another device. The link carries the keys; guard it. */
@@ -231,7 +233,7 @@ export async function renameOwnDevice(s: Session, name: string): Promise<void> {
  *
  * A device receives the new key only if it proved it held the old ones: its
  * name must authenticate under its own id (names are written with vault
- * authority). A row planted through the admin token, or one that never
+ * authority). A row planted in the database, or one that never
  * finished enrolling, has no such proof; it is revoked instead, so a stranger
  * in the roster cannot be handed `K_e ‖ K_id` by the owner's next rotation.
  *

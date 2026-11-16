@@ -24,7 +24,7 @@
  * retry and `min_epoch < epoch`.
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { TestServer, Device, ADMIN } from "./harness";
+import { TestServer, Device } from "./harness";
 import { createVault, createInviteLink, joinWithLink, removeDevice, type Session } from "../src/core/admin";
 import { VaultCrypto, type Keyring } from "../src/core/crypto";
 import { concat, fromHex, u32le, utf8 } from "../src/core/encoding";
@@ -86,7 +86,7 @@ async function rotateTwice(s: Session): Promise<{ errors: string[]; epoch: numbe
 }
 
 async function pair(): Promise<[Device, Device]> {
-  const sa = await createVault(srv.url, ADMIN, "owner");
+  const sa = await createVault(await srv.createLink(), "owner");
   const sb = await joinWithLink(await createInviteLink(sa), "member");
   const a = await new Device("owner", sa).start();
   const b = await new Device("member", sb).start();

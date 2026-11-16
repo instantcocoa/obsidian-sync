@@ -100,12 +100,13 @@ The codebase is small. Everything security-relevant is in these files
   as SHA-256 on the server, compared in constant time. The claim: a device
   token alone is read-only; every write needs `X-Obsync-Vault-Auth`.
   Enumerate the routes in `server.go` and confirm every state-changing one
-  is behind `authority` or `authorityOrAdmin`. The test
+  is behind `authority` (there is no admin bypass of any device route). The test
   `TestTokenOnlyAttackerCannotDestroyOrEscalate` is the current proof; look
   for a route it misses.
 - Claim rules: a device may `POST /auth` only when the vault has no hash,
   the caller is the sole live non-recovery device, `seq == 0` and no blobs
-  exist. Admin bearer sets it unconditionally. Try to find a sequence
+  exist. Only the operator's CLI on the host (`obsync vault auth`) sets it
+  unconditionally; no HTTP route does. Try to find a sequence
   (join, leave, re-enrol, recovery identity) that reaches a vault with no
   hash and more than one party eligible.
 - The token travels in a header on every write and sits in memory; it never
@@ -118,10 +119,11 @@ The codebase is small. Everything security-relevant is in these files
 
 ### C. Server authentication and abuse resistance (`server.go`, `ratelimit.go`, `store.go`)
 
-- Device tokens (`dv_`), invite tokens, recovery tokens (`rc_`) and the admin
-  token: hashing at rest, constant-time comparison, token entropy, and
-  whether any token is accepted from a query string (the design says never;
-  WebSocket auth uses the `Sec-WebSocket-Protocol` list).
+- Device tokens (`dv_`), invite tokens (`in_`), recovery tokens (`rc_`),
+  create links (`cr_`) and register links (`rg_`): hashing at rest,
+  constant-time comparison, token entropy, single use, and whether any
+  token is accepted from a query string (the design says never; WebSocket
+  auth uses the `Sec-WebSocket-Protocol` list; links ride in URL fragments).
 - Revocation cuts open long-polls and WebSockets (`TestRevocationCutsOpenStreams`).
   Verify the liveness re-check cannot be raced.
 - Per-IP token bucket on failed auth (`--auth-rate`) and on recovery joins.
@@ -134,12 +136,28 @@ The codebase is small. Everything security-relevant is in these files
   an unbounded path (history, ops since, WebSocket fan-out in `hub.go`,
   SQLite query without a limit) a single member could use to exhaust the
   server.
-- CORS is `*` with an explicit header allow-list and no credentials. Confirm
-  no cookie or ambient credential exists that would make this dangerous.
-- Admin bearer: generated on first run and saved to `<data>/admin-token`.
-  Review the file mode, whether it can be rotated, and what an admin can do
-  to a vault's *content* (it should be nothing beyond deletion, since keys
-  never reach the server).
+- CORS is `*` with an explicit header allow-list and no credentials on the
+  device API. The one cookie that exists is the admin page's session,
+  scoped to `/admin`, where no CORS header is sent at all. Confirm the
+  `/admin` prefix check cannot be bypassed (case, encoding, a path that
+  reaches a device route with CORS and a cookie).
+- Admin page (`admin.go`, DESIGN §5.9): WebAuthn with
+  `github.com/go-webauthn/webauthn`. Check the relying-party id and origin
+  come only from `--public-url`, the challenge store is one-shot and
+  bounded, the session cookie is HttpOnly/Secure/SameSite=Strict and the
+  `Origin` check on every POST is sufficient CSRF protection, a stolen
+  session cannot register a key (that takes a register link from the host),
+  the clone-counter check refuses a replayed authenticator, and that a
+  signed-in admin can create vaults and list them but reach no vault's
+  content, devices or keys. `admin_test.go` drives the whole flow with a
+  software authenticator; try to construct an attestation or assertion it
+  accepts wrongly (format `none` with a mismatched rpIdHash, a `packed`
+  statement with a bogus certificate chain, an assertion for another
+  credential id).
+- Create links (`cr_`): one-time, 1 h, minted only by the CLI on the host or
+  a signed-in admin; redeeming one makes a *new* vault and nothing else.
+  Confirm it is useless against every existing vault (`TestCreateLinkLifecycle`,
+  `create-link.test.ts`).
 - SQLite invariants (§4.4): per-path compare-and-swap, append-only op log,
   epochs monotonic. Check the transactions in `store.go` for a lost update
   under concurrent writers; the CAS race tests in `api_test.go` are the

@@ -48,7 +48,7 @@ func rateEnv(t *testing.T, trustProxy bool) (*env, *blobstore.FS) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv := api.New(api.Config{AdminToken: adminTok, InviteTTL: time.Hour, MaxWait: 5 * time.Second, AuthRatePerMinute: 60, AuthBurst: 5, TrustedProxies: trustedLoopback(trustProxy)}, st, bs)
+	srv := api.New(api.Config{InviteTTL: time.Hour, MaxWait: 5 * time.Second, AuthRatePerMinute: 60, AuthBurst: 5, TrustedProxies: trustedLoopback(trustProxy)}, st, bs)
 	ts := httptest.NewServer(srv)
 	t.Cleanup(func() { ts.Close(); st.Close() })
 	return &env{t: t, ts: ts, srv: srv, st: st}, bs
@@ -326,7 +326,8 @@ func TestZzRouteTokenClasses(t *testing.T) {
 		{"PATCH", base + "/devices/me"}, {"POST", base + "/rotate"}, {"PUT", base + "/recovery"},
 		{"PUT", base + "/blobs/" + bid}, {"POST", base + "/ops"}, {"PATCH", base + "/ops/1/meta"}, {"POST", base + "/restore"},
 	}
-	wrongBearers := []string{adminTok, inv.Token, recAuth, authTok[vault], "va_" + strings.Repeat("a", 43)}
+	crTok := e.createLink()
+	wrongBearers := []string{crTok, inv.Token, recAuth, authTok[vault], "va_" + strings.Repeat("a", 43)}
 	for _, rt := range append(deviceRoutes, authorityRoutes...) {
 		for _, tok := range wrongBearers {
 			if c := e.do(rt.m, rt.p, tok, []byte("{}"), map[string]string{"X-Obsync-Vault-Auth": authTok[vault]}).code; c != 401 {
@@ -334,25 +335,22 @@ func TestZzRouteTokenClasses(t *testing.T) {
 			}
 		}
 	}
-	// Authority routes with a valid device but the admin (or recovery) token in the authority header.
+	// Authority routes with a valid device but a create link (or recovery token) in the authority header.
 	for _, rt := range authorityRoutes {
-		for _, va := range []string{adminTok, recAuth, inv.Token} {
+		for _, va := range []string{crTok, recAuth, inv.Token} {
 			if c := e.do(rt.m, rt.p, a.token, []byte("{}"), map[string]string{"X-Obsync-Vault-Auth": va}).code; c != 401 {
 				t.Errorf("%s %s with X-Obsync-Vault-Auth=%.6s… → %d, want 401", rt.m, rt.p, va, c)
 			}
 		}
 	}
-	// Admin routes with a device token, an authority token, a recovery token.
+	// The create route with a device token, an authority token, a recovery token or an invite as the link.
 	for _, tok := range []string{a.token, authTok[vault], recAuth, inv.Token} {
-		if c := e.do("POST", "/v1/vaults", tok, nil, nil).code; c != 401 {
-			t.Errorf("POST /v1/vaults with %.6s… → %d", tok, c)
-		}
-		if c := e.do("GET", "/v1/vaults", tok, nil, nil).code; c != 401 {
-			t.Errorf("GET /v1/vaults with %.6s… → %d", tok, c)
+		if c := e.do("POST", "/v1/create/"+tok, "", map[string]any{"pub_kex": testPubKex()}, nil).code; c != 401 {
+			t.Errorf("POST /v1/create/%.6s… → %d", tok, c)
 		}
 	}
-	// Recovery join with a device token or the admin token as the rc_ bearer.
-	for _, tok := range []string{a.token, adminTok, inv.Token} {
+	// Recovery join with a device token, a create link or an invite as the rc_ bearer.
+	for _, tok := range []string{a.token, crTok, inv.Token} {
 		if c := e.do("POST", base+"/recovery/join", tok, map[string]any{"pub_kex": testPubKex()}, nil).code; c != 401 {
 			t.Errorf("recovery/join with %.6s… → %d", tok, c)
 		}

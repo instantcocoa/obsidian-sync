@@ -13,6 +13,9 @@ import {
   decryptInviteKeybox,
   buildInviteLink,
   parseInviteLink,
+  buildCreateLink,
+  parseCreateLink,
+  isCreateLink,
   createRecovery,
   openRecovery,
   CryptoError,
@@ -146,6 +149,21 @@ describe("keybox wrap / invites / recovery", () => {
     expect(p.token).toBe("in_abc-DEF_123");
     expect(p.inviteKey).toEqual(I);
     expect(() => parseInviteLink("https://nope")).toThrow();
+  });
+
+  it("create links name a server and a cr_ token, nothing else", () => {
+    const link = buildCreateLink("https://sync.example.com/", "cr_abc-DEF_123");
+    expect(link).toBe("obsync://create#https%3A%2F%2Fsync.example.com,cr_abc-DEF_123");
+    expect(isCreateLink(link)).toBe(true);
+    expect(isCreateLink("obsync://join#x,y,z")).toBe(false);
+    const p = parseCreateLink(link);
+    expect(p.server).toBe("https://sync.example.com");
+    expect(p.token).toBe("cr_abc-DEF_123");
+    // What the Go server prints (url.QueryEscape) parses the same way.
+    expect(parseCreateLink("obsync://create#https%3A%2F%2Fsync.example.com,cr_lpFU49kx").server).toBe("https://sync.example.com");
+    for (const bad of ["obsync://create#https%3A%2F%2Fsync.example.com,in_abc", "obsync://create#ftp%3A%2F%2Fx,cr_abc", "obsync://create#https%3A%2F%2Fowner.example%40evil.example,cr_abc", "obsync://join#https%3A%2F%2Fx,cr_abc", "cr_abc"]) {
+      expect(() => parseCreateLink(bad), bad).toThrow();
+    }
   });
 
   it("recovery passphrase wraps the private key and yields a stable auth token", async () => {

@@ -31,7 +31,7 @@
  * "defect". The second is the smaller change and keeps the whitelist.
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { TestServer, Device, ADMIN } from "./harness";
+import { TestServer, Device } from "./harness";
 import { createVault, createInviteLink, joinWithLink, removeDevice, type Session } from "../src/core/admin";
 import { BLOB_VERSION, type FileMeta } from "../src/core/crypto";
 import { concat, fromHex, randomBytes, u32le, utf8 } from "../src/core/encoding";
@@ -83,7 +83,7 @@ async function rotateTwice(s: Session): Promise<{ outcome: string; skipped: stri
 
 describe("reencrypt(): member garbage that is not a CryptoError wedges the rotation", () => {
   it("A. a blob whose body is a lone 'padded' flag byte makes every rotation abort with a RangeError", async () => {
-    const sa = await createVault(srv.url, ADMIN, "mac");
+    const sa = await createVault(await srv.createLink(), "mac");
     const sb = await joinWithLink(await createInviteLink(sa), "member");
     const a = await new Device("mac", sa).start();
     try {
@@ -118,7 +118,7 @@ describe("reencrypt(): member garbage that is not a CryptoError wedges the rotat
   });
 
   it("B. an op whose metadata is the JSON literal null makes every rotation abort with a TypeError", async () => {
-    const sa = await createVault(srv.url, ADMIN, "mac");
+    const sa = await createVault(await srv.createLink(), "mac");
     const sb = await joinWithLink(await createInviteLink(sa), "member");
     const a = await new Device("mac", sa).start();
     try {

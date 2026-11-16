@@ -10,7 +10,7 @@
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { promises as fsp } from "node:fs";
-import { TestServer, Device, ADMIN } from "./harness";
+import { TestServer, Device } from "./harness";
 import { createVault, createInviteLink, joinWithLink, listDevices, removeDevice } from "../src/core/admin";
 import { NetworkError } from "../src/core/transport";
 import { CONFLICT_RE } from "../src/core/paths";
@@ -25,12 +25,12 @@ afterAll(async () => {
 });
 
 async function pair(s: TestServer = srv): Promise<[Device, Device]> {
-  const sa = await createVault(s.url, ADMIN, "laptop");
+  const sa = await createVault(await s.createLink(), "laptop");
   const sb = await joinWithLink(await createInviteLink(sa), "phone");
   return [await new Device("laptop", sa).start(), await new Device("phone", sb).start()];
 }
 async function trio(): Promise<[Device, Device, Device]> {
-  const sa = await createVault(srv.url, ADMIN, "laptop");
+  const sa = await createVault(await srv.createLink(), "laptop");
   const sb = await joinWithLink(await createInviteLink(sa), "phone");
   const sc = await joinWithLink(await createInviteLink(sa), "tablet");
   return [await new Device("laptop", sa).start(), await new Device("phone", sb).start(), await new Device("tablet", sc).start()];
@@ -255,7 +255,7 @@ describe("conflict shapes", () => {
   });
 
   it("12 folder deleted on one device while the other edits inside it: the edited file survives", async () => {
-    const sa = await createVault(srv.url, ADMIN, "laptop");
+    const sa = await createVault(await srv.createLink(), "laptop");
     const sb = await joinWithLink(await createInviteLink(sa), "phone");
     const a = await new Device("laptop", sa, { massDelete: { min: 1000, fraction: 1 } }).start();
     const b = await new Device("phone", sb).start();
@@ -662,7 +662,7 @@ describe("extreme scenarios", () => {
   }, 120_000);
 
   it("33 rotation storm: four rotations while a device is offline with edits; it catches up through all of them", async () => {
-    const sa = await createVault(srv.url, ADMIN, "laptop");
+    const sa = await createVault(await srv.createLink(), "laptop");
     const a = await new Device("laptop", sa).start();
     const sb = await joinWithLink(await createInviteLink(sa), "phone");
     const b = await new Device("phone", sb).start();
@@ -690,7 +690,7 @@ describe("extreme scenarios", () => {
 
   it("34 server restored to a backup taken before a key rotation: devices re-adopt the old epoch and repair", async () => {
     const own = await TestServer.start();
-    const sa = await createVault(own.url, ADMIN, "laptop");
+    const sa = await createVault(await own.createLink(), "laptop");
     const a = await new Device("laptop", sa).start();
     const sb = await joinWithLink(await createInviteLink(sa), "phone");
     const b = await new Device("phone", sb).start();
@@ -726,7 +726,7 @@ describe("extreme scenarios", () => {
   }, 120_000);
 
   it("35 large vault: 3000 files synced, then 100 deleted on one side and 100 edited on the other", async () => {
-    const sa = await createVault(srv.url, ADMIN, "laptop");
+    const sa = await createVault(await srv.createLink(), "laptop");
     const sb = await joinWithLink(await createInviteLink(sa), "phone");
     const a = await new Device("laptop", sa).start();
     const b = await new Device("phone", sb, { massDelete: { min: 1000, fraction: 1 } }).start();

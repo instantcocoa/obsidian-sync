@@ -3,8 +3,11 @@
 #   sudo cp obsync.service /etc/systemd/system/obsync.service
 #   sudo systemctl daemon-reload && sudo systemctl enable --now obsync
 # Data lives in /var/lib/obsync (StateDirectory), created and owned by the
-# unit's own transient user; the admin token is written there on first start
-# (sudo cat /var/lib/obsync/admin-token). Put your domain in the ExecStart line.
+# unit's own transient user. There is no admin token: mint a create link for
+# the first device with `sudo obsync vault create --data /var/lib/obsync`
+# (the CLI drops to the directory's owner before writing). Put your domain
+# in the ExecStart line. Behind Caddy use the second ExecStart instead and
+# remove the two CAP_NET_BIND_SERVICE lines (see README.md, "Behind Caddy").
 [Unit]
 Description=obsync: end-to-end encrypted Obsidian vault sync
 After=network-online.target
@@ -12,6 +15,8 @@ Wants=network-online.target
 
 [Service]
 ExecStart=/usr/local/bin/obsync serve --data /var/lib/obsync --acme-domain sync.example.com
+# Behind Caddy (Caddyfile.example):
+#ExecStart=/usr/local/bin/obsync serve --data /var/lib/obsync --listen 127.0.0.1:8080 --public-url https://sync.example.com --trust-proxy 127.0.0.1,::1
 Restart=on-failure
 RestartSec=5s
 

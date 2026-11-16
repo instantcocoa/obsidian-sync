@@ -252,9 +252,9 @@ func TestR8OrphanSweepRemovesOnlyRowlessFilesOlderThanAnHour(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// CONFIRMATION: CreateInvite's empty-Actor path is reachable only with the
-// admin bearer (never a device token), the device path is re-checked and
-// needs authority, and created_by records the device id or "admin".
+// CONFIRMATION: CreateInvite's empty-Actor path is not reachable over HTTP
+// at all (the route needs a device with authority), the device path is
+// re-checked, and created_by records the device id.
 func TestR8CreateInviteActorAndCreatedBy(t *testing.T) {
 	e, _, dir := r7env(t)
 	vault, a, _ := e.setup()
@@ -267,13 +267,12 @@ func TestR8CreateInviteActorAndCreatedBy(t *testing.T) {
 		t.Fatalf("device without authority: %s", r.body)
 	}
 	e.do("POST", base+"/invites", a.token, kb, authHdr(vault)).expect(t, 201)
-	e.do("POST", base+"/invites", adminTok, kb, nil).expect(t, 403)
-	// A device token presented where the admin token goes is just a bad admin token.
-	e.do("POST", base+"/invites", a.token, kb, map[string]string{"Authorization": "Bearer " + a.token}).expect(t, 401)
-
-	var fresh store.Vault
-	e.do("POST", "/v1/vaults", adminTok, nil, nil).expect(t, 201).json(t, &fresh)
-	e.do("POST", "/v1/vaults/"+fresh.ID+"/invites", adminTok, kb, nil).expect(t, 201)
+	// No bearer at all, or a create link where a device token goes: 401, never an invite.
+	e.do("POST", base+"/invites", "", kb, nil).expect(t, 401)
+	e.do("POST", base+"/invites", e.createLink(), kb, nil).expect(t, 401)
+	// A fresh vault's first device has no authority until it registers one.
+	fresh, f := e.newVault()
+	e.do("POST", "/v1/vaults/"+fresh+"/invites", f.token, kb, nil).expect(t, 401)
 
 	db, err := sql.Open("sqlite", "file:"+dir+"/db.sqlite?mode=ro")
 	if err != nil {
@@ -292,7 +291,7 @@ func TestR8CreateInviteActorAndCreatedBy(t *testing.T) {
 		seen[v+":"+by]++
 		t.Logf("invite vault=%s created_by=%s", v[:6], by)
 	}
-	if seen[vault+":"+a.id] == 0 || seen[fresh.ID+":admin"] == 0 {
+	if seen[vault+":"+a.id] != 2 || len(seen) != 1 { // setup's invite for b and the one above, both by a
 		t.Fatalf("created_by not recorded as expected: %v", seen)
 	}
 	for k := range seen {
@@ -432,7 +431,7 @@ func TestR8TrustProxyCIDRs(t *testing.T) {
 			t.Fatal(err)
 		}
 		t.Cleanup(func() { st.Close() })
-		return api.New(api.Config{AdminToken: adminTok, InviteTTL: time.Hour, AuthRatePerMinute: 60, AuthBurst: 3, TrustedProxies: trusted}, st, bs)
+		return api.New(api.Config{InviteTTL: time.Hour, AuthRatePerMinute: 60, AuthBurst: 3, TrustedProxies: trusted}, st, bs)
 	}
 	// hit sends the unauthenticated, limited redeem route straight to the
 	// handler with a chosen TCP peer and X-Forwarded-For; reports the codes.

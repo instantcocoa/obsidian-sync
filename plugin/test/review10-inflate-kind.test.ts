@@ -32,7 +32,7 @@
  * round-trip.
  */
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
-import { TestServer, Device, ADMIN } from "./harness";
+import { TestServer, Device } from "./harness";
 import { createVault, createInviteLink, joinWithLink, removeDevice } from "../src/core/admin";
 import { CryptoError, deflate, inflate } from "../src/core/crypto";
 import { utf8 } from "../src/core/encoding";
@@ -67,7 +67,7 @@ describe("inflate() classifies failures that are about this runtime as defects o
   });
 
   it("C. 'Rotate keys' on a runtime whose DecompressionStream lacks deflate-raw replaces every compressed blob", async () => {
-    const sa = await createVault(srv.url, ADMIN, "mac");
+    const sa = await createVault(await srv.createLink(), "mac");
     const sb = await joinWithLink(await createInviteLink(sa), "old-android");
     const a = await new Device("mac", sa, { compress: true }).start();
     const b = await new Device("old-android", sb).start();

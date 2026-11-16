@@ -32,8 +32,6 @@ import (
 	"obsync/internal/store"
 )
 
-const adminTok = "ad_test-admin-token"
-
 // vault authority tokens per vault (what key holders derive from K_e).
 var authTok = map[string]string{}
 
@@ -61,7 +59,7 @@ func newEnv(t *testing.T) *env {
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv := api.New(api.Config{AdminToken: adminTok, MaxWait: 5 * time.Second, InviteTTL: time.Hour, AuthRatePerMinute: -1}, st, bs)
+	srv := api.New(api.Config{MaxWait: 5 * time.Second, InviteTTL: time.Hour, AuthRatePerMinute: -1}, st, bs)
 	ts := httptest.NewServer(srv)
 	t.Cleanup(func() { ts.Close(); st.Close() })
 	return &env{t: t, ts: ts, srv: srv, st: st}
@@ -199,18 +197,30 @@ func str(s string) *string { return &s }
 
 // ---- setup: vault + two devices ----
 
+// createLink mints a create link the way the CLI or the admin page does.
+func (e *env) createLink() string {
+	e.t.Helper()
+	l, err := e.st.CreateLink(context.Background(), store.LinkCreate, "test", time.Hour)
+	if err != nil {
+		e.t.Fatal(err)
+	}
+	return l.Token
+}
+
+// newVault redeems a create link: a new vault with its first device, which
+// has made the vault keys itself and holds no authority yet.
+func (e *env) newVault() (vault string, a device) {
+	e.t.Helper()
+	var red store.Redeemed
+	e.do("POST", "/v1/create/"+e.createLink(), "", map[string]any{"pub_kex": testPubKex(), "name_enc": randBytes(20)}, nil).expect(e.t, 201).json(e.t, &red)
+	return red.VaultID, device{red.DeviceID, red.DeviceToken}
+}
+
 func (e *env) setup() (vault string, a, b device) {
 	t := e.t
-	var v store.Vault
-	e.do("POST", "/v1/vaults", adminTok, nil, nil).expect(t, 201).json(t, &v)
-	vault = v.ID
-
-	// Admin mints the first invite; the first device "wraps" keys itself.
+	vault, a = e.newVault()
 	var inv store.Invite
-	e.do("POST", "/v1/vaults/"+vault+"/invites", adminTok, map[string]any{"keybox_enc": randBytes(64)}, nil).expect(t, 201).json(t, &inv)
 	var red store.Redeemed
-	e.do("POST", "/v1/invites/"+inv.Token, "", map[string]any{"pub_kex": testPubKex(), "name_enc": randBytes(20)}, nil).expect(t, 201).json(t, &red)
-	a = device{red.DeviceID, red.DeviceToken}
 	// Self-enrol keybox row for epoch 1, and register the vault authority
 	// token (derived from the epoch key; a token-only attacker cannot).
 	e.do("POST", "/v1/vaults/"+vault+"/keybox", a.token, map[string]any{"keybox": []store.KeyboxRow{{Epoch: 1, RecipientID: a.id, Wrapped: randBytes(100)}}}, nil).expect(t, 204)
@@ -253,11 +263,12 @@ func TestEnrolmentAndAuth(t *testing.T) {
 	e := newEnv(t)
 	vault, a, b := e.setup()
 
-	// Wrong token, wrong vault, admin on device route.
+	// Wrong token, wrong vault; there is no route that creates an empty vault.
 	e.do("GET", "/v1/vaults/"+vault, "dv_bogus", nil, nil).expect(t, 401)
-	e.do("GET", "/v1/vaults/"+vault, adminTok, nil, nil).expect(t, 401)
 	e.do("GET", "/v1/vaults/deadbeef", a.token, nil, nil).expect(t, 403)
-	e.do("POST", "/v1/vaults", a.token, nil, nil).expect(t, 401)
+	if c := e.do("POST", "/v1/vaults", a.token, nil, nil).code; c != 404 && c != 405 {
+		t.Fatalf("POST /v1/vaults should not exist, got %d", c)
+	}
 
 	// A device can rename itself, with vault authority (a name is its proof of holding the keys).
 	e.do("PATCH", "/v1/vaults/"+vault+"/devices/me", b.token, map[string]any{"name_enc": []byte("new-name-ct")}, nil).expect(t, 401)

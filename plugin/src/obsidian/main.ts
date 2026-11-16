@@ -6,7 +6,7 @@
  * post-write hooks. Keys and the device token live in this plugin's
  * data.json, which the default exclusions keep out of sync.
  */
-import { parseInviteLink } from "../core/crypto";
+import { parseInviteLink, parseCreateLink, isCreateLink } from "../core/crypto";
 import { Notice, Plugin, Platform, type App } from "obsidian";
 import { Engine, type EngineConfig, type Status } from "../core/engine";
 import type { VaultInfo } from "../core/transport";
@@ -541,38 +541,43 @@ export default class ObsyncPlugin extends Plugin {
   }
 
   /**
-   * `obsidian://obsync-join?link=…` from a scanned QR or a tapped link. Any
-   * app or web page can open such a URL, so it never joins by itself: it
+   * `obsidian://obsync-join?link=…` from a scanned QR or a tapped link: an
+   * invite (`obsync://join#…`) or a create link (`obsync://create#…`). Any
+   * app or web page can open such a URL, so it never acts by itself: it
    * asks, names the server, and refuses while this device is in a vault.
    */
   async joinFromProtocol(link: string): Promise<void> {
     if (this.unloaded) return; // a handler left behind by a disabled instance must do nothing
-    if (!link.startsWith("obsync://join#")) {
-      new Notice("obsync: that is not an invite link.");
+    const create = isCreateLink(link);
+    if (!create && !link.startsWith("obsync://join#")) {
+      new Notice("obsync: that is not an invite or create link.");
       return;
     }
     if (this.settings.identity || this.settings.sealed) {
-      new Notice("obsync: this device is already in a vault. Leave it first to join another.", 8000);
+      new Notice("obsync: this device is already in a vault. Leave it first to join or create another.", 8000);
       return;
     }
     let server: string;
     try {
-      server = parseInviteLink(link).server;
+      server = create ? parseCreateLink(link).server : parseInviteLink(link).server;
     } catch {
-      new Notice("obsync: that invite link is malformed.");
+      new Notice(`obsync: that ${create ? "create" : "invite"} link is malformed.`);
       return;
     }
-    const ok = await ConfirmModal.ask(this.app, `Join the vault on ${server}?`, "This device will download the vault into the current folder and start syncing. Continue only if you generated this invite yourself.", "Join");
+    const ok = create
+      ? await ConfirmModal.ask(this.app, `Create a new vault on ${server}?`, "This device will become the first member of a new, empty vault on that server and upload the current folder to it. Continue only if you made this create link yourself.", "Create")
+      : await ConfirmModal.ask(this.app, `Join the vault on ${server}?`, "This device will download the vault into the current folder and start syncing. Continue only if you generated this invite yourself.", "Join");
     if (!ok || !(await confirmPlainHttp(this.app, server))) return;
-    await this.guard(() => this.joinWithLink(link));
+    await this.guard(() => (create ? this.createVault(link) : this.joinWithLink(link)));
   }
 
   async joinWithPassphrase(server: string, vaultId: string, passphrase: string): Promise<void> {
     await this.adopt(await joinWithPassphrase(server, vaultId, passphrase, this.settings.deviceName), "joined the vault with the recovery passphrase");
   }
 
-  async createVault(server: string, adminToken: string): Promise<void> {
-    await this.adopt(await createVault(server, adminToken, this.settings.deviceName), "vault created and connected");
+  /** First device of a new vault, from a create link minted on the server or its admin page. */
+  async createVault(link: string): Promise<void> {
+    await this.adopt(await createVault(link, this.settings.deviceName), "vault created and connected");
   }
 
   /**

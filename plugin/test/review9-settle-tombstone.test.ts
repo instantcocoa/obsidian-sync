@@ -15,7 +15,7 @@
  * pushed on top of the head.
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { TestServer, Device, ADMIN } from "./harness";
+import { TestServer, Device } from "./harness";
 import { createVault, createInviteLink, joinWithLink, type Session } from "../src/core/admin";
 import { utf8 } from "../src/core/encoding";
 
@@ -65,7 +65,7 @@ async function head(s: Session, path: string): Promise<{ seq: number; blob_id: s
 
 describe("an inconsistent *tombstone* head still swallows an honest delete", () => {
   it("the deleting device gives up, the bad row stays head, the bystander keeps the file", async () => {
-    const sa = await createVault(srv.url, ADMIN, "honest");
+    const sa = await createVault(await srv.createLink(), "honest");
     const sb = await joinWithLink(await createInviteLink(sa), "attacker");
     const sc = await joinWithLink(await createInviteLink(sa), "bystander");
     const a = await new Device("honest", sa).start();
@@ -98,7 +98,7 @@ describe("an inconsistent *tombstone* head still swallows an honest delete", () 
   });
 
   it("(soundness) bad put head, file recreated with new content before the next scan: the new content is pushed on top", async () => {
-    const sa = await createVault(srv.url, ADMIN, "honest");
+    const sa = await createVault(await srv.createLink(), "honest");
     const sb = await joinWithLink(await createInviteLink(sa), "attacker");
     const sc = await joinWithLink(await createInviteLink(sa), "bystander");
     const a = await new Device("honest", sa).start();

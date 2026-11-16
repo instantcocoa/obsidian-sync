@@ -47,11 +47,12 @@ func TestCrossVaultIsolation(t *testing.T) {
 	}
 	// Blob ids are content-addressed per vault; vault 2 cannot read vault 1's blob even by id.
 	e.do("GET", "/v1/vaults/"+v2+"/blobs/"+bid, a2.token, nil, nil).expect(t, 404)
-	// Admin token is not a data token.
+	// A create link is not a data token.
+	cr := e.createLink()
 	for _, p := range []string{"/snapshot", "/changes?since=0", "/blobs/" + bid, "/keybox", "/devices"} {
-		e.do("GET", "/v1/vaults/"+v1+p, adminTok, nil, nil).expect(t, 401)
+		e.do("GET", "/v1/vaults/"+v1+p, cr, nil, nil).expect(t, 401)
 	}
-	e.do("POST", "/v1/vaults/"+v1+"/ops", adminTok, []opIn{put("x", nil, 0)}, nil).expect(t, 401)
+	e.do("POST", "/v1/vaults/"+v1+"/ops", cr, []opIn{put("x", nil, 0)}, nil).expect(t, 401)
 }
 
 func TestRevokedAndBogusTokens(t *testing.T) {
@@ -71,7 +72,7 @@ func TestRevokedAndBogusTokens(t *testing.T) {
 	// A revoked device cannot be a keybox recipient any more.
 	e.do("POST", base+"/keybox", a.token, map[string]any{"keybox": []store.KeyboxRow{{Epoch: 2, RecipientID: b.id, Wrapped: randBytes(100)}}}, authHdr(vault)).expect(t, 400)
 	// Garbage and empty tokens.
-	for _, tok := range []string{"", "Bearer", "dv_", "dv_" + strings.Repeat("A", 43), adminTok + "x", "in_whatever", "rc_whatever"} {
+	for _, tok := range []string{"", "Bearer", "dv_", "dv_" + strings.Repeat("A", 43), "ad_" + strings.Repeat("A", 43), "cr_whatever", "in_whatever", "rc_whatever"} {
 		e.do("GET", base, tok, nil, nil).expect(t, 401)
 	}
 	// Tokens in the query string are never honoured.
@@ -145,15 +146,18 @@ func TestTokenOnlyAttackerCannotDestroyOrEscalate(t *testing.T) {
 }
 
 // Vault authority can be claimed only by the first device. A multi-device
-// vault without one (created before §5.8) gets it from the admin, never
-// from a member that merely holds a token.
+// vault without one (created before §5.8) gets it from the operator's CLI
+// (`obsync vault auth`, store.SetVaultAuth), never from a member that merely
+// holds a token.
 func TestAuthorityClaimRules(t *testing.T) {
 	e := newEnv(t)
-	var v store.Vault
-	e.do("POST", "/v1/vaults", adminTok, nil, nil).expect(t, 201).json(t, &v)
-	// The API no longer lets the admin invite into a populated vault, so the
-	// second device of this pre-§5.8 vault is enrolled through the store, the
-	// way such a database would already exist on disk.
+	ctx := context.Background()
+	v, err := e.st.CreateVault(ctx) // an empty vault, as an older server left them
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Such a vault's devices were enrolled by invites whose rows already
+	// exist on disk; model that through the store.
 	enrol := func() device {
 		inv, err := e.st.CreateInvite(context.Background(), v.ID, store.Actor{}, randBytes(64), time.Hour)
 		if err != nil {
@@ -165,8 +169,11 @@ func TestAuthorityClaimRules(t *testing.T) {
 	}
 	a := enrol()
 	b := enrol()
-	// And the HTTP route refuses the admin once a device exists.
-	e.do("POST", "/v1/vaults/"+v.ID+"/invites", adminTok, map[string]any{"keybox_enc": randBytes(64)}, nil).expect(t, 403)
+	// Nothing but a member with authority can mint an invite: no bearer, a
+	// create link, a device token without authority.
+	e.do("POST", "/v1/vaults/"+v.ID+"/invites", "", map[string]any{"keybox_enc": randBytes(64)}, nil).expect(t, 401)
+	e.do("POST", "/v1/vaults/"+v.ID+"/invites", e.createLink(), map[string]any{"keybox_enc": randBytes(64)}, nil).expect(t, 401)
+	e.do("POST", "/v1/vaults/"+v.ID+"/invites", a.token, map[string]any{"keybox_enc": randBytes(64)}, nil).expect(t, 401)
 	base := "/v1/vaults/" + v.ID
 	var info store.Vault
 	e.do("GET", base, a.token, nil, nil).expect(t, 200).json(t, &info)
@@ -178,40 +185,40 @@ func TestAuthorityClaimRules(t *testing.T) {
 	e.do("POST", base+"/auth", a.token, map[string]any{"auth": newAuthTok()}, nil).expect(t, 401)
 	// And nothing can be written meanwhile (no authority exists to present).
 	e.do("POST", base+"/ops", a.token, []opIn{put("x.md", nil, 0)}, map[string]string{"X-Obsync-Vault-Auth": newAuthTok()}).expect(t, 401)
-	// The admin installs it (token obtained from a key-holding device's settings).
+	// The operator installs it on the host (token obtained from a key-holding device's settings).
 	tok := newAuthTok()
-	e.do("POST", base+"/auth", adminTok, map[string]any{"auth": tok}, nil).expect(t, 204)
-	e.do("GET", base, a.token, nil, nil).expect(t, 200).json(t, &info)
-	if !info.HasAuth {
-		t.Fatal("has_auth should be true after admin install")
-	}
-	e.do("POST", base+"/ops", a.token, []opIn{put("x.md", nil, 0)}, map[string]string{"X-Obsync-Vault-Auth": tok}).expect(t, 200)
-	// A member cannot replace it; the admin can.
-	e.do("POST", base+"/auth", b.token, map[string]any{"auth": newAuthTok()}, nil).expect(t, 401) // a wrong authority token, charged as one
-	e.do("POST", base+"/auth", adminTok, map[string]any{"auth": newAuthTok()}, nil).expect(t, 204)
-	e.do("POST", base+"/ops", a.token, []opIn{put("y.md", nil, 0)}, map[string]string{"X-Obsync-Vault-Auth": tok}).expect(t, 401)
-	// A single-device vault: the first device claims it itself.
-	var v2 store.Vault
-	e.do("POST", "/v1/vaults", adminTok, nil, nil).expect(t, 201).json(t, &v2)
-	var inv store.Invite
-	e.do("POST", "/v1/vaults/"+v2.ID+"/invites", adminTok, map[string]any{"keybox_enc": randBytes(64)}, nil).expect(t, 201).json(t, &inv)
-	var red store.Redeemed
-	e.do("POST", "/v1/invites/"+inv.Token, "", map[string]any{"pub_kex": testPubKex()}, nil).expect(t, 201).json(t, &red)
-	e.do("POST", "/v1/vaults/"+v2.ID+"/auth", red.DeviceToken, map[string]any{"auth": newAuthTok()}, nil).expect(t, 204)
-	// A legacy single-device vault that already holds data is not claimable by its token either.
-	var v3 store.Vault
-	e.do("POST", "/v1/vaults", adminTok, nil, nil).expect(t, 201).json(t, &v3)
-	e.do("POST", "/v1/vaults/"+v3.ID+"/invites", adminTok, map[string]any{"keybox_enc": randBytes(64)}, nil).expect(t, 201).json(t, &inv)
-	e.do("POST", "/v1/invites/"+inv.Token, "", map[string]any{"pub_kex": testPubKex()}, nil).expect(t, 201).json(t, &red)
-	legacyTok := newAuthTok()
-	e.do("POST", "/v1/vaults/"+v3.ID+"/auth", adminTok, map[string]any{"auth": legacyTok}, nil).expect(t, 204) // simulate: data was written under an admin-installed token…
-	e.do("POST", "/v1/vaults/"+v3.ID+"/ops", red.DeviceToken, []opIn{put("old.md", nil, 0)}, map[string]string{"X-Obsync-Vault-Auth": legacyTok}).expect(t, 200)
-	// …then imagine the hash were absent (pre-§5.8 DB): clear it the way a migration would leave it.
-	if _, err := e.st.DB().Exec(`UPDATE vaults SET auth_hash=NULL WHERE id=?`, v3.ID); err != nil {
+	if err := e.st.SetVaultAuth(ctx, v.ID, tok); err != nil {
 		t.Fatal(err)
 	}
-	e.do("POST", "/v1/vaults/"+v3.ID+"/auth", red.DeviceToken, map[string]any{"auth": newAuthTok()}, nil).expect(t, 401)
-	e.do("POST", "/v1/vaults/"+v3.ID+"/auth", adminTok, map[string]any{"auth": newAuthTok()}, nil).expect(t, 204)
+	e.do("GET", base, a.token, nil, nil).expect(t, 200).json(t, &info)
+	if !info.HasAuth {
+		t.Fatal("has_auth should be true after the operator installs it")
+	}
+	e.do("POST", base+"/ops", a.token, []opIn{put("x.md", nil, 0)}, map[string]string{"X-Obsync-Vault-Auth": tok}).expect(t, 200)
+	// A member cannot replace it; the operator can.
+	e.do("POST", base+"/auth", b.token, map[string]any{"auth": newAuthTok()}, nil).expect(t, 401) // a wrong authority token, charged as one
+	if err := e.st.SetVaultAuth(ctx, v.ID, newAuthTok()); err != nil {
+		t.Fatal(err)
+	}
+	e.do("POST", base+"/ops", a.token, []opIn{put("y.md", nil, 0)}, map[string]string{"X-Obsync-Vault-Auth": tok}).expect(t, 401)
+	// A single-device vault: the first device claims it itself.
+	v2, d2 := e.newVault()
+	e.do("POST", "/v1/vaults/"+v2+"/auth", d2.token, map[string]any{"auth": newAuthTok()}, nil).expect(t, 204)
+	// A legacy single-device vault that already holds data is not claimable by its token either.
+	v3, d3 := e.newVault()
+	legacyTok := newAuthTok()
+	if err := e.st.SetVaultAuth(ctx, v3, legacyTok); err != nil { // simulate: data was written under an operator-installed token…
+		t.Fatal(err)
+	}
+	e.do("POST", "/v1/vaults/"+v3+"/ops", d3.token, []opIn{put("old.md", nil, 0)}, map[string]string{"X-Obsync-Vault-Auth": legacyTok}).expect(t, 200)
+	// …then imagine the hash were absent (pre-§5.8 DB): clear it the way a migration would leave it.
+	if _, err := e.st.DB().Exec(`UPDATE vaults SET auth_hash=NULL WHERE id=?`, v3); err != nil {
+		t.Fatal(err)
+	}
+	e.do("POST", "/v1/vaults/"+v3+"/auth", d3.token, map[string]any{"auth": newAuthTok()}, nil).expect(t, 401)
+	if err := e.st.SetVaultAuth(ctx, v3, newAuthTok()); err != nil {
+		t.Fatal(err)
+	}
 }
 
 // A device revoked while its long-poll is open gets nothing from it, and an
@@ -354,7 +361,7 @@ func TestBlobSizeLimit(t *testing.T) {
 	dir := t.TempDir()
 	st, _ := store.Open(dir + "/db.sqlite")
 	bs, _ := blobstore.New(dir + "/blobs")
-	srv := api.New(api.Config{AdminToken: adminTok, MaxBlobSize: 100, InviteTTL: time.Hour, AuthRatePerMinute: -1}, st, bs)
+	srv := api.New(api.Config{MaxBlobSize: 100, InviteTTL: time.Hour, AuthRatePerMinute: -1}, st, bs)
 	ts := httptest.NewServer(srv)
 	// Close the store too: Windows cannot remove the TempDir while db.sqlite is open.
 	t.Cleanup(func() { ts.Close(); st.Close() })
@@ -375,7 +382,7 @@ func TestRateLimiting(t *testing.T) {
 	st, _ := store.Open(dir + "/db.sqlite")
 	bs, _ := blobstore.New(dir + "/blobs")
 	// 60/min with burst 5: the 6th rapid attempt from one IP is throttled.
-	srv := api.New(api.Config{AdminToken: adminTok, InviteTTL: time.Hour, AuthRatePerMinute: 60, AuthBurst: 5}, st, bs)
+	srv := api.New(api.Config{InviteTTL: time.Hour, AuthRatePerMinute: 60, AuthBurst: 5}, st, bs)
 	ts := httptest.NewServer(srv)
 	// Close the store too: Windows cannot remove the TempDir while db.sqlite is open.
 	t.Cleanup(func() { ts.Close(); st.Close() })
@@ -409,12 +416,10 @@ func TestRateLimiting(t *testing.T) {
 		t.Fatalf("token guessing not throttled: %v", fails)
 	}
 	e.do("GET", "/v1/vaults/"+vault, a.token, nil, nil).expect(t, 200)
-	// Admin token guessing too.
-	for i := 0; i < 3; i++ {
-		e.do("POST", "/v1/vaults", "ad_guess", nil, nil)
-	}
-	if e.do("POST", "/v1/vaults", "ad_guess", nil, nil).code != 429 {
-		t.Fatal("admin guessing not throttled")
+	// Create-link guessing shares the unauthenticated bucket, which the
+	// invite guesses above have already drained.
+	if e.do("POST", "/v1/create/cr_guess", "", map[string]any{"pub_kex": testPubKex()}, nil).code != 429 {
+		t.Fatal("create-link guessing not throttled")
 	}
 	// Retry-After is advertised.
 	if r := e.do("POST", "/v1/invites/in_x", "", map[string]any{"pub_kex": testPubKex()}, nil); r.hdr.Get("Retry-After") == "" {

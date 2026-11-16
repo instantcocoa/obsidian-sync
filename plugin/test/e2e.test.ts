@@ -7,7 +7,7 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { promises as fsp } from "node:fs";
 import { join } from "node:path";
-import { TestServer, Device, ADMIN } from "./harness";
+import { TestServer, Device } from "./harness";
 import { createVault, createInviteLink, joinWithLink, listDevices, removeDevice, setRecoveryPassphrase, joinWithPassphrase, reencrypt } from "../src/core/admin";
 import { DEFAULT_EXCLUSIONS } from "../src/core/paths";
 import { utf8 } from "../src/core/encoding";
@@ -21,7 +21,7 @@ afterAll(async () => {
 });
 
 async function pair(): Promise<[Device, Device]> {
-  const sa = await createVault(srv.url, ADMIN, "laptop");
+  const sa = await createVault(await srv.createLink(), "laptop");
   const link = await createInviteLink(sa);
   const sb = await joinWithLink(link, "phone");
   const a = await new Device("laptop", sa).start();
@@ -146,7 +146,7 @@ describe("two devices", () => {
   });
 
   it("mass-deletion guard holds large deletions until confirmed", async () => {
-    const sa = await createVault(srv.url, ADMIN, "laptop");
+    const sa = await createVault(await srv.createLink(), "laptop");
     let asked: string[] = [];
     const a = await new Device("laptop", sa, { massDelete: { min: 3, fraction: 0.2 }, hooks: { confirmMassDelete: async (p) => ((asked = p), false) } }).start();
     for (let i = 0; i < 10; i++) await a.write(`n${i}.md`, String(i));
@@ -164,7 +164,7 @@ describe("two devices", () => {
   });
 
   it("maps the config dir per device and honours per-device exclusions", async () => {
-    const sa = await createVault(srv.url, ADMIN, "laptop");
+    const sa = await createVault(await srv.createLink(), "laptop");
     const sb = await joinWithLink(await createInviteLink(sa), "phone");
     const a = await new Device("laptop", sa).start();
     // B uses a differently named config dir and excludes a heavy plugin and a private folder.
@@ -186,7 +186,7 @@ describe("two devices", () => {
   });
 
   it("a joining device adopts the vault's config files instead of making conflict copies", async () => {
-    const sa = await createVault(srv.url, ADMIN, "laptop");
+    const sa = await createVault(await srv.createLink(), "laptop");
     const a = await new Device("laptop", sa).start();
     await a.write(".obsidian/app.json", '{"theme":"dark","from":"A"}');
     await a.write(".obsidian/community-plugins.json", '["obsync","dataview"]');

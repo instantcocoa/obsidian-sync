@@ -28,7 +28,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { TestServer, Device, ADMIN } from "./harness";
+import { TestServer, Device } from "./harness";
 import { createVault, createInviteLink, joinWithLink, type Session } from "../src/core/admin";
 import { utf8 } from "../src/core/encoding";
 
@@ -80,7 +80,7 @@ const ci = volumeIgnoresCase();
 describe.skipIf(!ci)("E. a case-only rename of a folder that has a subfolder strands the Mac", () => {
   for (const junk of [false, true]) {
     it(`Notes/Sub/a.md -> notes/Sub/a.md renamed on Linux${junk ? ", Finder's .DS_Store in both folders" : ", no junk at all"}: the Mac ends with neither spelling`, async () => {
-      const sa = await createVault(srv.url, ADMIN, "linux");
+      const sa = await createVault(await srv.createLink(), "linux");
       const sb = await joinWithLink(await createInviteLink(sa), "mac");
       const mac = await new Device("mac", sb).start();
       try {
@@ -111,7 +111,7 @@ describe.skipIf(!ci)("E. a case-only rename of a folder that has a subfolder str
 
 describe.skipIf(!ci)("F. a twin folder that never empties: the retry is unbounded and misdescribed", () => {
   async function stuckMac() {
-    const sa = await createVault(srv.url, ADMIN, "linux");
+    const sa = await createVault(await srv.createLink(), "linux");
     const sb = await joinWithLink(await createInviteLink(sa), "mac");
     const skipped: [string, string][] = [];
     const fetched: number[] = []; // ops returned by each changes() call

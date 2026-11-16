@@ -33,12 +33,13 @@ it and what it cannot do.
 
 ```sh
 cd plugin
-IOS_DEVICES=1 IOS_SERVER=https://sync.example.com IOS_SERVER_HOST=util IOS_ADMIN=ad_… \
+IOS_DEVICES=1 IOS_SERVER=https://sync.example.com IOS_SERVER_HOST=util \
 IOS_IPHONE=<udid or device name> IOS_IPAD=<udid or device name> \
 npx vitest run test/ios-devices.test.ts --reporter=verbose
 ```
 
-Each run creates a fresh vault on the server, enrols the two devices from
+Each run mints a create link on the host over ssh (`sudo obsync vault
+create`), creates a fresh vault with it, enrols the two devices from
 the Mac, pushes `data.json` with the identity plus the plugin files into
 the vault's `.obsidian`, relaunches Obsidian, and drives twenty scenarios.
 Screenshots of both devices land in `plugin/.cache/ios/` after every

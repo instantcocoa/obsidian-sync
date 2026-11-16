@@ -20,7 +20,7 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { promises as fsp } from "node:fs";
 import { join } from "node:path";
-import { TestServer, ADMIN } from "./harness";
+import { TestServer } from "./harness";
 import { ObsidianInstance, OBSIDIAN_BIN } from "./obsidian-harness";
 
 const SEED = JSON.stringify({ legacyEditor: false, safeMode: false, autoUpdate: false }); // what the harness writes before launch
@@ -85,7 +85,7 @@ describe.skipIf(!OBSIDIAN_BIN)("real Obsidian, config conflict root cause", () =
   }, 60_000);
 
   it("WITHOUT the adoption rule, joining B reproduces the config conflict copy", async () => {
-    await a.eval((plugin, _app, url, admin) => plugin.createVault(url, admin), srv.url, ADMIN);
+    await a.eval((plugin, _app, link) => plugin.createVault(link), await srv.createLink());
     expect(await a.waitFor(() => Boolean((globalThis as any).app.plugins.plugins.obsync.engine))).toBe(true);
 
     // Wait until A has actually uploaded its app.json (server history for the logical path is non-empty).

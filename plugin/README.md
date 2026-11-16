@@ -7,11 +7,15 @@ Pairs with the `obsync` server in `../server`. Design and rationale are in
 
 ## Setup in two minutes
 
-1. Run the server once (see `../server/README.md`). Note the admin token it
-   prints (also saved to `<data>/admin-token`) and the URL it serves on.
+1. Run the server (see `../server/README.md`), then on its host run
+   `obsync vault create`: it prints a one-time **create link**
+   (`obsync://create#…`) and a QR code of it. There is no admin token. If
+   you have registered a security key (`obsync admin register`), the
+   server's `/admin` page mints the same link after you touch the key,
+   from any browser including Safari on an iPhone.
    Plain `http://` is fine on a desktop or a LAN (the Android app accepts it
    too); anything reachable from the internet should use HTTPS with a real
-   certificate, and `--acme-domain` does that for you.
+   certificate, and `--acme-domain` or Caddy in front does that for you.
 2. Install the plugin. The easy way, on desktop and mobile alike, is
    [BRAT](https://github.com/TfTHacker/obsidian42-brat): install BRAT from
    Community plugins, then in its settings choose **Add beta plugin**, paste
@@ -25,14 +29,16 @@ Pairs with the `obsync` server in `../server`. Design and rationale are in
    **obsync**. Then open the obsync settings tab.
 3. On the first device: check the **Device name** (it defaults to the
    machine's hostname; it is how this device appears on every other device
-   and in conflict file names, and can be renamed later), then **Create a new
-   vault → Create…** with the server URL and the admin token. The vault keys
-   are generated on this device; the server never sees them.
+   and in conflict file names, and can be renamed later), then paste the
+   create link into **Join or create with a link** and press **Connect**,
+   or scan its QR code with the device's camera (Obsidian opens and asks
+   before creating). The vault keys are generated on this device; the
+   server never sees them, and the link dies once it is used.
 4. On the first device: **Generate invite link**. It shows a QR code and
    the link. On every other device, install the plugin the same way, then
    either scan the QR code with the device's camera (it opens Obsidian,
    which asks before joining) or open the plugin's settings, paste the link
-   into **Join with invite link** and press **Join**. A notice confirms the
+   into **Join or create with a link** and press **Connect**. A notice confirms the
    join and the status bar shows `obsync ✓`. The link is single-use and
    expires in one hour (a key rotation ends it early). Notices about routine sync events (a conflict
    resolved, a synced plugin enabled) can be turned off under **Sync

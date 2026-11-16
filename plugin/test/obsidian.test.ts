@@ -10,7 +10,7 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { promises as fsp } from "node:fs";
 import { join } from "node:path";
-import { TestServer, ADMIN } from "./harness";
+import { TestServer } from "./harness";
 import { ObsidianInstance, OBSIDIAN_BIN } from "./obsidian-harness";
 
 describe.skipIf(!OBSIDIAN_BIN)("inside real Obsidian", () => {
@@ -37,7 +37,7 @@ describe.skipIf(!OBSIDIAN_BIN)("inside real Obsidian", () => {
   });
 
   it("create vault on A, join B with an invite link", async () => {
-    await a.eval((plugin, _app, url, admin) => plugin.createVault(url, admin), srv.url, ADMIN);
+    await a.eval((plugin, _app, link) => plugin.createVault(link), await srv.createLink());
     const idA = await a.eval((plugin) => plugin.settings.identity);
     vaultId = idA.vaultId;
     expect(vaultId).toMatch(/^[0-9a-f]{32}$/);

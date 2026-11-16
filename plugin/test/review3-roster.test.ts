@@ -12,7 +12,7 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { execFileSync } from "node:child_process";
 import { join } from "node:path";
-import { TestServer, Device, ADMIN } from "./harness";
+import { TestServer, Device } from "./harness";
 import { createVault, createInviteLink, joinWithLink, listDevices, rotate } from "../src/core/admin";
 import { parseInviteLink } from "../src/core/crypto";
 import { Client } from "../src/core/transport";
@@ -29,7 +29,7 @@ afterAll(async () => {
 
 describe("roster trust (names, planted devices)", () => {
   it("a token-only holder cannot make its device wear another device's name", async () => {
-    const sa = await createVault(srv.url, ADMIN, "laptop");
+    const sa = await createVault(await srv.createLink(), "laptop");
     const sb = await joinWithLink(await createInviteLink(sa), "phone");
     const vault = sa.identity.vaultId;
 
@@ -53,17 +53,18 @@ describe("roster trust (names, planted devices)", () => {
   });
 
   it("an admin-minted invite cannot plant a device, and a device that never proved it holds the keys is revoked by the next rotation instead of being handed K_e and K_id", async () => {
-    const sa = await createVault(srv.url, ADMIN, "laptop");
+    const sa = await createVault(await srv.createLink(), "laptop");
     const vault = sa.identity.vaultId;
     await new Device("laptop", sa).start().then(async (a) => {
       await a.write("secret.md", "before rotation");
       await a.sync();
     });
 
-    // Layer 1: the admin token (or the server) cannot mint an invite into a
-    // populated vault at all.
-    const admin = new Client(srv.url, ADMIN);
-    await expect(admin.createInvite(vault, utf8("not a keybox"), 600)).rejects.toThrow(/403/);
+    // Layer 1: nothing the operator holds mints an invite into a populated
+    // vault: a create link is not a device token, and there is no admin token.
+    const cr = (await srv.createLink()).split(",")[1];
+    const operator = new Client(srv.url, cr, { vaultAuth: async () => cr });
+    await expect(operator.createInvite(vault, utf8("not a keybox"), 600)).rejects.toThrow(/401/);
 
     // Layer 2: a device that got in some other way (a stolen invite link
     // redeemed with a foreign keypair, a row planted in the database) holds a
@@ -107,7 +108,7 @@ const HAS_SQLITE3 = (() => {
 // GitHub's Windows runners do not ship; the Linux and macOS jobs run it.
 describe.skipIf(!HAS_SQLITE3)("AEAD bindings (what a tampering server can do)", () => {
   it("a server cannot re-pair one path's metadata with another path's blob", async () => {
-    const sa = await createVault(srv.url, ADMIN, "laptop");
+    const sa = await createVault(await srv.createLink(), "laptop");
     const vault = sa.identity.vaultId;
     const a = await new Device("laptop", sa).start();
     await a.write("private/secret.md", "the secret plan");

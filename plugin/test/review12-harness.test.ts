@@ -26,7 +26,7 @@ class FakeRemote extends RemoteServer {
   up = true;
   fail: RegExp | null = null;
   constructor() {
-    super("https://example.invalid", "nowhere", "ad_none");
+    super("https://example.invalid", "nowhere");
   }
   override sh(cmd: string): string {
     this.cmds.push(cmd);

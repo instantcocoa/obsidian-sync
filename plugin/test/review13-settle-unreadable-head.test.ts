@@ -31,7 +31,7 @@
  * honest ops first.
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { TestServer, Device, ADMIN } from "./harness";
+import { TestServer, Device } from "./harness";
 import { createVault, createInviteLink, joinWithLink, type Session } from "../src/core/admin";
 import { utf8, u32le } from "../src/core/encoding";
 
@@ -82,7 +82,7 @@ const PATH = "notes/n.bin"; // not a text path: no three-way merge, so the hones
  * A ended up with after it settled and synced once more.
  */
 async function race(hostile: boolean) {
-  const sa = await createVault(srv.url, ADMIN, "linux"); // B
+  const sa = await createVault(await srv.createLink(), "linux"); // B
   const sm = await joinWithLink(await createInviteLink(sa), "member"); // M
   const sb = await joinWithLink(await createInviteLink(sa), "mac"); // A
   const skipped: [string, string][] = [];

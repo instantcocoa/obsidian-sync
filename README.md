@@ -21,16 +21,16 @@ vault, `.obsidian` included, and is set up in two minutes.
 ```sh
 # server (try it locally first; https with --acme-domain or a reverse proxy when phones join)
 cd server && go build -o obsync ./cmd/obsync
-./obsync serve --data ./data --listen 127.0.0.1:8080
-# it prints an admin token on first run and saves it to ./data/admin-token
+./obsync serve --data ./data --listen 127.0.0.1:8080 --public-url http://127.0.0.1:8080
 # opening http://127.0.0.1:8080 in a browser confirms it is up
+./obsync vault create --data ./data   # prints a one-time create link and its QR code (no admin token exists)
 
 # plugin (warnings about esbuild install scripts are harmless)
 cd plugin && npm install && npm run build
 # copy main.js, manifest.json, styles.css into <vault>/.obsidian/plugins/obsync/
 # restart Obsidian → Settings → Community plugins → turn off Restricted mode → enable obsync
-# then: Settings → obsync → check the Device name → Create a new vault (server URL + admin token)
-# other devices: same install, then Settings → obsync → Join with invite link
+# then: Settings → obsync → check the Device name → paste the create link → Connect
+# other devices: same install, then Settings → obsync → paste an invite link from the first device
 ```
 
 ## Tests

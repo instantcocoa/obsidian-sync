@@ -20,7 +20,7 @@
  * Both tests fail on HEAD (16dba52).
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { TestServer, Device, ADMIN } from "./harness";
+import { TestServer, Device } from "./harness";
 import { createVault, createInviteLink, joinWithLink, type Session } from "../src/core/admin";
 import { utf8 } from "../src/core/encoding";
 
@@ -56,7 +56,7 @@ async function headBlob(s: Session, path: string): Promise<string | null | undef
 }
 
 async function trio(): Promise<[Device, Device, Device]> {
-  const sa = await createVault(srv.url, ADMIN, "honest");
+  const sa = await createVault(await srv.createLink(), "honest");
   const sb = await joinWithLink(await createInviteLink(sa), "attacker");
   const sc = await joinWithLink(await createInviteLink(sa), "bystander");
   return [await new Device("honest", sa).start(), await new Device("attacker", sb).start(), await new Device("bystander", sc).start()];

@@ -27,7 +27,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, promises as fsp } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { TestServer, Device, ADMIN } from "./harness";
+import { TestServer, Device } from "./harness";
 import { NodeFS } from "../src/core/node-fs";
 import { createVault, createInviteLink, joinWithLink, type Session } from "../src/core/admin";
 import { utf8 } from "../src/core/encoding";
@@ -77,7 +77,7 @@ const ci = volumeIgnoresCase();
 
 describe.skipIf(!ci)("1. a .DS_Store left behind blocks the case-only folder rename, and the puts are refused", () => {
   it("Notes/ -> notes/ renamed on Linux: the Mac ends with neither spelling", async () => {
-    const sa = await createVault(srv.url, ADMIN, "linux");
+    const sa = await createVault(await srv.createLink(), "linux");
     const sb = await joinWithLink(await createInviteLink(sa), "mac");
     const mac = await new Device("mac", sb).start();
     try {

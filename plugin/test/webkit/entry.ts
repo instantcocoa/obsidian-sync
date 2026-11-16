@@ -76,7 +76,7 @@ async function syncOnce(e: Engine): Promise<void> {
   if (st.phase === "error" || st.phase === "offline") throw new Error(`sync ${st.phase}: ${st.message}`);
 }
 
-async function main(server: string, admin: string): Promise<Record<string, unknown>> {
+async function main(createLink: string): Promise<Record<string, unknown>> {
   const out: Record<string, unknown> = { ua: navigator.userAgent, steps: [] as string[] };
   const steps = out.steps as string[];
 
@@ -99,7 +99,7 @@ async function main(server: string, admin: string): Promise<Record<string, unkno
   steps.push("crypto ok");
 
   // 2. Two engines over in-memory vaults against the real server.
-  const sa = await createVault(server, admin, "webkit-a");
+  const sa = await createVault(createLink, "webkit-a");
   const sb = await joinWithLink(await createInviteLink(sa), "webkit-b");
   const fa = new MemFS();
   const fb = new MemFS();
@@ -158,4 +158,4 @@ declare global {
   }
 }
 const params = new URLSearchParams(location.search);
-window.__obsync = main(location.origin, params.get("admin") ?? "").catch((e) => ({ error: String((e as Error)?.stack ?? e) }));
+window.__obsync = main(params.get("create") ?? "").catch((e) => ({ error: String((e as Error)?.stack ?? e) }));

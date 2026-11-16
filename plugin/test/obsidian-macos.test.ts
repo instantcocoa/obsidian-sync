@@ -12,7 +12,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { execFileSync } from "node:child_process";
 import { promises as fsp } from "node:fs";
 import { join } from "node:path";
-import { TestServer, ADMIN } from "./harness";
+import { TestServer } from "./harness";
 import { ObsidianInstance, OBSIDIAN_BIN } from "./obsidian-harness";
 import { joinWithLink, type Session } from "../src/core/admin";
 import { utf8 } from "../src/core/encoding";
@@ -29,7 +29,7 @@ describe.skipIf(!OBSIDIAN_BIN || process.platform !== "darwin")("real Obsidian o
   beforeAll(async () => {
     srv = await TestServer.start();
     [a, b] = await Promise.all([ObsidianInstance.launch("mac-a"), ObsidianInstance.launch("mac-b")]);
-    await a.eval((plugin, _app, url, admin) => plugin.createVault(url, admin), srv.url, ADMIN);
+    await a.eval((plugin, _app, link) => plugin.createVault(link), await srv.createLink());
     vaultId = (await a.eval((plugin) => plugin.settings.identity)).vaultId;
     const link: string = await a.eval((plugin) => plugin.inviteLink());
     await b.eval((plugin, _app, l) => plugin.joinWithLink(l), link);

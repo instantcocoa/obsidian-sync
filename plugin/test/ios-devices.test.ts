@@ -17,7 +17,7 @@
  * $IOS_VAULT (default "obsync") opened once so Obsidian reopens it on
  * launch. Everything else is pushed in. Run:
  *
- *   IOS_DEVICES=1 IOS_SERVER=https://util.frob.io IOS_SERVER_HOST=util IOS_ADMIN=ad_… \
+ *   IOS_DEVICES=1 IOS_SERVER=https://util.frob.io IOS_SERVER_HOST=util \
  *   IOS_IPHONE=<udid or name> IOS_IPAD=<udid or name> npx vitest run test/ios-devices.test.ts
  */
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
@@ -51,7 +51,6 @@ function stage(session: Session, deviceName: string): string {
 
 describe.skipIf(!ON)("obsync on a physical iPhone and iPad (real Obsidian for iOS, HTTPS server on a real host)", () => {
   const url = process.env.IOS_SERVER!;
-  const admin = process.env.IOS_ADMIN!;
   const vaultName = process.env.IOS_VAULT ?? "obsync";
   let srv: RemoteServer;
   let mac: Device;
@@ -84,13 +83,13 @@ describe.skipIf(!ON)("obsync on a physical iPhone and iPad (real Obsidian for iO
   };
 
   beforeAll(async () => {
-    for (const k of ["IOS_SERVER", "IOS_SERVER_HOST", "IOS_ADMIN", "IOS_IPHONE", "IOS_IPAD"]) if (!process.env[k]) throw new Error(`${k} not set`);
-    srv = new RemoteServer(url, process.env.IOS_SERVER_HOST!, admin);
+    for (const k of ["IOS_SERVER", "IOS_SERVER_HOST", "IOS_IPHONE", "IOS_IPAD"]) if (!process.env[k]) throw new Error(`${k} not set`);
+    srv = new RemoteServer(url, process.env.IOS_SERVER_HOST!);
     if (!(await srv.healthy())) throw new Error(`${url} is not answering`);
     phone = new IosDevice("iphone", process.env.IOS_IPHONE!, vaultName);
     pad = new IosDevice("ipad", process.env.IOS_IPAD!, vaultName);
 
-    macS = await createVault(url, admin, "mac");
+    macS = await createVault(srv.createLink(), "mac");
     mac = await new Device("mac", macS).start();
     big = new Uint8Array(nodeRandom(8 * 1024 * 1024));
     await mac.write("notes/hello.md", "# hello from the mac\n");

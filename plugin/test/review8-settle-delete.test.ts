@@ -14,7 +14,7 @@
  * Fails on HEAD (93275e9).
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { TestServer, Device, ADMIN } from "./harness";
+import { TestServer, Device } from "./harness";
 import { createVault, createInviteLink, joinWithLink, type Session } from "../src/core/admin";
 import { utf8 } from "../src/core/encoding";
 
@@ -52,7 +52,7 @@ async function head(s: Session, path: string): Promise<{ seq: number; blob_id: s
 
 describe("an inconsistent head swallows an honest delete", () => {
   it("the deleting device gives up, the bad row stays head, the bystander keeps the file", async () => {
-    const sa = await createVault(srv.url, ADMIN, "honest");
+    const sa = await createVault(await srv.createLink(), "honest");
     const sb = await joinWithLink(await createInviteLink(sa), "attacker");
     const sc = await joinWithLink(await createInviteLink(sa), "bystander");
     const a = await new Device("honest", sa).start();

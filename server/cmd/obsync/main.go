@@ -1,12 +1,16 @@
 // obsync is the sync server for the obsync Obsidian plugin.
 //
-//	obsync serve  --data DIR [--listen :8080] [--admin-token T] [--acme-domain example.com]
-//	obsync vault create --data DIR
+//	obsync serve  --data DIR --public-url https://sync.example.com [--listen 127.0.0.1:8080 | --acme-domain sync.example.com]
+//	obsync vault create --data DIR          one-time create link (+ QR) for a new vault's first device
 //	obsync vault list   --data DIR
+//	obsync admin register --data DIR        one-time link that registers a security key for /admin
+//	obsync admin keys|remove --data DIR
 //	obsync gc           --data DIR [--retention 2160h]
 //
-// Invites are minted by a device (or with the admin token over HTTP), because
-// the inviter must wrap the vault keys, which the server never holds.
+// There is no admin token. Creating a vault takes a create link, minted here
+// on the host or on the /admin page after a security-key sign-in; joining an
+// existing vault takes an invite minted by a member device, because the
+// inviter must wrap the vault keys, which the server never holds.
 package main
 
 import (
@@ -28,6 +32,7 @@ import (
 
 	"obsync/internal/api"
 	"obsync/internal/blobstore"
+	"obsync/internal/qr"
 	"obsync/internal/store"
 )
 
@@ -42,6 +47,8 @@ func main() {
 		err = serve(os.Args[2:])
 	case "vault":
 		err = vault(os.Args[2:])
+	case "admin":
+		err = adminCmd(os.Args[2:])
 	case "gc":
 		err = gc(os.Args[2:])
 	case "help", "-h", "--help":
@@ -50,6 +57,7 @@ func main() {
 		usage()
 		os.Exit(2)
 	}
+	runAtExit()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(1)
@@ -59,11 +67,26 @@ func main() {
 func usage() {
 	fmt.Fprintln(os.Stderr, strings.TrimSpace(`
 usage:
-  obsync serve        --data DIR [--listen :8080] [--admin-token T] [--acme-domain D] [--max-blob-mb N] [--retention 2160h]
-  obsync vault create --data DIR
-  obsync vault list   --data DIR
-  obsync vault auth   --data DIR VAULT_ID va_TOKEN   (migrate a pre-authority vault)
-  obsync gc           --data DIR [--retention 2160h]`))
+  obsync serve          --data DIR --public-url https://host [--listen 127.0.0.1:8080 | --acme-domain host] [--trust-proxy CIDR] [--max-blob-mb N] [--retention 2160h]
+  obsync vault create   --data DIR [--url https://host] [--ttl 1h]   print a one-time create link and its QR code
+  obsync vault list     --data DIR
+  obsync vault auth     --data DIR VAULT_ID va_TOKEN                 (migrate a pre-authority vault)
+  obsync admin register --data DIR [--url https://host] [--ttl 1h]   print a one-time link that registers a security key
+  obsync admin keys     --data DIR
+  obsync admin remove   --data DIR NAME
+  obsync gc             --data DIR [--retention 2160h]
+
+Run the vault and admin commands on the server host, as root (sudo) or as
+the service user: they write to the database directly.`))
+}
+
+// atExit runs after the subcommand returns (main calls runAtExit).
+var atExit []func()
+
+func runAtExit() {
+	for i := len(atExit) - 1; i >= 0; i-- {
+		atExit[i]()
+	}
 }
 
 func openStore(data string) (*store.Store, *blobstore.FS, error) {
@@ -73,6 +96,13 @@ func openStore(data string) (*store.Store, *blobstore.FS, error) {
 	if err := os.MkdirAll(data, 0o750); err != nil {
 		return nil, nil, err
 	}
+	handBack, err := becomeOwner(data)
+	if err != nil {
+		return nil, nil, err
+	}
+	// Runs after the store is closed, so the WAL has been checkpointed and
+	// every file the CLI created exists.
+	atExit = append(atExit, handBack)
 	st, err := store.Open(filepath.Join(data, "obsync.db"))
 	if err != nil {
 		return nil, nil, err
@@ -85,39 +115,12 @@ func openStore(data string) (*store.Store, *blobstore.FS, error) {
 	return st, bs, nil
 }
 
-// adminToken returns the configured token, or creates and persists one in
-// DIR/admin-token on first run (printed once).
-func adminToken(data, flagVal string) (string, error) {
-	if flagVal != "" {
-		return flagVal, nil
-	}
-	if env := os.Getenv("OBSYNC_ADMIN_TOKEN"); env != "" {
-		return env, nil
-	}
-	p := filepath.Join(data, "admin-token")
-	if b, err := os.ReadFile(p); err == nil {
-		return strings.TrimSpace(string(b)), nil
-	}
-	tok, _ := store.NewToken("ad_")
-	if err := os.WriteFile(p, []byte(tok+"\n"), 0o600); err != nil {
-		return "", err
-	}
-	// The token is shown only to a person at a terminal; under systemd stderr
-	// is the journal, which more accounts can read than the token file.
-	if fi, err := os.Stderr.Stat(); err == nil && fi.Mode()&os.ModeCharDevice != 0 {
-		fmt.Fprintf(os.Stderr, "generated admin token (saved to %s):\n  %s\n", p, tok)
-	} else {
-		fmt.Fprintf(os.Stderr, "generated admin token, saved to %s\n", p)
-	}
-	return tok, nil
-}
-
 func serve(args []string) error {
 	fs := flag.NewFlagSet("serve", flag.ExitOnError)
 	data := fs.String("data", "", "data directory")
 	listen := fs.String("listen", ":8080", "listen address (ignored with --acme-domain, which uses :443 and :80)")
-	admin := fs.String("admin-token", "", "admin bearer token (default: $OBSYNC_ADMIN_TOKEN or DIR/admin-token)")
 	acme := fs.String("acme-domain", "", "obtain a Let's Encrypt certificate for this domain and serve HTTPS")
+	publicURL := fs.String("public-url", "", "origin browsers and devices reach the server at, e.g. https://sync.example.com (default: https://<acme-domain>); names the relying party for the /admin security-key page and completes minted links")
 	maxBlob := fs.Int64("max-blob-mb", 1024, "maximum blob size in MiB")
 	retention := fs.Duration("retention", 90*24*time.Hour, "keep superseded blobs for this long before GC")
 	gcEvery := fs.Duration("gc-interval", 24*time.Hour, "how often to run GC (0 disables)")
@@ -130,12 +133,24 @@ func serve(args []string) error {
 		return err
 	}
 	defer st.Close()
-	tok, err := adminToken(*data, *admin)
-	if err != nil {
-		return err
+	if *publicURL == "" && *acme != "" {
+		*publicURL = "https://" + *acme
 	}
+	*publicURL = strings.TrimRight(*publicURL, "/")
 	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
-	srv := api.New(api.Config{AdminToken: tok, MaxBlobSize: *maxBlob << 20, Logger: log, TrustedProxies: strings.Split(*trustProxy, ","), AuthRatePerMinute: *authRate, AuthBurst: *authRate * 2}, st, bs)
+	if *publicURL != "" {
+		// Remembered so `vault create` and `admin register` can print complete
+		// links without being told the URL again.
+		if err := st.SetSetting(context.Background(), "public_url", *publicURL); err != nil {
+			return err
+		}
+	} else {
+		log.Warn("no --public-url: the /admin security-key page is off and the CLI needs --url to print links")
+	}
+	if keys, err := st.ListAdminCredentials(context.Background()); err == nil && len(keys) == 0 && *publicURL != "" {
+		log.Info("admin page has no security key yet; run `obsync admin register --data " + *data + "` to add one")
+	}
+	srv := api.New(api.Config{PublicURL: *publicURL, MaxBlobSize: *maxBlob << 20, Logger: log, TrustedProxies: strings.Split(*trustProxy, ","), AuthRatePerMinute: *authRate, AuthBurst: *authRate * 2}, st, bs)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -210,26 +225,47 @@ func vault(args []string) error {
 	}
 	fs := flag.NewFlagSet("vault", flag.ExitOnError)
 	data := fs.String("data", "", "data directory")
+	urlFlag := fs.String("url", "", "the server's public URL (default: the one `serve` was last started with)")
+	ttl := fs.Duration("ttl", time.Hour, "how long the link stays redeemable")
 	fs.Parse(args[1:])
 	st, _, err := openStore(*data)
 	if err != nil {
 		return err
 	}
 	defer st.Close()
+	ctx := context.Background()
 	switch args[0] {
 	case "create":
-		v, err := st.CreateVault(context.Background())
+		// A create link, not a vault: the vault comes into being when the
+		// first device redeems the link, with keys that device made itself.
+		server, err := publicURLFor(ctx, st, *urlFlag)
 		if err != nil {
 			return err
 		}
-		fmt.Println(v.ID)
+		l, err := st.CreateLink(ctx, store.LinkCreate, "cli", *ttl)
+		if err != nil {
+			return err
+		}
+		link := api.CreateLink(server, l.Token)
+		code, err := qr.Terminal(api.OpenURL(link))
+		if err != nil {
+			return err
+		}
+		fmt.Printf("Create link for one new vault, valid until %s, single use.\n\n", time.UnixMilli(l.ExpiresAt).Format(time.RFC1123))
+		fmt.Printf("  %s\n\n", link)
+		fmt.Print("Paste it into Settings → obsync → Create a new vault on the first device,\nor scan this with the device's camera:\n\n")
+		fmt.Print(code)
 	case "list":
-		vs, err := st.ListVaults(context.Background())
+		vs, err := st.ListVaults(ctx)
 		if err != nil {
 			return err
 		}
 		for _, v := range vs {
-			fmt.Printf("%s\tepoch=%d\tseq=%d\tcreated=%s\n", v.ID, v.Epoch, v.Seq, time.UnixMilli(v.CreatedAt).Format(time.RFC3339))
+			auth := "authority=yes"
+			if !v.HasAuth {
+				auth = "authority=NONE (run vault auth)"
+			}
+			fmt.Printf("%s\tdevices=%d\tepoch=%d\tseq=%d\tcreated=%s\t%s\n", v.ID, v.Devices, v.Epoch, v.Seq, time.UnixMilli(v.CreatedAt).Format(time.RFC3339), auth)
 		}
 	case "auth":
 		// obsync vault auth --data DIR VAULT_ID va_TOKEN
@@ -240,7 +276,7 @@ func vault(args []string) error {
 		if len(rest) != 2 {
 			return errors.New("vault auth --data DIR VAULT_ID va_TOKEN")
 		}
-		if err := st.SetVaultAuth(context.Background(), rest[0], rest[1]); err != nil {
+		if err := st.SetVaultAuth(ctx, rest[0], rest[1]); err != nil {
 			return err
 		}
 		fmt.Println("vault authority set")
@@ -248,6 +284,79 @@ func vault(args []string) error {
 		return errors.New("vault create|list|auth")
 	}
 	return nil
+}
+
+// adminCmd manages the security keys that may sign in to /admin.
+func adminCmd(args []string) error {
+	if len(args) < 1 {
+		return errors.New("admin register|keys|remove")
+	}
+	fs := flag.NewFlagSet("admin", flag.ExitOnError)
+	data := fs.String("data", "", "data directory")
+	urlFlag := fs.String("url", "", "the server's public URL (default: the one `serve` was last started with)")
+	ttl := fs.Duration("ttl", time.Hour, "how long the register link stays usable")
+	fs.Parse(args[1:])
+	st, _, err := openStore(*data)
+	if err != nil {
+		return err
+	}
+	defer st.Close()
+	ctx := context.Background()
+	switch args[0] {
+	case "register":
+		server, err := publicURLFor(ctx, st, *urlFlag)
+		if err != nil {
+			return err
+		}
+		l, err := st.CreateLink(ctx, store.LinkRegister, "cli", *ttl)
+		if err != nil {
+			return err
+		}
+		fmt.Printf("Open this in a browser with your security key at hand (valid until %s, single use):\n\n  %s\n\n", time.UnixMilli(l.ExpiresAt).Format(time.RFC1123), api.RegisterURL(server, l.Token))
+		fmt.Println("The browser asks you to touch the key; give it a name you will recognise. Register a second key the same way, so losing one does not lock you out of the page (the CLI always works).")
+	case "keys":
+		keys, err := st.ListAdminCredentials(ctx)
+		if err != nil {
+			return err
+		}
+		if len(keys) == 0 {
+			fmt.Println("no security keys registered; run `obsync admin register`")
+		}
+		for _, k := range keys {
+			last := "never"
+			if k.LastUsed > 0 {
+				last = time.UnixMilli(k.LastUsed).Format(time.RFC3339)
+			}
+			fmt.Printf("%s\tregistered=%s\tlast_used=%s\n", k.Name, time.UnixMilli(k.CreatedAt).Format(time.RFC3339), last)
+		}
+	case "remove":
+		rest := fs.Args()
+		if len(rest) != 1 {
+			return errors.New("admin remove --data DIR NAME")
+		}
+		if err := st.RemoveAdminCredential(ctx, rest[0]); err != nil {
+			return err
+		}
+		fmt.Println("removed; any open admin session ends when the server restarts or its 15 minutes run out")
+	default:
+		return errors.New("admin register|keys|remove")
+	}
+	return nil
+}
+
+// publicURLFor is the --url flag, else the URL `serve` recorded.
+func publicURLFor(ctx context.Context, st *store.Store, flagVal string) (string, error) {
+	if flagVal != "" {
+		return strings.TrimRight(flagVal, "/"), nil
+	}
+	v, err := st.GetSetting(ctx, "public_url")
+	if err != nil {
+		return "", err
+	}
+	if v == "" {
+		return "", errors.New("the server has not been started with --public-url yet; pass --url https://your.host")
+	}
+	return v, nil
 }
 
 func gc(args []string) error {
@@ -260,7 +369,7 @@ func gc(args []string) error {
 		return err
 	}
 	defer st.Close()
-	srv := api.New(api.Config{AdminToken: "unused"}, st, bs)
+	srv := api.New(api.Config{}, st, bs)
 	n, err := srv.GC(context.Background(), *retention)
 	if err != nil {
 		return err

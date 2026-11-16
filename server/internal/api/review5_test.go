@@ -81,23 +81,27 @@ func TestZzEventLogHoldsNoSecretsAndOneLinePerEvent(t *testing.T) {
 	defer st.Close()
 	bs, _ := blobstore.New(dir + "/blobs")
 	var log bytes.Buffer
-	srv := api.New(api.Config{AdminToken: adminTok, Logger: slog.New(slog.NewTextHandler(&log, nil)), AuthRatePerMinute: -1}, st, bs)
+	srv := api.New(api.Config{Logger: slog.New(slog.NewTextHandler(&log, nil)), AuthRatePerMinute: -1}, st, bs)
 	ts := httptest.NewServer(srv)
 	defer ts.Close()
 	e := &env{t: t, ts: ts, srv: srv, st: st}
 
-	var v store.Vault
-	e.do("POST", "/v1/vaults", adminTok, nil, nil).expect(t, 201).json(t, &v)
+	crTok := e.createLink()
+	var red store.Redeemed
+	e.do("POST", "/v1/create/"+crTok, "", map[string]any{"pub_kex": testPubKex()}, nil).expect(t, 201).json(t, &red) // vault.created
+	v := store.Vault{ID: red.VaultID}
+	authTok[v.ID] = newAuthTok()
+	e.do("POST", "/v1/vaults/"+v.ID+"/auth", red.DeviceToken, map[string]any{"auth": authTok[v.ID]}, nil).expect(t, 204)
 	devTok := "dv_" + hex.EncodeToString(randBytes(32))
 	invTok := "in_" + hex.EncodeToString(randBytes(32))
 	rcTok := "rc_" + hex.EncodeToString(randBytes(32))
-	e.do("GET", "/v1/vaults/"+v.ID, devTok, nil, nil).expect(t, 401)                                                       // auth.failed
-	e.do("POST", "/v1/invites/"+invTok, "", map[string]any{"pub_kex": testPubKex()}, nil).expect(t, 401)                   // invite.redeem.failed
-	e.do("POST", "/v1/vaults/evil%0Ainjected=1%20x/recovery/join", rcTok, map[string]any{"pub_kex": testPubKex()}, nil)    // recovery.join.failed, vault id with a newline
-	e.do("POST", "/v1/vaults/"+v.ID+"/invites", adminTok, map[string]any{"keybox_enc": randBytes(64)}, nil).expect(t, 201) // invite.created by admin
+	e.do("GET", "/v1/vaults/"+v.ID, devTok, nil, nil).expect(t, 401)                                                                        // auth.failed
+	e.do("POST", "/v1/invites/"+invTok, "", map[string]any{"pub_kex": testPubKex()}, nil).expect(t, 401)                                    // invite.redeem.failed
+	e.do("POST", "/v1/vaults/evil%0Ainjected=1%20x/recovery/join", rcTok, map[string]any{"pub_kex": testPubKex()}, nil)                     // recovery.join.failed, vault id with a newline
+	e.do("POST", "/v1/vaults/"+v.ID+"/invites", red.DeviceToken, map[string]any{"keybox_enc": randBytes(64)}, authHdr(v.ID)).expect(t, 201) // invite.created by the device
 
 	out := log.String()
-	for _, secret := range []string{devTok, invTok, rcTok, adminTok} {
+	for _, secret := range []string{devTok, invTok, rcTok, crTok, red.DeviceToken, authTok[v.ID]} {
 		if strings.Contains(out, secret) {
 			t.Errorf("event log contains a credential (%s…):\n%s", secret[:6], out)
 		}
@@ -110,8 +114,11 @@ func TestZzEventLogHoldsNoSecretsAndOneLinePerEvent(t *testing.T) {
 	if !strings.Contains(out, "event=auth.failed") || !strings.Contains(out, "by=- ") {
 		t.Errorf("expected an auth.failed event attributed to \"-\":\n%s", out)
 	}
-	if !strings.Contains(out, "event=invite.created") || !strings.Contains(out, "by=admin") {
-		t.Errorf("expected an invite.created event attributed to admin:\n%s", out)
+	if !strings.Contains(out, "event=invite.created") || !strings.Contains(out, "by="+red.DeviceID) {
+		t.Errorf("expected an invite.created event attributed to the device:\n%s", out)
+	}
+	if !strings.Contains(out, "event=vault.created") || !strings.Contains(out, "vault="+red.VaultID) {
+		t.Errorf("expected a vault.created event naming the vault:\n%s", out)
 	}
 	if !strings.Contains(out, `vault="evil\ninjected=1 x"`) {
 		t.Errorf("expected the newline in the vault path value to be escaped:\n%s", out)

@@ -1,5 +1,5 @@
 /** The settings tab: enrolment when not joined, status and options when joined. */
-import { parseInviteLink } from "../core/crypto";
+import { parseInviteLink, parseCreateLink, isCreateLink } from "../core/crypto";
 import { Notice, PluginSettingTab, Setting } from "obsidian";
 import type ObsyncPlugin from "./main";
 import { DEFAULT_EXCLUSIONS } from "../core/paths";
@@ -33,26 +33,27 @@ export class ObsyncSettingTab extends PluginSettingTab {
 
   private renderJoin(el: HTMLElement): void {
     el.createEl("h3", { text: "Connect this vault" });
-    el.createEl("p", { text: "Paste an invite link from a device that is already syncing, or create a new vault on your server." });
+    el.createEl("p", { text: "Paste an invite link from a device that is already syncing, or a create link from your server to start a new vault." });
 
     let link = "";
     new Setting(el)
-      .setName("Join with invite link")
-      .setDesc("obsync://join#… from another device's “Generate invite link”. The link contains the vault keys; discard it after use.")
-      .addText((t) => t.setPlaceholder("obsync://join#…").onChange((v) => (link = v.trim())))
+      .setName("Join or create with a link")
+      .setDesc("obsync://join#… from another device's “Generate invite link” (it contains the vault keys; discard it after use), or obsync://create#… printed by `obsync vault create` on the server or by its admin page.")
+      .addText((t) => t.setPlaceholder("obsync://join#… or obsync://create#…").onChange((v) => (link = v.trim())))
       .addButton((b) =>
         b
-          .setButtonText("Join")
+          .setButtonText("Connect")
           .setCta()
           .onClick(async () => {
             // The link names the server; an http:// one needs the same consent as the other entry points.
+            const create = isCreateLink(link);
             let server = "";
             try {
-              server = parseInviteLink(link).server;
+              server = create ? parseCreateLink(link).server : parseInviteLink(link).server;
             } catch {
-              /* joinWithLink reports the malformed link */
+              /* the join/create call reports the malformed link */
             }
-            if (!server || (await this.plainHttpOk(server))) await this.run(() => this.plugin.joinWithLink(link));
+            if (!server || (await this.plainHttpOk(server))) await this.run(() => (create ? this.plugin.createVault(link) : this.plugin.joinWithLink(link)));
           }),
       );
 
@@ -77,21 +78,7 @@ export class ObsyncSettingTab extends PluginSettingTab {
 
     new Setting(el)
       .setName("Create a new vault")
-      .setDesc("First device only. Needs the server's admin token (printed when the server first started).")
-      .addButton((b) =>
-        b.setButtonText("Create…").onClick(async () => {
-          const v = await PromptModal.ask(
-            this.app,
-            "Create a new vault",
-            [
-              { name: "Server URL", placeholder: "https://sync.example.com" },
-              { name: "Admin token", placeholder: "printed by the server on first start; also in <data>/admin-token", secret: true },
-            ],
-            "Create",
-          );
-          if (v && (await this.plainHttpOk(v[0]))) await this.run(() => this.plugin.createVault(v[0], v[1]));
-        }),
-      );
+      .setDesc("First device only. On the server run `obsync vault create`, or sign in to https://<server>/admin with your security key and press Create link; then scan the QR code with this device's camera, or paste the obsync://create#… link above. The vault keys are made on this device; the server never sees them.");
 
     new Setting(el)
       .setName("Device name")

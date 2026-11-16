@@ -68,7 +68,7 @@ func TestZzLimiterIPv6AddressesInOneSubnetShareABucket(t *testing.T) {
 	}
 	defer st.Close()
 	bs, _ := blobstore.New(dir + "/blobs")
-	srv := api.New(api.Config{AdminToken: adminTok, AuthRatePerMinute: 1, AuthBurst: 2}, st, bs)
+	srv := api.New(api.Config{AuthRatePerMinute: 1, AuthBurst: 2}, st, bs)
 	limited := 0
 	for i := 0; i < 20; i++ {
 		req := httptest.NewRequest("GET", "/v1/vaults/"+hexID("v")[:32], nil)

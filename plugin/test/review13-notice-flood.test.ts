@@ -19,7 +19,7 @@
  * collect decodeOp's rejections per batch and report once.
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { TestServer, Device, ADMIN } from "./harness";
+import { TestServer, Device } from "./harness";
 import { createVault, createInviteLink, joinWithLink, type Session } from "../src/core/admin";
 import { utf8, u32le } from "../src/core/encoding";
 
@@ -52,7 +52,7 @@ async function garbageRows(s: Session, n: number): Promise<void> {
 
 describe("decodeOp: one notice per unreadable row, uncapped", () => {
   it("A. 200 garbage rows under 200 paths: one pull raises 200 separate 12-second notices", async () => {
-    const sa = await createVault(srv.url, ADMIN, "member");
+    const sa = await createVault(await srv.createLink(), "member");
     await garbageRows(sa, 200);
     const link = await createInviteLink(sa);
     const urls: string[] = [];

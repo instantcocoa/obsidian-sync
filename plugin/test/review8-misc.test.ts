@@ -21,7 +21,7 @@
  *     padding boundary. Passes on HEAD; here so nobody has to re-derive it.
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { TestServer, Device, ADMIN } from "./harness";
+import { TestServer, Device } from "./harness";
 import { createVault, createInviteLink, joinWithLink, ensureOwnName, renameOwnDevice, removeDevice, type Session } from "../src/core/admin";
 import { VaultCrypto, newKeyring, PAD_BLOCK, type Keyring } from "../src/core/crypto";
 import { b64, concat, fromB64, u32le, utf8 } from "../src/core/encoding";
@@ -36,7 +36,7 @@ afterAll(async () => {
 
 describe("A. one blob under many names is fetched once per name", () => {
   it("20 identical files cost 20 downloads of the same blob (0.1.5: one)", async () => {
-    const sa = await createVault(srv.url, ADMIN, "desktop");
+    const sa = await createVault(await srv.createLink(), "desktop");
     const sb = await joinWithLink(await createInviteLink(sa), "phone");
     const a = await new Device("desktop", sa).start();
     const b = await new Device("phone", sb).start();
@@ -120,7 +120,7 @@ describe("B. the in-flight name rewrite is keyed by Session; a restart opens a n
 
 describe("C. re-encryption strips compression and padding", () => {
   it("a few-KiB compressed, padded blob is 1 MiB after a rotation", async () => {
-    const sa = await createVault(srv.url, ADMIN, "owner");
+    const sa = await createVault(await srv.createLink(), "owner");
     const a = await new Device("owner", sa, { compress: true, pad: true }).start();
     try {
       const bytes = new Uint8Array(1 << 20); // all zeros: compresses ~1000:1

@@ -33,7 +33,7 @@ func TestZzXFFFirstHopSpoofBypassesLimiter(t *testing.T) {
 		t.Fatal(err)
 	}
 	bs, _ := blobstore.New(dir + "/blobs")
-	srv := api.New(api.Config{AdminToken: adminTok, TrustedProxies: []string{"127.0.0.0/8", "::1/128"}, AuthRatePerMinute: 1, AuthBurst: 2}, st, bs)
+	srv := api.New(api.Config{TrustedProxies: []string{"127.0.0.0/8", "::1/128"}, AuthRatePerMinute: 1, AuthBurst: 2}, st, bs)
 	ts := httptest.NewServer(srv)
 	t.Cleanup(func() { ts.Close(); st.Close() })
 

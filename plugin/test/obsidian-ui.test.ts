@@ -9,7 +9,7 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { promises as fsp } from "node:fs";
 import { join } from "node:path";
-import { TestServer, ADMIN } from "./harness";
+import { TestServer } from "./harness";
 import { ObsidianInstance, OBSIDIAN_BIN } from "./obsidian-harness";
 
 describe.skipIf(!OBSIDIAN_BIN)("real Obsidian, settings UI onboarding, rate limiter on", () => {
@@ -27,15 +27,14 @@ describe.skipIf(!OBSIDIAN_BIN)("real Obsidian, settings UI onboarding, rate limi
     await srv?.stop();
   });
 
-  it("first device: Settings → Create a new vault → server URL + admin token → Create", async () => {
+  it("first device: Settings → paste the create link printed by `obsync vault create` → Connect", async () => {
     await a.openSettings();
-    await a.clickButton("Create…");
-    // Empty fields are refused with a notice, not silently closed.
-    await a.clickModalButton("Create");
-    expect(await a.waitForNotice(/fill in/, 5_000)).not.toBeNull();
-    await a.fill("https://sync.example.com", srv.url); // first prompt field (server URL)
-    await (await a.locator('input[type="password"]')).fill(ADMIN);
-    await a.clickModalButton("Create");
+    // A malformed link is reported, not silently ignored.
+    await a.fill("obsync://join#… or obsync://create#…", "obsync://create#nonsense");
+    await a.clickButton("Connect");
+    expect(await a.waitForNotice(/create link/, 5_000)).not.toBeNull();
+    await a.fill("obsync://join#… or obsync://create#…", await srv.createLink());
+    await a.clickButton("Connect");
     expect(await a.waitForNotice(/vault created/)).not.toBeNull();
     expect(await a.waitFor(() => Boolean((globalThis as any).app.plugins.plugins.obsync.settings.identity), 20_000)).toBe(true);
     expect(await a.waitFor(() => Boolean((globalThis as any).app.plugins.plugins.obsync.engine), 20_000)).toBe(true);

@@ -4,7 +4,6 @@ package api
 import (
 	"bytes"
 	"context"
-	"crypto/subtle"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
@@ -36,7 +35,11 @@ const (
 )
 
 type Config struct {
-	AdminToken   string
+	// PublicURL is the origin the server is reached at by browsers and
+	// devices (https://sync.example.com). It names the relying party for the
+	// security-key admin page and completes the links the server mints.
+	// Empty disables the admin page; the CLI still mints links.
+	PublicURL    string
 	MaxBlobSize  int64         // bytes
 	MaxWait      time.Duration // long-poll cap
 	InviteTTL    time.Duration
@@ -69,6 +72,9 @@ type Server struct {
 	// limits token guessing (charged only on failure).
 	unauth   *limiter
 	authFail *limiter
+	// admin is the security-key admin page (admin.go); nil when no
+	// PublicURL was configured.
+	admin *admin
 }
 
 // stageSeq distinguishes stage files of uploads that began in the same nanosecond.
@@ -127,6 +133,12 @@ func New(cfg Config, st *store.Store, blobs *blobstore.FS) *Server {
 	}
 	s := &Server{cfg: cfg, st: st, blobs: blobs, hub: NewHub(), mux: http.NewServeMux(), log: cfg.Logger}
 	s.trusted = trusted
+	if s.admin, err = newAdmin(cfg.PublicURL); err != nil {
+		if !errors.Is(err, errAdminNeedsDomain) {
+			panic(err)
+		}
+		s.log.Warn("admin page off", "reason", err.Error())
+	}
 	if rate > 0 {
 		s.unauth = newLimiter(rate, burst, s.trusted)
 		s.authFail = newLimiter(rate, burst, s.trusted)
@@ -147,10 +159,13 @@ func (s *Server) routes() {
 		w.Write([]byte("obsync server is running.\n\nPoint the Obsidian plugin at this URL (Settings → obsync → Create a new vault, or paste an invite link).\n"))
 	})
 
-	m.HandleFunc("POST /v1/vaults", s.admin(s.createVault))
-	m.HandleFunc("GET /v1/vaults", s.admin(s.listVaults))
-	m.HandleFunc("POST /v1/vaults/{v}/invites", s.authorityOrAdmin(s.createInvite))
+	// A vault comes into being when its first device redeems a create link
+	// minted by the operator (CLI or admin page, DESIGN.md §5.9). There is no
+	// route that creates an empty vault and no admin bearer token.
+	m.HandleFunc("POST /v1/create/{t}", s.limited(s.redeemCreate))
+	m.HandleFunc("POST /v1/vaults/{v}/invites", s.authority(s.createInvite))
 	m.HandleFunc("POST /v1/invites/{t}", s.limited(s.redeemInvite))
+	s.adminRoutes()
 
 	m.HandleFunc("GET /v1/vaults/{v}", s.device(s.getVault))
 	m.HandleFunc("GET /v1/vaults/{v}/devices", s.device(s.listDevices))
@@ -161,7 +176,7 @@ func (s *Server) routes() {
 	m.HandleFunc("PATCH /v1/vaults/{v}/devices/me", s.authority(s.setDeviceName))
 	m.HandleFunc("GET /v1/vaults/{v}/keybox", s.device(s.getKeybox))
 	m.HandleFunc("POST /v1/vaults/{v}/keybox", s.device(s.putKeybox))
-	m.HandleFunc("POST /v1/vaults/{v}/auth", s.deviceOrAdmin(s.registerAuth))
+	m.HandleFunc("POST /v1/vaults/{v}/auth", s.device(s.registerAuth))
 	m.HandleFunc("POST /v1/vaults/{v}/rotate", s.authority(s.rotate))
 
 	m.HandleFunc("PUT /v1/vaults/{v}/recovery", s.authority(s.setRecovery))
@@ -185,8 +200,19 @@ func (s *Server) routes() {
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	if strings.HasPrefix(r.URL.Path, "/admin") {
+		// The admin page is a same-origin browser app with a cookie session:
+		// no CORS at all, and a CSP that allows only its own script and
+		// stylesheet (served below), inline SVG, and fetches to this origin.
+		w.Header().Set("Content-Security-Policy", "default-src 'none'; script-src 'self'; style-src 'self'; img-src data:; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'")
+		w.Header().Set("Referrer-Policy", "no-referrer")
+		w.Header().Set("Cache-Control", "no-store")
+		s.mux.ServeHTTP(w, r)
+		return
+	}
 	// CORS: Obsidian runs at app://obsidian.md (desktop) and
-	// capacitor://localhost (mobile). Auth is a bearer header, never a
+	// capacitor://localhost (mobile). Device auth is a bearer header, never a
 	// cookie, so a wildcard origin is safe.
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
@@ -205,6 +231,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 type ctxKey int
 
 const deviceKey ctxKey = 1
+
+func contextWithAdmin(r *http.Request, key string) context.Context {
+	return context.WithValue(r.Context(), adminKey, key)
+}
 
 // bearer reads the Authorization header. Tokens are never accepted in the
 // query string: URLs end up in proxy and browser logs.
@@ -241,10 +271,6 @@ func vaultAuth(r *http.Request) string {
 	return strings.TrimSpace(r.Header.Get("X-Obsync-Vault-Auth"))
 }
 
-func (s *Server) isAdmin(tok string) bool {
-	return s.cfg.AdminToken != "" && subtle.ConstantTimeCompare([]byte(tok), []byte(s.cfg.AdminToken)) == 1
-}
-
 // limited applies the unauthenticated-route rate limit.
 func (s *Server) limited(next http.HandlerFunc) http.HandlerFunc {
 	if s.unauth == nil {
@@ -272,14 +298,15 @@ func actor(r *http.Request) store.Actor {
 	return store.Actor{Device: dev(r).ID, Auth: vaultAuth(r)}
 }
 
-// event writes one security-relevant line: who (device or admin, address),
-// what (name), on which vault, with what outcome. Never a token.
+// event writes one security-relevant line: who (device, or the admin
+// session's key name, and address), what (name), on which vault, with what
+// outcome. Never a token.
 func (s *Server) event(r *http.Request, name string, kv ...any) {
 	by := "-"
 	if d := dev(r); d != nil {
 		by = d.ID
-	} else if s.isAdmin(bearer(r)) {
-		by = "admin"
+	} else if a := adminOf(r); a != "" {
+		by = "admin:" + a
 	}
 	// The invite token is part of the redeem route; the log keeps its prefix only.
 	route := r.URL.Path
@@ -299,16 +326,6 @@ func (s *Server) failAuth(w http.ResponseWriter, r *http.Request, msg string) {
 	}
 	s.event(r, "auth.failed", "reason", msg)
 	writeErr(w, http.StatusUnauthorized, msg)
-}
-
-func (s *Server) admin(next http.HandlerFunc) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if !s.isAdmin(bearer(r)) {
-			s.failAuth(w, r, "admin token required")
-			return
-		}
-		next(w, r)
-	}
 }
 
 // device authenticates a device token and checks it belongs to {v}.
@@ -349,36 +366,9 @@ func (s *Server) authority(next http.HandlerFunc) http.HandlerFunc {
 	})
 }
 
-func (s *Server) deviceOrAdmin(next http.HandlerFunc) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if s.isAdmin(bearer(r)) {
-			next(w, r)
-			return
-		}
-		s.device(next)(w, r)
-	}
-}
-
-func (s *Server) authorityOrAdmin(next http.HandlerFunc) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if s.isAdmin(bearer(r)) {
-			next(w, r)
-			return
-		}
-		s.authority(next)(w, r)
-	}
-}
-
 func dev(r *http.Request) *store.Device {
 	d, _ := r.Context().Value(deviceKey).(*store.Device)
 	return d
-}
-
-func callerID(r *http.Request) string {
-	if d := dev(r); d != nil {
-		return d.ID
-	}
-	return "admin"
 }
 
 // ---------- helpers ----------
@@ -442,23 +432,26 @@ func qInt(r *http.Request, key string, def int64) int64 {
 
 // ---------- vaults & enrolment ----------
 
-func (s *Server) createVault(w http.ResponseWriter, r *http.Request) {
-	v, err := s.st.CreateVault(r.Context())
+// redeemCreate turns a create link into a new vault with the caller as its
+// first device. Unauthenticated (the link is the credential), rate-limited,
+// one-time; a used, expired or unknown token is one and the same 401.
+func (s *Server) redeemCreate(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		PubKex  []byte `json:"pub_kex"`
+		NameEnc []byte `json:"name_enc"`
+	}
+	if err := readJSON(r, &body, 1<<16); err != nil {
+		writeErr(w, http.StatusBadRequest, "bad body")
+		return
+	}
+	out, err := s.st.RedeemCreateLink(r.Context(), r.PathValue("t"), body.PubKex, body.NameEnc)
 	if err != nil {
+		s.event(r, "create.redeem.failed")
 		s.fail(w, err)
 		return
 	}
-	s.event(r, "vault.created", "new_vault", v.ID)
-	writeJSON(w, http.StatusCreated, v)
-}
-
-func (s *Server) listVaults(w http.ResponseWriter, r *http.Request) {
-	vs, err := s.st.ListVaults(r.Context())
-	if err != nil {
-		s.fail(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"vaults": vs})
+	s.event(r, "vault.created", "vault", out.VaultID, "new_device", out.DeviceID)
+	writeJSON(w, http.StatusCreated, out)
 }
 
 func (s *Server) getVault(w http.ResponseWriter, r *http.Request) {
@@ -487,27 +480,11 @@ func (s *Server) createInvite(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, err)
 		return
 	}
-	// The admin bearer may mint an invite only for an empty vault (the first
-	// device's own enrolment). On a populated vault an admin-minted invite would
-	// plant a key-less device that the owner's next rotation could wrap keys to;
-	// the admin reaches no vault content and no device, by design (there is
-	// no delete route either; see server/README.md).
-	if dev(r) == nil {
-		n, err := s.st.LiveDeviceCount(r.Context(), r.PathValue("v"))
-		if err != nil {
-			s.fail(w, err)
-			return
-		}
-		if n > 0 {
-			writeErr(w, http.StatusForbidden, "admin invites are only for an empty vault; a member with the vault keys must invite")
-			return
-		}
-	}
-	var by store.Actor
-	if dev(r) != nil {
-		by = actor(r)
-	}
-	inv, err := s.st.CreateInvite(r.Context(), r.PathValue("v"), by, body.KeyboxEnc, ttl)
+	// Only a member with vault authority gets here: nobody else can add a
+	// device to a vault, so nobody can plant a key-less device for the
+	// owner's next rotation to wrap keys to (the operator included; there is
+	// no admin way into a vault, by design).
+	inv, err := s.st.CreateInvite(r.Context(), r.PathValue("v"), actor(r), body.KeyboxEnc, ttl)
 	if err != nil {
 		s.fail(w, err)
 		return
@@ -604,7 +581,8 @@ func (s *Server) putKeybox(w http.ResponseWriter, r *http.Request) {
 
 // registerAuth installs the vault authority hash: by the first device at
 // enrolment (idempotent for the matching token, refused once the vault has
-// more than one device), or by the admin for a vault that predates §5.8.
+// more than one device). A vault that predates §5.8 gets its hash from the
+// operator with `obsync vault auth` on the host; there is no HTTP route for it.
 func (s *Server) registerAuth(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Auth string `json:"auth"`
@@ -613,12 +591,7 @@ func (s *Server) registerAuth(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "bad body")
 		return
 	}
-	var err error
-	if d := dev(r); d != nil {
-		err = s.st.EnsureVaultAuth(r.Context(), r.PathValue("v"), d.ID, body.Auth)
-	} else {
-		err = s.st.SetVaultAuth(r.Context(), r.PathValue("v"), body.Auth)
-	}
+	err := s.st.EnsureVaultAuth(r.Context(), r.PathValue("v"), dev(r).ID, body.Auth)
 	if errors.Is(err, store.ErrConflict) {
 		// A token that does not match the installed one is a wrong guess at
 		// the authority token, charged like one: otherwise this route is an

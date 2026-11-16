@@ -10,7 +10,7 @@
  * LOW. Fails on HEAD (5a88779): 2 downloads where 1 is expected.
  */
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { TestServer, Device, ADMIN } from "./harness";
+import { TestServer, Device } from "./harness";
 import { createVault, createInviteLink, joinWithLink, type Session } from "../src/core/admin";
 
 let srv: TestServer;
@@ -33,7 +33,7 @@ async function putExisting(s: Session, path: string, blobId: string, size: numbe
 
 describe("applyBatch refcount: an op that is not counted still decrements", () => {
   it("one blob, already synced under copies/0.bin, new under five more names: downloaded twice", async () => {
-    const sa = await createVault(srv.url, ADMIN, "desktop");
+    const sa = await createVault(await srv.createLink(), "desktop");
     const sb = await joinWithLink(await createInviteLink(sa), "phone");
     const a = await new Device("desktop", sa).start();
     const b = await new Device("phone", sb).start();

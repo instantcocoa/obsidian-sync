@@ -71,26 +71,38 @@ bind low ports, so drop the two `CAP_NET_BIND_SERVICE` lines too.
 `https://sync.example.com/admin` mints create links from any browser after a
 sign-in with a security key (WebAuthn: a YubiKey over USB or NFC, or the
 platform's own authenticator), so you can create a vault from a phone with
-no shell at hand. Register a key with a one-time link from the host:
+no shell at hand. To anyone else the page does not exist: every path under
+`/admin` answers the same plain 404 as any unknown path until the browser
+has come in through a register link minted on the host:
 
 ```sh
 sudo ./obsync admin register --data /var/lib/obsync
-# prints  https://sync.example.com/admin/register#rg_…
+# prints  https://sync.example.com/admin/r/rg_…
 sudo ./obsync admin keys   --data /var/lib/obsync      # list
 sudo ./obsync admin remove --data /var/lib/obsync NAME # revoke one
+sudo ./obsync admin forget --data /var/lib/obsync      # every browser needs a new link
 ```
 
-Open the link, touch the key, give it a name. Register two keys so losing
-one does not lock you out of the page (the CLI always works). The server
-stores only each key's public key and counter: nothing on its disk signs in.
+Open the link in the browser you will use (Safari on the phone, say). The
+server checks the token before serving a byte, sets a ten-minute "door"
+cookie and redirects to `/admin`, so the token is out of the address bar at
+once. There you register a key (touch it, give it a name), or, if a key is
+registered already, sign in with it instead: either spends the link and
+gives that browser a year-long cookie, stored hashed, that lets it see the
+page again. Being known shows the sign-in button and nothing more. Register
+two keys so losing one does not lock you out of the page (the CLI always
+works). The server stores only each key's public key and counter: nothing
+on its disk signs in.
+
 A session lasts fifteen minutes in an HttpOnly, SameSite=Strict cookie
 scoped to `/admin`; the page sends no CORS header and a strict CSP, and
 every state-changing call checks `Origin`. A signed-in admin can list vaults
 (ids, device and op counts) and create new ones, nothing else: joining,
 reading or inviting into a vault takes the vault keys, which only devices
 hold. Adding or removing keys is CLI-only. The page needs `--public-url` to
-name a domain; with an IP address it stays off and says so, while links
-keep working. DESIGN.md §5.9 has the full rationale.
+name a domain; with an IP address it stays off (a 404 like everything else
+under `/admin`), while links keep working. DESIGN.md §5.9 has the full
+rationale.
 
 Every security-relevant event is one `security` line on stderr with the
 client address, the acting device or admin key, the vault and the outcome:
@@ -193,10 +205,11 @@ hex chars.
 | `GET` | `/v1/vaults/{v}/keybox` | rows addressed to the caller, epochs ≥ `min_epoch` |
 | `POST` | `/v1/vaults/{v}/keybox` | `{keybox:[{epoch, recipient_id, wrapped}]}` for epochs ≤ current; recipient must be the caller, or a recovery identity (insert-only, **authority**) |
 | `POST` | `/v1/vaults/{v}/auth` | `{auth:"va_…"}`. Installs the hash only on first enrolment (the caller is the vault's sole device); 204 when equal, 401 when different (charged to the failed-authentication limiter like any wrong authority token), 401 otherwise. Replacing it is CLI-only (`vault auth`). |
-| `GET` | `/admin/`, `/admin/register` | the admin page (HTML); 503 without `--public-url` |
-| `GET` | `/admin/api/state` | `{registered, logged_in, origin}` plus `vaults` and `keys` when signed in |
-| `POST` | `/admin/api/register/begin`, `…/finish` | WebAuthn registration against a register link (`{token}` → `{ceremony, options}`; `{token, ceremony, name, credential}` → `{name}`) |
-| `POST` | `/admin/api/login/begin`, `…/finish` | WebAuthn assertion (`{}` → `{ceremony, options}`; `{ceremony, credential}` → session cookie) |
+| `GET` | `/admin/r/{t}` | a live register link: sets the door cookie, 303 to `/admin/`; anything else 404 |
+| `GET` | `/admin/` | the admin page (HTML). Every `/admin` path is a plain 404 to a browser without a door, known or session cookie, and without `--public-url` |
+| `GET` | `/admin/api/state` | `{registered, logged_in, door, origin}` plus `vaults` and `keys` when signed in |
+| `POST` | `/admin/api/register/begin`, `…/finish` | WebAuthn registration against the register link behind the door cookie (`{}` → `{ceremony, options}`; `{ceremony, name, credential}` → `{name}`, known cookie set) |
+| `POST` | `/admin/api/login/begin`, `…/finish` | WebAuthn assertion (`{}` → `{ceremony, options}`; `{ceremony, credential}` → session cookie, known cookie set, a door's link spent) |
 | `POST` | `/admin/api/create-link` | session → `{link, open_url, qr_svg, expires_at}` |
 | `POST` | `/admin/api/logout` | ends the session |
 | `POST` | `/v1/vaults/{v}/rotate` | **authority**. `{epoch: cur+1, revoke:[ids], keybox:[rows], auth_next:"va_…"}`; atomic; must cover every remaining device |
@@ -227,7 +240,7 @@ route clamps `limit` to 5000.
 ## Layout
 
 ```
-cmd/obsync          CLI: serve, vault create|list|auth, admin register|keys|remove, gc
+cmd/obsync          CLI: serve, vault create|list|auth, admin register|keys|remove|forget, gc
 internal/store      SQLite schema and all queries (CAS lives in AppendOps; links.go: create/register links, security keys)
 internal/blobstore  sharded on-disk blobs, atomic temp+rename
 internal/api        HTTP handlers, CORS, long-poll hub, WebSocket, GC; admin.go + adminpage/: the security-key page

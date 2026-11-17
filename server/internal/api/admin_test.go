@@ -127,7 +127,7 @@ func TestLinkFormats(t *testing.T) {
 	if err != nil || u.Scheme != "obsidian" || u.Host != "obsync-join" || u.Query().Get("link") != link {
 		t.Fatalf("open url: %s (%v)", open, err)
 	}
-	if got := api.RegisterURL("https://sync.example.com/", "rg_x"); got != "https://sync.example.com/admin/register#rg_x" {
+	if got := api.RegisterURL("https://sync.example.com/", "rg_x"); got != "https://sync.example.com/admin/r/rg_x" {
 		t.Fatalf("register url: %s", got)
 	}
 }
@@ -172,13 +172,30 @@ func (e *env) adminDo(method, path string, body any, cookie string, hdr map[stri
 	return e.do(method, path, "", body, h)
 }
 
-func cookieOf(r resp) string {
+func cookieOf(r resp) string { return namedCookie(r, "obsync_admin") }
+
+func namedCookie(r resp, name string) string {
 	for _, c := range (&http.Response{Header: r.hdr}).Cookies() {
-		if c.Name == "obsync_admin" {
+		if c.Name == name {
 			return c.Value
 		}
 	}
 	return ""
+}
+
+// jar is the Cookie header a browser would send: session, door and known.
+func jar(sess, door, known string) string {
+	parts := []string{}
+	if sess != "" {
+		parts = append(parts, "obsync_admin="+sess)
+	}
+	if door != "" {
+		parts = append(parts, "obsync_admin_door="+door)
+	}
+	if known != "" {
+		parts = append(parts, "obsync_admin_known="+known)
+	}
+	return strings.Join(parts, "; ")
 }
 
 func (e *env) registerLink() string {
@@ -190,13 +207,64 @@ func (e *env) registerLink() string {
 	return l.Token
 }
 
+// openDoor follows a fresh register link the way a browser does and returns
+// the door cookie the redirect set.
+func (e *env) openDoor() string {
+	e.t.Helper()
+	e.noFollow = true
+	r := e.do("GET", "/admin/r/"+e.registerLink(), "", nil, nil)
+	e.noFollow = false
+	if r.code != 303 || r.hdr.Get("Location") != "/admin/" {
+		e.t.Fatalf("door: %d %v", r.code, r.hdr)
+	}
+	door := namedCookie(r, "obsync_admin_door")
+	if door == "" || !strings.Contains(r.hdr.Get("Set-Cookie"), "SameSite=Lax") {
+		e.t.Fatalf("door cookie: %s", r.hdr.Get("Set-Cookie"))
+	}
+	return door
+}
+
+// notFound checks a response is indistinguishable from any unknown path's.
+func notFound(t *testing.T, r resp) {
+	t.Helper()
+	if r.code != 404 || strings.TrimSpace(string(r.body)) != "404 page not found" || r.hdr.Get("Content-Security-Policy") != "" || r.hdr.Get("Set-Cookie") != "" || r.hdr.Get("Access-Control-Allow-Origin") != "*" {
+		t.Fatalf("not a plain 404: %d %q %v", r.code, r.body, r.hdr)
+	}
+}
+
 func TestAdminPageOffWithoutPublicURL(t *testing.T) {
 	e := newEnv(t)
-	if r := e.do("GET", "/admin/", "", nil, nil); r.code != 503 || !strings.Contains(string(r.body), "--public-url") {
-		t.Fatalf("page without --public-url: %d %s", r.code, r.body)
+	notFound(t, e.do("GET", "/admin/", "", nil, nil))
+	notFound(t, e.adminDo("POST", "/admin/api/login/begin", nil, "", nil))
+	notFound(t, e.adminDo("GET", "/admin/api/state", nil, "", nil))
+}
+
+// A stranger sees nothing under /admin: not the page, not its assets, not
+// the API, not a wrong register link, not a wrong method on the right path.
+// Every answer is the 404 any unknown path gets, headers included.
+func TestAdminHiddenFromStrangers(t *testing.T) {
+	e := adminEnv(t)
+	for _, p := range []string{"/admin", "/admin/", "/admin/app.js", "/admin/app.css", "/admin/api/state", "/admin/r/rg_nope", "/admin/r/" + e.registerLink()[3:], "/admin/register", "/admin/nothing"} {
+		notFound(t, e.do("GET", p, "", nil, nil))
 	}
-	e.adminDo("POST", "/admin/api/login/begin", nil, "", nil).expect(t, 503)
-	e.adminDo("GET", "/admin/api/state", nil, "", nil).expect(t, 503)
+	notFound(t, e.adminDo("POST", "/admin/api/login/begin", nil, "", nil))
+	notFound(t, e.adminDo("POST", "/admin/api/register/begin", map[string]any{}, "", nil))
+	notFound(t, e.adminDo("POST", "/admin/api/create-link", nil, "", nil))
+	notFound(t, e.adminDo("POST", "/admin/api/create-link", nil, "forged-session", nil))
+	notFound(t, e.do("POST", "/admin/r/"+e.registerLink(), "", nil, nil))
+	notFound(t, e.do("GET", "/admin/", "", nil, map[string]string{"Cookie": jar("", "forged-door", "forged-known")}))
+	// The same 404 the device API gives for a path it has never heard of.
+	notFound(t, e.do("GET", "/v1/nothing", "", nil, nil))
+	// A spent link is a 404 too.
+	door := e.openDoor()
+	key := newSoftKey(t, adminOrigin(e.ts.URL))
+	var begin struct {
+		Ceremony string          `json:"ceremony"`
+		Options  json.RawMessage `json:"options"`
+	}
+	e.adminDo("POST", "/admin/api/register/begin", map[string]any{}, "", map[string]string{"Cookie": jar("", door, "")}).expect(t, 200).json(t, &begin)
+	e.adminDo("POST", "/admin/api/register/finish", map[string]any{"ceremony": begin.Ceremony, "name": "k", "credential": key.attest(t, begin.Options)}, "", map[string]string{"Cookie": jar("", door, "")}).expect(t, 201)
+	notFound(t, e.do("GET", "/admin/", "", nil, map[string]string{"Cookie": jar("", door, "")}))
 }
 
 // An IP-address public URL (LAN or test deployment) keeps links working but
@@ -209,13 +277,15 @@ func TestAdminPageOffForIPPublicURL(t *testing.T) {
 	ts := httptest.NewServer(srv)
 	t.Cleanup(func() { ts.Close(); st.Close() })
 	e := &env{t: t, ts: ts, srv: srv, st: st}
-	e.do("GET", "/admin/", "", nil, nil).expect(t, 503)
+	notFound(t, e.do("GET", "/admin/", "", nil, nil))
+	notFound(t, e.do("GET", "/admin/r/"+e.registerLink(), "", nil, nil))
 	e.newVault() // create links still redeem
 }
 
 func TestAdminPageHeaders(t *testing.T) {
 	e := adminEnv(t)
-	r := e.do("GET", "/admin/", "", nil, map[string]string{"Origin": "https://evil.example"})
+	door := e.openDoor()
+	r := e.do("GET", "/admin/", "", nil, map[string]string{"Origin": "https://evil.example", "Cookie": jar("", door, "")})
 	r.expect(t, 200)
 	if !strings.Contains(string(r.body), "<title>obsync admin</title>") {
 		t.Fatalf("not the page: %.100s", r.body)
@@ -232,8 +302,8 @@ func TestAdminPageHeaders(t *testing.T) {
 	if r.hdr.Get("Cache-Control") != "no-store" || r.hdr.Get("X-Content-Type-Options") != "nosniff" {
 		t.Fatalf("headers: %v", r.hdr)
 	}
-	for _, p := range []string{"/admin/app.js", "/admin/app.css", "/admin/register"} {
-		e.do("GET", p, "", nil, nil).expect(t, 200)
+	for _, p := range []string{"/admin/app.js", "/admin/app.css"} {
+		e.do("GET", p, "", nil, map[string]string{"Cookie": jar("", door, "")}).expect(t, 200)
 	}
 	// Device routes still carry CORS for Obsidian's app:// origin.
 	if h := e.do("GET", "/healthz", "", nil, nil); h.hdr.Get("Access-Control-Allow-Origin") != "*" {
@@ -243,53 +313,65 @@ func TestAdminPageHeaders(t *testing.T) {
 
 func TestAdminRegisterLoginCreate(t *testing.T) {
 	e := adminEnv(t)
+	// Through the door: the page shows, the state says so, nothing to sign in with yet.
+	door := e.openDoor()
+	at := func(door, known string) map[string]string { return map[string]string{"Cookie": jar("", door, known)} }
 	var st map[string]any
-	e.adminDo("GET", "/admin/api/state", nil, "", nil).expect(t, 200).json(t, &st)
-	if st["registered"] != false || st["logged_in"] != false {
+	e.adminDo("GET", "/admin/api/state", nil, "", at(door, "")).expect(t, 200).json(t, &st)
+	if st["registered"] != false || st["logged_in"] != false || st["door"] != true {
 		t.Fatalf("state: %v", st)
 	}
-	// Nothing to sign in with yet.
-	e.adminDo("POST", "/admin/api/login/begin", nil, "", nil).expect(t, 409)
-	// A bad register link gets nowhere.
-	e.adminDo("POST", "/admin/api/register/begin", map[string]any{"token": "rg_nope"}, "", nil).expect(t, 401)
+	e.adminDo("POST", "/admin/api/login/begin", nil, "", at(door, "")).expect(t, 409)
 
 	// Register: begin, authenticator creates, finish.
 	key := newSoftKey(t, adminOrigin(e.ts.URL))
-	rg := e.registerLink()
 	var begin struct {
 		Ceremony string          `json:"ceremony"`
 		Options  json.RawMessage `json:"options"`
 	}
-	e.adminDo("POST", "/admin/api/register/begin", map[string]any{"token": rg}, "", nil).expect(t, 200).json(t, &begin)
+	e.adminDo("POST", "/admin/api/register/begin", map[string]any{}, "", at(door, "")).expect(t, 200).json(t, &begin)
 	att := key.attest(t, begin.Options)
 	// The wrong ceremony id is a failed authentication; the link survives.
-	e.adminDo("POST", "/admin/api/register/finish", map[string]any{"token": rg, "ceremony": "bogus", "name": "k", "credential": att}, "", nil).expect(t, 401)
+	e.adminDo("POST", "/admin/api/register/finish", map[string]any{"ceremony": "bogus", "name": "k", "credential": att}, "", at(door, "")).expect(t, 401)
 	// Begin again (the ceremony above was consumed by the failed finish).
-	e.adminDo("POST", "/admin/api/register/begin", map[string]any{"token": rg}, "", nil).expect(t, 200).json(t, &begin)
+	e.adminDo("POST", "/admin/api/register/begin", map[string]any{}, "", at(door, "")).expect(t, 200).json(t, &begin)
 	att = key.attest(t, begin.Options)
 	var reg map[string]any
-	e.adminDo("POST", "/admin/api/register/finish", map[string]any{"token": rg, "ceremony": begin.Ceremony, "name": "yubikey 5", "credential": att}, "", nil).expect(t, 201).json(t, &reg)
+	r := e.adminDo("POST", "/admin/api/register/finish", map[string]any{"ceremony": begin.Ceremony, "name": "yubikey 5", "credential": att}, "", at(door, "")).expect(t, 201)
+	r.json(t, &reg)
 	if reg["name"] != "yubikey 5" {
 		t.Fatalf("register: %v", reg)
 	}
-	// The link is spent.
-	e.adminDo("POST", "/admin/api/register/begin", map[string]any{"token": rg}, "", nil).expect(t, 401)
+	// The browser is now known (a long-lived cookie, hashed on the server) and the door is closed.
+	known := namedCookie(r, "obsync_admin_known")
+	if known == "" || !strings.Contains(r.hdr.Get("Set-Cookie"), "Max-Age=31536000") {
+		t.Fatalf("known cookie: %v", r.hdr.Values("Set-Cookie"))
+	}
+	// The link and the door are spent.
+	e.adminDo("POST", "/admin/api/register/begin", map[string]any{}, "", at(door, known)).expect(t, 401)
+	notFound(t, e.do("GET", "/admin/", "", nil, at(door, "")))
 	keys, _ := e.st.ListAdminCredentials(context.Background())
 	if len(keys) != 1 || keys[0].Name != "yubikey 5" || !bytes.Equal(keys[0].ID, key.id) {
 		t.Fatalf("stored keys: %+v", keys)
 	}
+	// Known: the page shows with a sign-in button; no door, no session.
+	e.do("GET", "/admin/", "", nil, at("", known)).expect(t, 200)
+	e.adminDo("GET", "/admin/api/state", nil, "", at("", known)).expect(t, 200).json(t, &st)
+	if st["registered"] != true || st["logged_in"] != false || st["door"] != false || st["vaults"] != nil {
+		t.Fatalf("state: %v", st)
+	}
 
 	// Not signed in: no link.
-	e.adminDo("POST", "/admin/api/create-link", nil, "", nil).expect(t, 401)
-	e.adminDo("POST", "/admin/api/create-link", nil, "not-a-session", nil).expect(t, 401)
+	e.adminDo("POST", "/admin/api/create-link", nil, "", at("", known)).expect(t, 401)
+	e.adminDo("POST", "/admin/api/create-link", nil, "not-a-session", at("", known)).expect(t, 401)
 
 	// Sign in with a different key: refused.
 	stranger := newSoftKey(t, adminOrigin(e.ts.URL))
-	e.adminDo("POST", "/admin/api/login/begin", nil, "", nil).expect(t, 200).json(t, &begin)
-	e.adminDo("POST", "/admin/api/login/finish", map[string]any{"ceremony": begin.Ceremony, "credential": stranger.assertWithID(t, begin.Options, key.id)}, "", nil).expect(t, 401)
+	e.adminDo("POST", "/admin/api/login/begin", nil, "", at("", known)).expect(t, 200).json(t, &begin)
+	e.adminDo("POST", "/admin/api/login/finish", map[string]any{"ceremony": begin.Ceremony, "credential": stranger.assertWithID(t, begin.Options, key.id)}, "", at("", known)).expect(t, 401)
 
 	// Sign in with the registered key.
-	e.adminDo("POST", "/admin/api/login/begin", nil, "", nil).expect(t, 200).json(t, &begin)
+	e.adminDo("POST", "/admin/api/login/begin", nil, "", at("", known)).expect(t, 200).json(t, &begin)
 	// allowCredentials names the registered key, nothing else.
 	var opts struct {
 		PublicKey struct {
@@ -305,7 +387,7 @@ func TestAdminRegisterLoginCreate(t *testing.T) {
 	}
 	// A replayed ceremony id (same options signed twice) is refused after the first use.
 	asr := key.assert(t, begin.Options)
-	r := e.adminDo("POST", "/admin/api/login/finish", map[string]any{"ceremony": begin.Ceremony, "credential": asr}, "", nil).expect(t, 200)
+	r = e.adminDo("POST", "/admin/api/login/finish", map[string]any{"ceremony": begin.Ceremony, "credential": asr}, "", at("", known)).expect(t, 200)
 	sess := cookieOf(r)
 	if sess == "" {
 		t.Fatal("no session cookie")
@@ -316,7 +398,10 @@ func TestAdminRegisterLoginCreate(t *testing.T) {
 			t.Fatalf("cookie attributes: %s", raw)
 		}
 	}
-	e.adminDo("POST", "/admin/api/login/finish", map[string]any{"ceremony": begin.Ceremony, "credential": asr}, "", nil).expect(t, 401)
+	if namedCookie(r, "obsync_admin_known") != "" {
+		t.Fatal("a known browser was given a second known cookie")
+	}
+	e.adminDo("POST", "/admin/api/login/finish", map[string]any{"ceremony": begin.Ceremony, "credential": asr}, "", at("", known)).expect(t, 401)
 
 	// Signed in: state shows vaults and keys; a link can be minted.
 	e.adminDo("GET", "/admin/api/state", nil, sess, nil).expect(t, 200).json(t, &st)
@@ -350,20 +435,43 @@ func TestAdminRegisterLoginCreate(t *testing.T) {
 	e.do("POST", "/admin/api/create-link", "", nil, map[string]string{"Cookie": "obsync_admin=" + sess}).expect(t, 403)
 
 	// The session cannot register a key: that takes a register link from the host.
-	e.adminDo("POST", "/admin/api/register/begin", map[string]any{"token": "rg_nope"}, sess, nil).expect(t, 401)
+	e.adminDo("POST", "/admin/api/register/begin", map[string]any{}, sess, nil).expect(t, 401)
 
-	// Sign out ends the session.
+	// Sign out ends the session; the browser stays known (sign-in button, no 404).
 	e.adminDo("POST", "/admin/api/logout", nil, sess, nil).expect(t, 204)
-	e.adminDo("POST", "/admin/api/create-link", nil, sess, nil).expect(t, 401)
+	// A dead session alone is a stranger (404); with its known cookie, as a
+	// real browser sends it, the page is there and the session is gone (401).
+	notFound(t, e.adminDo("POST", "/admin/api/create-link", nil, sess, nil))
+	e.adminDo("POST", "/admin/api/create-link", nil, "", map[string]string{"Cookie": jar(sess, "", known)}).expect(t, 401)
+	e.do("GET", "/admin/", "", nil, at("", known)).expect(t, 200)
 
 	// A cloned key (counter went backwards) is refused on sign-in.
-	e.adminDo("POST", "/admin/api/login/begin", nil, "", nil).expect(t, 200).json(t, &begin)
+	e.adminDo("POST", "/admin/api/login/begin", nil, "", at("", known)).expect(t, 200).json(t, &begin)
 	key.counter = 0
-	e.adminDo("POST", "/admin/api/login/finish", map[string]any{"ceremony": begin.Ceremony, "credential": key.assert(t, begin.Options)}, "", nil).expect(t, 401)
+	e.adminDo("POST", "/admin/api/login/finish", map[string]any{"ceremony": begin.Ceremony, "credential": key.assert(t, begin.Options)}, "", at("", known)).expect(t, 401)
+
+	// A second browser (no cookies) comes in through a new link. It may sign
+	// in with the existing key instead of adding one; that spends the link
+	// and makes it known too.
+	door2 := e.openDoor()
+	e.adminDo("GET", "/admin/api/state", nil, "", at(door2, "")).expect(t, 200).json(t, &st)
+	if st["registered"] != true || st["door"] != true {
+		t.Fatalf("second browser state: %v", st)
+	}
+	key.counter = 10
+	e.adminDo("POST", "/admin/api/login/begin", nil, "", at(door2, "")).expect(t, 200).json(t, &begin)
+	r = e.adminDo("POST", "/admin/api/login/finish", map[string]any{"ceremony": begin.Ceremony, "credential": key.assert(t, begin.Options)}, "", at(door2, "")).expect(t, 200)
+	known2 := namedCookie(r, "obsync_admin_known")
+	if known2 == "" || cookieOf(r) == "" {
+		t.Fatalf("second browser cookies: %v", r.hdr.Values("Set-Cookie"))
+	}
+	notFound(t, e.do("GET", "/admin/", "", nil, at(door2, "")))
+	e.do("GET", "/admin/", "", nil, at("", known2)).expect(t, 200)
 
 	// Registering the same key again is excluded by the options the page gets.
-	rg2 := e.registerLink()
-	e.adminDo("POST", "/admin/api/register/begin", map[string]any{"token": rg2}, "", nil).expect(t, 200).json(t, &begin)
+	// (The first browser follows this link, so it sends its known cookie too.)
+	door3 := e.openDoor()
+	e.adminDo("POST", "/admin/api/register/begin", map[string]any{}, "", at(door3, known)).expect(t, 200).json(t, &begin)
 	var creation struct {
 		PublicKey struct {
 			Exclude []struct {
@@ -381,7 +489,10 @@ func TestAdminRegisterLoginCreate(t *testing.T) {
 	}
 	// A second key registers fine and the first can be removed by name.
 	second := newSoftKey(t, adminOrigin(e.ts.URL))
-	e.adminDo("POST", "/admin/api/register/finish", map[string]any{"token": rg2, "ceremony": begin.Ceremony, "name": "", "credential": second.attest(t, begin.Options)}, "", nil).expect(t, 201)
+	r = e.adminDo("POST", "/admin/api/register/finish", map[string]any{"ceremony": begin.Ceremony, "name": "", "credential": second.attest(t, begin.Options)}, "", at(door3, known)).expect(t, 201)
+	if namedCookie(r, "obsync_admin_known") != "" {
+		t.Fatal("an already known browser got a second known cookie on register")
+	}
 	keys, _ = e.st.ListAdminCredentials(context.Background())
 	if len(keys) != 2 || !strings.HasPrefix(keys[1].Name, "security key ") {
 		t.Fatalf("keys: %+v", keys)
@@ -392,8 +503,37 @@ func TestAdminRegisterLoginCreate(t *testing.T) {
 	if err := e.st.RemoveAdminCredential(context.Background(), "yubikey 5"); err == nil {
 		t.Fatal("removed twice")
 	}
-	e.adminDo("POST", "/admin/api/login/begin", nil, "", nil).expect(t, 200).json(t, &begin)
-	e.adminDo("POST", "/admin/api/login/finish", map[string]any{"ceremony": begin.Ceremony, "credential": second.assert(t, begin.Options)}, "", nil).expect(t, 200)
+	e.adminDo("POST", "/admin/api/login/begin", nil, "", at("", known)).expect(t, 200).json(t, &begin)
+	e.adminDo("POST", "/admin/api/login/finish", map[string]any{"ceremony": begin.Ceremony, "credential": second.assert(t, begin.Options)}, "", at("", known)).expect(t, 200)
+
+	// Forgetting browsers on the host makes them all strangers again.
+	if n, err := e.st.ForgetAdminBrowsers(context.Background()); err != nil || n != 2 {
+		t.Fatalf("forget: %d %v", n, err)
+	}
+	notFound(t, e.do("GET", "/admin/", "", nil, at("", known)))
+	notFound(t, e.do("GET", "/admin/", "", nil, at("", known2)))
+}
+
+// The known-browser table is bounded: the oldest entry goes.
+func TestAdminBrowserCap(t *testing.T) {
+	e := adminEnv(t)
+	ctx := context.Background()
+	first := bytes.Repeat([]byte{1}, 32)
+	if err := e.st.AddAdminBrowser(ctx, first); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < store.MaxAdminBrowsers; i++ {
+		h := bytes.Repeat([]byte{byte(i + 2)}, 32)
+		if err := e.st.AddAdminBrowser(ctx, h); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if ok, _ := e.st.AdminBrowserKnown(ctx, first); ok {
+		t.Fatal("oldest browser survived the cap")
+	}
+	if ok, _ := e.st.AdminBrowserKnown(ctx, bytes.Repeat([]byte{byte(store.MaxAdminBrowsers + 1)}, 32)); !ok {
+		t.Fatal("newest browser missing")
+	}
 }
 
 // A wrong origin inside the signed client data (a phishing page proxying the
@@ -401,17 +541,16 @@ func TestAdminRegisterLoginCreate(t *testing.T) {
 func TestAdminPhishedOriginFails(t *testing.T) {
 	e := adminEnv(t)
 	key := newSoftKey(t, "https://sync.owner.example.evil.example")
-	rg := e.registerLink()
+	door := e.openDoor()
+	hdr := map[string]string{"Cookie": jar("", door, "")}
 	var begin struct {
 		Ceremony string          `json:"ceremony"`
 		Options  json.RawMessage `json:"options"`
 	}
-	e.adminDo("POST", "/admin/api/register/begin", map[string]any{"token": rg}, "", nil).expect(t, 200).json(t, &begin)
-	e.adminDo("POST", "/admin/api/register/finish", map[string]any{"token": rg, "ceremony": begin.Ceremony, "name": "k", "credential": key.attest(t, begin.Options)}, "", nil).expect(t, 401)
-	// The link is still usable by the real page.
-	if err := e.st.PeekLink(context.Background(), rg, store.LinkRegister); err != nil {
-		t.Fatal("link spent by a failed registration")
-	}
+	e.adminDo("POST", "/admin/api/register/begin", map[string]any{}, "", hdr).expect(t, 200).json(t, &begin)
+	e.adminDo("POST", "/admin/api/register/finish", map[string]any{"ceremony": begin.Ceremony, "name": "k", "credential": key.attest(t, begin.Options)}, "", hdr).expect(t, 401)
+	// The link is still usable by the real page: the door is open and begin works again.
+	e.adminDo("POST", "/admin/api/register/begin", map[string]any{}, "", hdr).expect(t, 200)
 }
 
 // ---------- a software security key ----------

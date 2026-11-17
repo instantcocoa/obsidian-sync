@@ -42,10 +42,11 @@ func authHdr(vault string) map[string]string {
 func newAuthTok() string { return "va_" + hex.EncodeToString(randBytes(16)) }
 
 type env struct {
-	t   *testing.T
-	ts  *httptest.Server
-	srv *api.Server
-	st  *store.Store
+	t        *testing.T
+	ts       *httptest.Server
+	srv      *api.Server
+	st       *store.Store
+	noFollow bool // return redirects instead of following them (admin door tests)
 }
 
 func newEnv(t *testing.T) *env {
@@ -73,6 +74,15 @@ type resp struct {
 	hdr  http.Header
 }
 
+// client is http.DefaultClient unless the test asked to see redirects
+// (noFollow), as a browser's network tab would show a 303 and its cookies.
+func (e *env) client() *http.Client {
+	if e.noFollow {
+		return &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	}
+	return http.DefaultClient
+}
+
 func (e *env) do(method, path, token string, body any, hdr map[string]string) resp {
 	e.t.Helper()
 	var r io.Reader
@@ -94,7 +104,7 @@ func (e *env) do(method, path, token string, body any, hdr map[string]string) re
 	for k, v := range hdr {
 		req.Header.Set(k, v)
 	}
-	res, err := http.DefaultClient.Do(req)
+	res, err := e.client().Do(req)
 	if err != nil {
 		e.t.Fatal(err)
 	}

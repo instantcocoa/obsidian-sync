@@ -3,8 +3,8 @@
 //	obsync serve  --data DIR --public-url https://sync.example.com [--listen 127.0.0.1:8080 | --acme-domain sync.example.com]
 //	obsync vault create --data DIR          one-time create link (+ QR) for a new vault's first device
 //	obsync vault list   --data DIR
-//	obsync admin register --data DIR        one-time link that registers a security key for /admin
-//	obsync admin keys|remove --data DIR
+//	obsync admin register --data DIR        one-time link that opens /admin in a browser to register a security key
+//	obsync admin keys|remove|forget --data DIR
 //	obsync gc           --data DIR [--retention 2160h]
 //
 // There is no admin token. Creating a vault takes a create link, minted here
@@ -71,9 +71,10 @@ usage:
   obsync vault create   --data DIR [--url https://host] [--ttl 1h]   print a one-time create link and its QR code
   obsync vault list     --data DIR
   obsync vault auth     --data DIR VAULT_ID va_TOKEN                 (migrate a pre-authority vault)
-  obsync admin register --data DIR [--url https://host] [--ttl 1h]   print a one-time link that registers a security key
+  obsync admin register --data DIR [--url https://host] [--ttl 1h]   print a one-time link that opens /admin in a browser, to register a security key or sign in
   obsync admin keys     --data DIR
   obsync admin remove   --data DIR NAME
+  obsync admin forget   --data DIR          every browser needs a fresh register link to see /admin again
   obsync gc             --data DIR [--retention 2160h]
 
 Run the vault and admin commands on the server host, as root (sudo) or as
@@ -289,7 +290,7 @@ func vault(args []string) error {
 // adminCmd manages the security keys that may sign in to /admin.
 func adminCmd(args []string) error {
 	if len(args) < 1 {
-		return errors.New("admin register|keys|remove")
+		return errors.New("admin register|keys|remove|forget")
 	}
 	fs := flag.NewFlagSet("admin", flag.ExitOnError)
 	data := fs.String("data", "", "data directory")
@@ -313,7 +314,8 @@ func adminCmd(args []string) error {
 			return err
 		}
 		fmt.Printf("Open this in a browser with your security key at hand (valid until %s, single use):\n\n  %s\n\n", time.UnixMilli(l.ExpiresAt).Format(time.RFC1123), api.RegisterURL(server, l.Token))
-		fmt.Println("The browser asks you to touch the key; give it a name you will recognise. Register a second key the same way, so losing one does not lock you out of the page (the CLI always works).")
+		fmt.Println("The page asks you to touch the key; give it a name you will recognise. If a key is registered already, the page also offers to sign in with it, which lets this browser in without adding a key. To anyone without such a link, /admin is a 404.")
+		fmt.Println("Register a second key the same way, so losing one does not lock you out of the page (the CLI always works).")
 	case "keys":
 		keys, err := st.ListAdminCredentials(ctx)
 		if err != nil {
@@ -338,8 +340,14 @@ func adminCmd(args []string) error {
 			return err
 		}
 		fmt.Println("removed; any open admin session ends when the server restarts or its 15 minutes run out")
+	case "forget":
+		n, err := st.ForgetAdminBrowsers(ctx)
+		if err != nil {
+			return err
+		}
+		fmt.Printf("forgot %d browser(s); /admin is a 404 to every browser until it follows a new register link\n", n)
 	default:
-		return errors.New("admin register|keys|remove")
+		return errors.New("admin register|keys|remove|forget")
 	}
 	return nil
 }

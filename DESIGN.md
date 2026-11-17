@@ -842,11 +842,22 @@ Two ways to mint one, both proving "I am the operator" without a shared secret:
 2. **The admin page**, `https://<server>/admin`, for the operator away from
    a shell (an iPhone, say). It is a small same-origin app served by the
    binary and authenticated with WebAuthn: a roaming security key such as a
-   YubiKey over USB or NFC, or a platform authenticator. Registration needs
-   a **register link** (`rg_`, same shape and lifetime as a create link)
-   printed by `obsync admin register` on the host; the browser's
-   `navigator.credentials.create()` answers it and the server stores the
-   credential's public key, id and signature counter. Sign-in is an
+   YubiKey over USB or NFC, or a platform authenticator. To any browser the
+   server does not know, the page does not exist: every path under `/admin`
+   answers the plain 404 any unknown path gets, same body and headers, so
+   a scanner learns nothing. A browser is let in by a **register link**
+   (`rg_`, same lifetime and storage as a create link) printed by
+   `obsync admin register` on the host. It lands on `GET /admin/r/{t}`: the
+   server checks the token before serving a byte, sets a ten-minute,
+   HttpOnly, SameSite=Lax "door" cookie carrying the link and redirects to
+   `/admin/`, so the token leaves the address bar at once and never reaches
+   the page's script. Behind the door the browser registers a key (the
+   browser's `navigator.credentials.create()` answers; the server stores
+   the credential's public key, id and signature counter) or, if a key
+   exists already, signs in with it instead. Either spends the link and
+   marks the browser **known**: a year-long cookie whose SHA-256 the server
+   keeps (at most twenty; `obsync admin forget` clears them). Being known
+   shows the sign-in button and nothing more. Sign-in is an
    assertion over a fresh server challenge, verified against the stored
    public key, the relying-party id (the host of `--public-url`) and the
    origin, with the counter required to increase (a clone is refused).
@@ -862,7 +873,8 @@ disk and backups contain nothing that signs in, mints a link or opens a
 vault. The page is off unless `--public-url` names a domain (WebAuthn binds
 to a domain, not an address), and it sends no CORS header and a CSP that
 allows only its own script, so Obsidian's wildcard-CORS device API and the
-cookie never meet. `GET /admin` is the only HTML the server serves.
+cookie never meet. `GET /admin/` is the only HTML the server serves, and
+only to a browser it knows.
 
 ---
 

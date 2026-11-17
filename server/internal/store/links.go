@@ -16,8 +16,8 @@ import (
 //
 //   - A create link (`cr_`) lets exactly one device create one new vault and
 //     become its first member. It cannot touch any existing vault.
-//   - A register link (`rg_`) lets one browser register one security key as
-//     an admin credential.
+//   - A register link (`rg_`) opens the admin page in one browser, where it
+//     registers one security key, or signs in with one it already has.
 //
 // Both are stored hashed, like every other token, and bounded in number so
 // a forgotten loop cannot fill the table.
@@ -247,4 +247,52 @@ func (s *Store) RemoveAdminCredential(ctx context.Context, name string) error {
 // isUnique reports a UNIQUE constraint violation from the SQLite driver.
 func isUnique(err error) bool {
 	return err != nil && strings.Contains(err.Error(), "UNIQUE constraint failed")
+}
+
+// ---------- known browsers ----------
+
+// The admin page answers a plain 404 to any browser it does not know, so a
+// scanner sees the same thing at /admin as at any other path (DESIGN.md
+// §5.9). A browser becomes known by finishing a ceremony it reached through
+// a register link; what the server keeps is the SHA-256 of a random cookie
+// value, which lets it see the page and nothing else: signing in still takes
+// the key.
+
+// MaxAdminBrowsers bounds the table; the oldest entry goes when it is full.
+const MaxAdminBrowsers = 20
+
+func (s *Store) AddAdminBrowser(ctx context.Context, hash []byte) error {
+	if len(hash) != 32 {
+		return fmt.Errorf("%w: bad browser hash", ErrBadRequest)
+	}
+	return s.writeTx(ctx, func(tx *sql.Tx) error {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM admin_browsers WHERE hash NOT IN (SELECT hash FROM admin_browsers ORDER BY created_at DESC, rowid DESC LIMIT ?)`, MaxAdminBrowsers-1); err != nil {
+			return err
+		}
+		_, err := tx.ExecContext(ctx, `INSERT OR REPLACE INTO admin_browsers(hash, created_at) VALUES(?,?)`, hash, now())
+		return err
+	})
+}
+
+func (s *Store) AdminBrowserKnown(ctx context.Context, hash []byte) (bool, error) {
+	var n int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM admin_browsers WHERE hash=?`, hash).Scan(&n); err != nil {
+		return false, err
+	}
+	return n > 0, nil
+}
+
+// ForgetAdminBrowsers makes every browser a stranger again; each needs a new
+// register link to see the page. Sessions and keys are untouched.
+func (s *Store) ForgetAdminBrowsers(ctx context.Context) (int64, error) {
+	var n int64
+	err := s.writeTx(ctx, func(tx *sql.Tx) error {
+		res, err := tx.ExecContext(ctx, `DELETE FROM admin_browsers`)
+		if err != nil {
+			return err
+		}
+		n, _ = res.RowsAffected()
+		return nil
+	})
+	return n, err
 }

@@ -12,6 +12,13 @@ package api
 //
 // Registering a key needs a register link minted on the host
 // (`obsync admin register`), so a stolen admin session cannot add a key.
+//
+// To anyone else the page does not exist: every /admin path answers the
+// same plain 404 as any unknown path unless the browser is known. A browser
+// becomes known by arriving through a register link (GET /admin/r/{t} sets a
+// short-lived "door" cookie and redirects to the page) and finishing a
+// ceremony there, after which a long-lived cookie, stored hashed, marks it.
+// Being known shows the sign-in button and nothing more.
 
 import (
 	"bytes"
@@ -45,7 +52,12 @@ var errAdminNeedsDomain = errors.New("the admin page needs --public-url to name 
 
 const (
 	adminCookie        = "obsync_admin"
+	adminKnownCookie   = "obsync_admin_known" // this browser has finished a ceremony here; shows the page
+	adminDoorCookie    = "obsync_admin_door"  // this browser arrived through a live register link
 	adminSessionTTL    = 15 * time.Minute
+	adminDoorTTL       = 10 * time.Minute
+	adminKnownTTL      = 365 * 24 * time.Hour
+	maxAdminDoors      = 100
 	adminCeremonyTTL   = 5 * time.Minute
 	adminRegisterTTL   = time.Hour // how long a register link minted by the CLI lives (the CLI may shorten it)
 	maxPendingCeremony = 1000      // begin() calls without a finish(), across all clients
@@ -62,6 +74,13 @@ type adminSession struct {
 	expires time.Time
 }
 
+// adminDoor is a browser that followed a register link and has not yet
+// registered or signed in; it carries the link so the page need not.
+type adminDoor struct {
+	token   string
+	expires time.Time
+}
+
 type admin struct {
 	wa        *webauthn.WebAuthn
 	origin    string // canonical PublicURL, scheme://host[:port]
@@ -69,6 +88,7 @@ type admin struct {
 	mu        sync.Mutex
 	ceremonie map[string]adminCeremony // ceremony id → pending WebAuthn session
 	sessions  map[[32]byte]adminSession
+	doors     map[[32]byte]adminDoor
 }
 
 // adminUser is the single admin account every registered key belongs to.
@@ -113,22 +133,25 @@ func newAdmin(publicURL string) (*admin, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &admin{wa: wa, origin: origin, secure: u.Scheme == "https", ceremonie: map[string]adminCeremony{}, sessions: map[[32]byte]adminSession{}}, nil
+	return &admin{wa: wa, origin: origin, secure: u.Scheme == "https", ceremonie: map[string]adminCeremony{}, sessions: map[[32]byte]adminSession{}, doors: map[[32]byte]adminDoor{}}, nil
 }
 
+// adminRoutes are reached only through ServeHTTP's gate (adminVisible): a
+// request that gets here has a live door, a known-browser cookie or a
+// session, or is the door itself.
 func (s *Server) adminRoutes() {
 	m := s.mux
 	m.HandleFunc("GET /admin/{$}", s.adminStatic("adminpage/index.html", "text/html; charset=utf-8"))
-	m.HandleFunc("GET /admin/register", s.adminStatic("adminpage/index.html", "text/html; charset=utf-8"))
 	m.HandleFunc("GET /admin/app.js", s.adminStatic("adminpage/app.js", "text/javascript; charset=utf-8"))
 	m.HandleFunc("GET /admin/app.css", s.adminStatic("adminpage/app.css", "text/css; charset=utf-8"))
-	m.HandleFunc("GET /admin/api/state", s.adminEnabled(s.adminState))
-	m.HandleFunc("POST /admin/api/register/begin", s.adminEnabled(s.sameOrigin(s.limited(s.adminRegisterBegin))))
-	m.HandleFunc("POST /admin/api/register/finish", s.adminEnabled(s.sameOrigin(s.limited(s.adminRegisterFinish))))
-	m.HandleFunc("POST /admin/api/login/begin", s.adminEnabled(s.sameOrigin(s.limited(s.adminLoginBegin))))
-	m.HandleFunc("POST /admin/api/login/finish", s.adminEnabled(s.sameOrigin(s.limited(s.adminLoginFinish))))
-	m.HandleFunc("POST /admin/api/logout", s.adminEnabled(s.sameOrigin(s.adminLogout)))
-	m.HandleFunc("POST /admin/api/create-link", s.adminEnabled(s.sameOrigin(s.adminSessionRequired(s.adminCreateLink))))
+	m.HandleFunc("GET /admin/r/{t}", s.adminOpenDoor) // not rate-limited: a 429 would say the path exists, and the token is 256 bits
+	m.HandleFunc("GET /admin/api/state", s.adminState)
+	m.HandleFunc("POST /admin/api/register/begin", s.sameOrigin(s.limited(s.adminRegisterBegin)))
+	m.HandleFunc("POST /admin/api/register/finish", s.sameOrigin(s.limited(s.adminRegisterFinish)))
+	m.HandleFunc("POST /admin/api/login/begin", s.sameOrigin(s.limited(s.adminLoginBegin)))
+	m.HandleFunc("POST /admin/api/login/finish", s.sameOrigin(s.limited(s.adminLoginFinish)))
+	m.HandleFunc("POST /admin/api/logout", s.sameOrigin(s.adminLogout))
+	m.HandleFunc("POST /admin/api/create-link", s.sameOrigin(s.adminSessionRequired(s.adminCreateLink)))
 }
 
 func (s *Server) adminStatic(name, ctype string) http.HandlerFunc {
@@ -137,25 +160,63 @@ func (s *Server) adminStatic(name, ctype string) http.HandlerFunc {
 		panic(err)
 	}
 	return func(w http.ResponseWriter, r *http.Request) {
-		if s.admin == nil && strings.HasSuffix(name, ".html") {
-			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-			w.WriteHeader(http.StatusServiceUnavailable)
-			w.Write([]byte("The obsync admin page is off: start the server with --public-url https://your.host (see server/README.md).\n"))
-			return
-		}
 		w.Header().Set("Content-Type", ctype)
 		w.Write(body)
 	}
 }
 
-func (s *Server) adminEnabled(next http.HandlerFunc) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if s.admin == nil {
-			writeErr(w, http.StatusServiceUnavailable, "admin page not configured (--public-url)")
-			return
-		}
-		next(w, r)
+// adminVisible decides whether this request may see that /admin exists at
+// all: it needs a cookie the server recognises. The door (GET /admin/r/{t})
+// is the one way in without one; ServeHTTP routes it like a device path, so
+// a bad token's 404 carries the same headers as any unknown path's.
+func (s *Server) adminVisible(r *http.Request) bool {
+	if s.admin == nil {
+		return false
 	}
+	if _, ok := s.admin.lookup(r); ok {
+		return true
+	}
+	if _, ok := s.admin.door(r); ok {
+		return true
+	}
+	return s.knownBrowser(r)
+}
+
+// knownBrowser checks the long-lived cookie against the stored hashes.
+func (s *Server) knownBrowser(r *http.Request) bool {
+	c, err := r.Cookie(adminKnownCookie)
+	if err != nil || c.Value == "" {
+		return false
+	}
+	h := sessionKey(c.Value)
+	ok, err := s.st.AdminBrowserKnown(r.Context(), h[:])
+	return err == nil && ok
+}
+
+// adminOpenDoor is where a register link lands: GET /admin/r/{t}. A live
+// link sets the door cookie and sends the browser to the page, so the token
+// leaves the address bar at once; anything else is the same 404 a stranger
+// gets everywhere under /admin. The link is not spent here: a link previewer
+// fetching the URL must not burn it. Note the handler is reached without the
+// admin headers (ServeHTTP) so its 404 is byte-for-byte any other 404.
+func (s *Server) adminOpenDoor(w http.ResponseWriter, r *http.Request) {
+	tok := r.PathValue("t")
+	if !strings.HasPrefix(tok, "rg_") || s.st.PeekLink(r.Context(), tok, store.LinkRegister) != nil {
+		s.event(r, "admin.door.refused")
+		http.NotFound(w, r)
+		return
+	}
+	door, ok := s.admin.newDoor(tok)
+	if !ok {
+		writeErr(w, http.StatusTooManyRequests, "too many open register links")
+		return
+	}
+	// Lax, not Strict: the browser arrives here from a message or a terminal,
+	// which is a cross-site navigation, and the redirect that follows must
+	// carry the cookie. It gates nothing but the page shell.
+	http.SetCookie(w, &http.Cookie{Name: adminDoorCookie, Value: door, Path: "/admin", HttpOnly: true, Secure: s.admin.secure, SameSite: http.SameSiteLaxMode, MaxAge: int(adminDoorTTL.Seconds())})
+	s.event(r, "admin.door.opened")
+	http.Redirect(w, r, "/admin/", http.StatusSeeOther)
 }
 
 // sameOrigin refuses a state-changing request whose Origin is not this
@@ -211,6 +272,65 @@ func (a *admin) sweep() {
 			delete(a.sessions, k)
 		}
 	}
+	for k, d := range a.doors {
+		if now.After(d.expires) {
+			delete(a.doors, k)
+		}
+	}
+}
+
+// door returns the register token behind this browser's door cookie.
+func (a *admin) door(r *http.Request) (string, bool) {
+	c, err := r.Cookie(adminDoorCookie)
+	if err != nil || c.Value == "" {
+		return "", false
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.sweep()
+	d, ok := a.doors[sessionKey(c.Value)]
+	if !ok || time.Now().After(d.expires) {
+		return "", false
+	}
+	return d.token, true
+}
+
+func (a *admin) newDoor(token string) (string, bool) {
+	tok := randToken()
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.sweep()
+	if len(a.doors) >= maxAdminDoors {
+		return "", false
+	}
+	a.doors[sessionKey(tok)] = adminDoor{token: token, expires: time.Now().Add(adminDoorTTL)}
+	return tok, true
+}
+
+// closeDoor forgets the door behind the request's cookie and clears the cookie.
+func (s *Server) closeDoor(w http.ResponseWriter, r *http.Request) {
+	if c, err := r.Cookie(adminDoorCookie); err == nil {
+		s.admin.mu.Lock()
+		delete(s.admin.doors, sessionKey(c.Value))
+		s.admin.mu.Unlock()
+	}
+	http.SetCookie(w, &http.Cookie{Name: adminDoorCookie, Value: "", Path: "/admin", HttpOnly: true, Secure: s.admin.secure, SameSite: http.SameSiteLaxMode, MaxAge: -1})
+}
+
+// markKnown gives the browser its long-lived cookie, unless it has one
+// already, and records the hash. Lax like the door, for the same reason: a
+// bookmark or a link opened from another app must still find the page.
+func (s *Server) markKnown(w http.ResponseWriter, r *http.Request) error {
+	if s.knownBrowser(r) {
+		return nil
+	}
+	tok := randToken()
+	h := sessionKey(tok)
+	if err := s.st.AddAdminBrowser(r.Context(), h[:]); err != nil {
+		return err
+	}
+	http.SetCookie(w, &http.Cookie{Name: adminKnownCookie, Value: tok, Path: "/admin", HttpOnly: true, Secure: s.admin.secure, SameSite: http.SameSiteLaxMode, MaxAge: int(adminKnownTTL.Seconds())})
+	return nil
 }
 
 func (a *admin) newSession(key string) (string, bool) {
@@ -297,7 +417,8 @@ func (s *Server) adminState(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, err)
 		return
 	}
-	out := map[string]any{"registered": len(rows) > 0, "logged_in": false, "origin": s.admin.origin}
+	_, door := s.admin.door(r)
+	out := map[string]any{"registered": len(rows) > 0, "logged_in": false, "door": door, "origin": s.admin.origin}
 	if key, ok := s.admin.lookup(r); ok {
 		out["logged_in"] = true
 		out["key"] = key
@@ -316,20 +437,14 @@ func (s *Server) adminState(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, out)
 }
 
-// adminRegisterBegin checks the register link and returns creation options.
-// The link is not consumed until a key has actually been verified, so a
-// cancelled browser prompt costs nothing.
+// adminRegisterBegin checks the register link behind the browser's door and
+// returns creation options. The link is not consumed until a key has
+// actually been verified, so a cancelled browser prompt costs nothing.
 func (s *Server) adminRegisterBegin(w http.ResponseWriter, r *http.Request) {
-	var body struct {
-		Token string `json:"token"`
-	}
-	if err := readJSON(r, &body, 1<<12); err != nil || !strings.HasPrefix(body.Token, "rg_") {
-		writeErr(w, http.StatusBadRequest, "token required")
-		return
-	}
-	if err := s.st.PeekLink(r.Context(), body.Token, store.LinkRegister); err != nil {
+	tok, ok := s.admin.door(r)
+	if !ok || s.st.PeekLink(r.Context(), tok, store.LinkRegister) != nil {
 		s.event(r, "admin.register.failed", "reason", "bad link")
-		s.failAuth(w, r, "this register link is not valid: it was used, expired, or never existed")
+		s.failAuth(w, r, "this register link is not valid: it was used, expired, or never existed; get a new one from the server")
 		return
 	}
 	user, _, err := s.adminUser(r)
@@ -357,13 +472,17 @@ func (s *Server) adminRegisterBegin(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) adminRegisterFinish(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		Token      string          `json:"token"`
 		Ceremony   string          `json:"ceremony"`
 		Name       string          `json:"name"`
 		Credential json.RawMessage `json:"credential"`
 	}
-	if err := readJSON(r, &body, 64<<10); err != nil || !strings.HasPrefix(body.Token, "rg_") || body.Ceremony == "" || len(body.Credential) == 0 {
-		writeErr(w, http.StatusBadRequest, "token, ceremony, name and credential required")
+	if err := readJSON(r, &body, 64<<10); err != nil || body.Ceremony == "" || len(body.Credential) == 0 {
+		writeErr(w, http.StatusBadRequest, "ceremony, name and credential required")
+		return
+	}
+	tok, ok := s.admin.door(r)
+	if !ok {
+		s.failAuth(w, r, "this register link is not valid: it was used, expired, or never existed; get a new one from the server")
 		return
 	}
 	name := strings.TrimSpace(body.Name)
@@ -399,7 +518,7 @@ func (s *Server) adminRegisterFinish(w http.ResponseWriter, r *http.Request) {
 	// Verified: now spend the link, then store the key. The link is checked
 	// again here, inside a transaction, so two finishes with the same token
 	// cannot both register.
-	if err := s.st.ConsumeLink(r.Context(), body.Token, store.LinkRegister); err != nil {
+	if err := s.st.ConsumeLink(r.Context(), tok, store.LinkRegister); err != nil {
 		s.event(r, "admin.register.failed", "reason", "bad link")
 		s.failAuth(w, r, "this register link is not valid: it was used, expired, or never existed")
 		return
@@ -413,6 +532,12 @@ func (s *Server) adminRegisterFinish(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, err)
 		return
 	}
+	// The browser that registered a key is one the page may show itself to.
+	if err := s.markKnown(w, r); err != nil {
+		s.fail(w, err)
+		return
+	}
+	s.closeDoor(w, r)
 	s.event(r, "admin.registered", "key", name)
 	writeJSON(w, http.StatusCreated, map[string]any{"name": name})
 }
@@ -499,6 +624,19 @@ func (s *Server) adminLoginFinish(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.setAdminCookie(w, tok, int(adminSessionTTL.Seconds()))
+	if err := s.markKnown(w, r); err != nil {
+		s.fail(w, err)
+		return
+	}
+	// A sign-in through a register link spends the link: it has done its job,
+	// which was to let this browser in.
+	if link, ok := s.admin.door(r); ok {
+		if err := s.st.ConsumeLink(r.Context(), link, store.LinkRegister); err != nil && !errors.Is(err, store.ErrForbidden) {
+			s.fail(w, err)
+			return
+		}
+		s.closeDoor(w, r)
+	}
 	s.event(r.WithContext(contextWithAdmin(r, name)), "admin.login", "key", name)
 	writeJSON(w, http.StatusOK, map[string]any{"key": name, "expires_in": int(adminSessionTTL.Seconds())})
 }
@@ -544,8 +682,9 @@ func OpenURL(link string) string {
 	return "obsidian://obsync-join?link=" + url.QueryEscape(link)
 }
 
-// RegisterURL is the page a register link opens; the token rides in the
-// fragment so it reaches the page's script and nothing else.
+// RegisterURL is where a register link lands: the token is in the path so
+// the server can judge it before serving a byte (a bad one is a 404), and
+// the handler redirects at once so it does not stay in the address bar.
 func RegisterURL(server, token string) string {
-	return strings.TrimRight(server, "/") + "/admin/register#" + token
+	return strings.TrimRight(server, "/") + "/admin/r/" + token
 }

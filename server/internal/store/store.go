@@ -156,6 +156,10 @@ CREATE TABLE IF NOT EXISTS admin_credentials (
   created_at INTEGER NOT NULL,
   last_used INTEGER
 );
+CREATE TABLE IF NOT EXISTS admin_browsers (
+  hash BLOB PRIMARY KEY,
+  created_at INTEGER NOT NULL
+);
 `
 
 func (s *Store) migrate() error {

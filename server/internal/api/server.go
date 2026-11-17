@@ -201,7 +201,8 @@ func (s *Server) routes() {
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-Content-Type-Options", "nosniff")
-	if strings.HasPrefix(r.URL.Path, "/admin") {
+	adminPath := strings.HasPrefix(r.URL.Path, "/admin")
+	if adminPath && s.adminVisible(r) {
 		// The admin page is a same-origin browser app with a cookie session:
 		// no CORS at all, and a CSP that allows only its own script and
 		// stylesheet (served below), inline SVG, and fetches to this origin.
@@ -221,6 +222,13 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Access-Control-Max-Age", "86400")
 	if r.Method == http.MethodOptions {
 		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	if adminPath && !(s.admin != nil && r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/admin/r/")) {
+		// To a browser the page does not know, /admin is any other unknown
+		// path: same status, same body, same headers (admin.go). The door is
+		// the exception, and judges its own token.
+		http.NotFound(w, r)
 		return
 	}
 	s.mux.ServeHTTP(w, r)

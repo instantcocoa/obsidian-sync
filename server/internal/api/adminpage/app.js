@@ -1,7 +1,10 @@
 // obsync admin page. Same origin as the API; the session is an HttpOnly
-// cookie set by /admin/api/login/finish. WebAuthn options arrive in the
-// standard JSON form; browsers that cannot parse that form get a manual
-// base64url conversion below.
+// cookie set by /admin/api/login/finish. A register link lands on
+// /admin/r/<token>, which sets a short-lived door cookie and redirects here,
+// so this script never sees the token: the server knows which link this
+// browser came through. WebAuthn options arrive in the standard JSON form;
+// browsers that cannot parse that form get a manual base64url conversion
+// below.
 (function () {
   "use strict";
   var $ = function (id) { return document.getElementById(id); };
@@ -81,18 +84,21 @@
     else if (btn.dataset.label) btn.textContent = btn.dataset.label;
   }
 
-  var registerToken = location.pathname.replace(/\/+$/, "").endsWith("/admin/register") && location.hash.length > 1 ? location.hash.slice(1) : "";
-  if (registerToken) history.replaceState(null, "", "/admin/register"); // out of the address bar and the history
-
   function refresh() {
     error("");
     return api("GET", "/admin/api/state").then(function (st) {
       $("origin").textContent = st.origin || location.origin;
       if (!window.PublicKeyCredential) { show("unsupported"); return; }
-      if (registerToken) { show("register"); return; }
       if (st.logged_in) { renderHome(st); show("home"); return; }
+      if (st.door) { $("door-login").classList.toggle("hidden", !st.registered); show("register"); return; }
       show(st.registered ? "login" : "no-key");
-    }).catch(function (e) { show("loading"); error(e.message); });
+    }).catch(function (e) {
+      // A 404 here means this browser is not known to the page any more
+      // (the server forgot it, or the cookie went); the page itself would
+      // not have loaded otherwise, so say what to do.
+      show("loading");
+      error(/HTTP 404/.test(e.message) ? "This browser is not known to the server any more. Run obsync admin register on the server and open the link it prints here." : e.message);
+    });
   }
 
   function renderHome(st) {
@@ -129,20 +135,18 @@
     var btn = this;
     error("");
     busy(btn, true);
-    api("POST", "/admin/api/register/begin", { token: registerToken }).then(function (r) {
+    api("POST", "/admin/api/register/begin", {}).then(function (r) {
       return navigator.credentials.create({ publicKey: parseCreation(r.options.publicKey) }).then(function (cred) {
-        return api("POST", "/admin/api/register/finish", { token: registerToken, ceremony: r.ceremony, name: $("key-name").value, credential: credentialJSON(cred) });
+        return api("POST", "/admin/api/register/finish", { ceremony: r.ceremony, name: $("key-name").value, credential: credentialJSON(cred) });
       });
     }).then(function (r) {
-      registerToken = "";
       busy(btn, false);
       error("");
       return refresh().then(function () { error("Registered " + r.name + ". Sign in with it to continue."); });
     }).catch(function (e) { busy(btn, false); error(e.message || String(e)); });
   });
 
-  $("login-btn").addEventListener("click", function () {
-    var btn = this;
+  function login(btn) {
     error("");
     busy(btn, true);
     api("POST", "/admin/api/login/begin").then(function (r) {
@@ -151,7 +155,9 @@
       });
     }).then(function () { busy(btn, false); return refresh(); })
       .catch(function (e) { busy(btn, false); error(e.message || String(e)); });
-  });
+  }
+  $("login-btn").addEventListener("click", function () { login(this); });
+  $("door-login-btn").addEventListener("click", function () { login(this); });
 
   $("logout-btn").addEventListener("click", function () {
     api("POST", "/admin/api/logout").then(refresh, function (e) { error(e.message); });

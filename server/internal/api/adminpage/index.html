@@ -26,9 +26,9 @@
   </section>
 
   <section id="no-key" class="card hidden">
-    <h2>No security key is registered yet</h2>
+    <h2>No security key is registered</h2>
     <p>On the server, run</p>
-    <pre>obsync admin register --data /var/lib/obsync</pre>
+    <pre>obsync admin register --data /var/lib/private/obsync</pre>
     <p>and open the link it prints in this browser. The link is valid for an hour and works once.</p>
   </section>
 
@@ -39,6 +39,10 @@
     <input id="key-name" type="text" maxlength="64" autocomplete="off" placeholder="yubikey 5 nfc">
     <button id="register-btn" class="primary">Register key</button>
     <p class="hint">Your browser will ask you to touch or tap the key.</p>
+    <div id="door-login" class="hidden">
+      <p class="hint">Already have a key registered here? This link can let this browser in without adding another.</p>
+      <button id="door-login-btn" class="quiet">Sign in with a registered key instead</button>
+    </div>
   </section>
 
   <section id="login" class="card hidden">

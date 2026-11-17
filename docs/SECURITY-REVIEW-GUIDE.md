@@ -123,7 +123,9 @@ The codebase is small. Everything security-relevant is in these files
   create links (`cr_`) and register links (`rg_`): hashing at rest,
   constant-time comparison, token entropy, single use, and whether any
   token is accepted from a query string (the design says never; WebSocket
-  auth uses the `Sec-WebSocket-Protocol` list; links ride in URL fragments).
+  auth uses the `Sec-WebSocket-Protocol` list; create and invite links ride
+  in URL fragments; a register link is the one token in a path, judged by
+  `GET /admin/r/{t}` which redirects at once and never spends it).
 - Revocation cuts open long-polls and WebSockets (`TestRevocationCutsOpenStreams`).
   Verify the liveness re-check cannot be raced.
 - Per-IP token bucket on failed auth (`--auth-rate`) and on recovery joins.
@@ -149,7 +151,15 @@ The codebase is small. Everything security-relevant is in these files
   session cannot register a key (that takes a register link from the host),
   the clone-counter check refuses a replayed authenticator, and that a
   signed-in admin can create vaults and list them but reach no vault's
-  content, devices or keys. `admin_test.go` drives the whole flow with a
+  content, devices or keys. The page hides from strangers: confirm that
+  every `/admin` path without a door, known or session cookie is
+  byte-for-byte the 404 of an unknown device path (status, body, headers,
+  no Set-Cookie), including a bad register token, a wrong method on the
+  door, and a forged cookie; that the door and known cookies (SameSite=Lax,
+  HttpOnly, `/admin`) grant only the page shell and `state` without
+  `vaults`; that the door's token is spent by a finished ceremony and not
+  by the redirect; and that the known-browser table is bounded
+  (`TestAdminHiddenFromStrangers`, `TestAdminBrowserCap`). `admin_test.go` drives the whole flow with a
   software authenticator; try to construct an attestation or assertion it
   accepts wrongly (format `none` with a mismatched rpIdHash, a `packed`
   statement with a bogus certificate chain, an assertion for another

@@ -1,0 +1,8 @@
+obsync
+obsync-*
+*.db
+*.db-*
+deploy/
+Caddyfile.example
+obsync.service
+README.md

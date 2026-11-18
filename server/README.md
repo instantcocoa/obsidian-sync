@@ -131,6 +131,35 @@ client's; an entry that is not an IP address is ignored and the peer address
 is used. IPv6 clients are keyed by their /64, and the limiter holds at most
 100,000 buckets.
 
+### In Docker, behind a shared Caddy
+
+`Dockerfile` builds a static binary onto a distroless base that runs as an
+unprivileged user; `deploy/` has what a host that already runs a compose
+stack with Caddy needs:
+
+- `deploy/docker-compose.yml`: the `obsync` service. No published port; only
+  Caddy, on the stack's network, can reach it. Data is a bind mount of
+  `/var/lib/obsync`, so a backup is a copy of one directory. `--trust-proxy`
+  names the stack's network.
+- `deploy/ob.caddy`: the site block, `reverse_proxy obsync:8080` with the
+  body size and timeouts from `Caddyfile.example`.
+- `deploy/deploy.sh [host]`: rsyncs this directory to `~/obsync/src` on the
+  host, adds the service to the stack's `include:` list, drops the site
+  file into Caddy's `sites/`, builds, starts, reloads Caddy and waits for
+  `https://<site>/healthz`. Run it again to ship a new build.
+
+The CLI runs inside the container as the same user, so file ownership
+stays right:
+
+```sh
+docker compose exec obsync obsync vault create   --data /data   # first device
+docker compose exec obsync obsync admin register --data /data   # security key
+docker compose exec obsync obsync admin keys     --data /data
+```
+
+`obsync health` is the container's health check: the image has no shell or
+curl, so the binary asks its own `/healthz`.
+
 ## Backup and restore
 
 Everything lives under `--data`: `obsync.db` (op log, heads, devices,

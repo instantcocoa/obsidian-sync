@@ -1,0 +1,42 @@
+# obsync as one service in a shared compose stack that already runs Caddy.
+# Include it from the stack's top-level compose file:
+#   include:
+#     - ./obsync/docker-compose.yml
+# and drop deploy/ob.frob.io.caddy into Caddy's sites directory. The service
+# publishes no port: only Caddy, on the stack's network, can reach it, and
+# --trust-proxy names that network so rate limits key on the real client.
+#
+# Data is a bind mount so backups are a plain copy of one directory
+# (README.md, "Backup and restore"). The image runs as uid 65532 (distroless
+# "nonroot"); deploy.sh creates the directory with that owner.
+#
+# Host-side commands run inside the container as the same user, so files
+# keep their owner:
+#   docker compose exec obsync obsync vault create --data /data
+#   docker compose exec obsync obsync admin register --data /data
+#   docker compose exec obsync obsync admin keys --data /data
+services:
+  obsync:
+    build:
+      context: ./src
+    image: obsync:local
+    container_name: obsync
+    restart: unless-stopped
+    command:
+      - serve
+      - --data
+      - /data
+      - --listen
+      - 0.0.0.0:8080
+      - --public-url
+      - ${OBSYNC_PUBLIC_URL:-https://ob.frob.io}
+      - --trust-proxy
+      - ${OBSYNC_TRUST_PROXY:-10.0.5.0/24}
+    volumes:
+      - ${OBSYNC_DATA:-/var/lib/obsync}:/data
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/obsync", "health", "--url", "http://127.0.0.1:8080"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s

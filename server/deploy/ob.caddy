@@ -1,0 +1,20 @@
+# obsync behind the stack's shared Caddy. Caddy holds the certificate and
+# terminates TLS; the server sees X-Forwarded-For from the stack network
+# (--trust-proxy in docker-compose.yml). WebSockets pass through as is.
+ob.frob.io {
+	encode zstd gzip
+	# Blobs can be large; give uploads the same patience the server has.
+	request_body {
+		max_size 1GB
+	}
+	reverse_proxy obsync:8080 {
+		transport http {
+			read_timeout 15m
+			write_timeout 15m
+		}
+	}
+	header {
+		Strict-Transport-Security "max-age=63072000"
+		-Server
+	}
+}

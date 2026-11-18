@@ -51,6 +51,8 @@ func main() {
 		err = adminCmd(os.Args[2:])
 	case "gc":
 		err = gc(os.Args[2:])
+	case "health":
+		err = health(os.Args[2:])
 	case "help", "-h", "--help":
 		usage()
 	default:
@@ -76,6 +78,7 @@ usage:
   obsync admin remove   --data DIR NAME
   obsync admin forget   --data DIR          every browser needs a fresh register link to see /admin again
   obsync gc             --data DIR [--retention 2160h]
+  obsync health         [--url http://127.0.0.1:8080]       exit 0 when the server answers /healthz (container health checks)
 
 Run the vault and admin commands on the server host, as root (sudo) or as
 the service user: they write to the database directly.`))
@@ -393,4 +396,22 @@ func hsts(next http.Handler) http.Handler {
 		w.Header().Set("Strict-Transport-Security", "max-age=63072000")
 		next.ServeHTTP(w, r)
 	})
+}
+
+// health is a container health check: the image has no curl, so the binary
+// asks its own /healthz. Exit status is the whole answer.
+func health(args []string) error {
+	fs := flag.NewFlagSet("health", flag.ExitOnError)
+	u := fs.String("url", "http://127.0.0.1:8080", "the server's listen address")
+	fs.Parse(args)
+	c := &http.Client{Timeout: 4 * time.Second}
+	res, err := c.Get(strings.TrimRight(*u, "/") + "/healthz")
+	if err != nil {
+		return err
+	}
+	res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		return fmt.Errorf("healthz: HTTP %d", res.StatusCode)
+	}
+	return nil
 }

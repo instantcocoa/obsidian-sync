@@ -38,6 +38,14 @@ IOS_IPHONE=<udid or device name> IOS_IPAD=<udid or device name> \
 npx vitest run test/ios-devices.test.ts --reporter=verbose
 ```
 
+The harness's `RemoteServer` drives a systemd install (`sudo systemctl
+stop|start obsync`, data in `/var/lib/private/obsync`, the CLI at
+`/usr/local/bin/obsync`), which is what util ran. The production server on
+kratz is the Docker deployment (`server/deploy/`), so a device run against
+it needs `RemoteServer` taught `docker compose stop|start obsync`,
+`/var/lib/obsync` and `docker compose exec obsync obsync …`, or a systemd
+test host.
+
 Each run mints a create link on the host over ssh (`sudo obsync vault
 create`), creates a fresh vault with it, enrols the two devices from
 the Mac, pushes `data.json` with the identity plus the plugin files into

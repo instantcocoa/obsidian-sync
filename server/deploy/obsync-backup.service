@@ -1,0 +1,9 @@
+[Unit]
+Description=obsync: snapshot the data directory
+After=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/obsync-backup.sh
+Nice=10
+IOSchedulingClass=idle

@@ -160,6 +160,22 @@ docker compose exec obsync obsync admin keys     --data /data
 `obsync health` is the container's health check: the image has no shell or
 curl, so the binary asks its own `/healthz`.
 
+`deploy.sh` also installs `obsync-backup.timer`: every night
+`/usr/local/sbin/obsync-backup.sh` snapshots the database with SQLite's
+online backup API (consistent while the server runs, integrity-checked) and
+rsyncs the blobs, hard-linked against the previous day, into
+`/var/backups/obsync/<date>/`, keeping fourteen. To restore one:
+
+```sh
+docker compose stop obsync
+sudo rsync -a --delete /var/backups/obsync/2026-11-18/ /var/lib/obsync/
+sudo chown -R 65532:65532 /var/lib/obsync
+docker compose start obsync
+```
+
+The snapshots live on the same host; copy the directory elsewhere as well
+if the host itself is what you are insuring against.
+
 ## Backup and restore
 
 Everything lives under `--data`: `obsync.db` (op log, heads, devices,

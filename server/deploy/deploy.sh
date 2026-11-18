@@ -10,6 +10,8 @@
 #   ~/caddy/conf/sites/ob.caddy  the Caddy site file (deploy/ob.caddy)
 #   ~/docker-compose.yml         gains "- ./obsync/docker-compose.yml" under include:
 #   /var/lib/obsync              data, owned by uid 65532 (the image's user)
+#   /usr/local/sbin/obsync-backup.sh + obsync-backup.{service,timer}
+#                                nightly snapshot to /var/backups/obsync (14 kept)
 # then builds the image, starts the service, reloads Caddy and checks
 # https://<site>/healthz.
 set -euo pipefail
@@ -24,6 +26,7 @@ ssh "$host" 'mkdir -p ~/obsync ~/caddy/conf/sites'
 rsync -az --delete --exclude '/obsync' --exclude '/obsync-*' --exclude '*.db*' --exclude '/deploy/' "$server/" "$host:obsync/src/"
 rsync -az "$here/docker-compose.yml" "$host:obsync/docker-compose.yml"
 rsync -az "$here/$sitefile" "$host:caddy/conf/sites/$sitefile"
+rsync -az "$here/obsync-backup.sh" "$here/obsync-backup.service" "$here/obsync-backup.timer" "$host:obsync/"
 
 echo "== wire into the stack"
 ssh "$host" bash -s <<'REMOTE'
@@ -37,6 +40,10 @@ fi
 sudo mkdir -p /var/lib/obsync
 sudo chown 65532:65532 /var/lib/obsync
 sudo chmod 700 /var/lib/obsync
+sudo install -m 755 ~/obsync/obsync-backup.sh /usr/local/sbin/obsync-backup.sh
+sudo install -m 644 ~/obsync/obsync-backup.service ~/obsync/obsync-backup.timer /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now obsync-backup.timer >/dev/null 2>&1
 docker compose build --pull obsync
 docker compose up -d obsync
 docker compose exec caddy caddy validate --config /etc/caddy/Caddyfile >/dev/null

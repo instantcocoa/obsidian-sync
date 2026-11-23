@@ -273,6 +273,13 @@ export class Engine {
    */
   private serverWins: string | null = null;
   private discarded: string[] = [];
+  /**
+   * Plaintext this device already holds for blobs the batch being applied
+   * writes under another name (a rename or a copy made elsewhere): read
+   * from the local file before the batch's deletes run, verified against the
+   * blob id, and used instead of a download. Empty outside applyBatch.
+   */
+  private localPlain = new Map<string, Uint8Array>();
   /** Local files whose names can never sync, reported once each (DESIGN §6.5). */
   private reportedUnsyncable = new Set<string>();
 
@@ -1143,9 +1150,11 @@ export class Engine {
     const queue: string[] = [];
     const uses = new Map<string, number>(); // ops in this batch still to use each blob
     const counted = new Set<Decoded>();
+    await this.gatherLocalPlain(ordered.filter((d) => d.op.blob_id && !this.excluded(d.logical) && this.state.files[d.logical]?.hash !== d.op.blob_id).map((d) => d.op.blob_id!));
     for (const d of ordered) {
       if (this.excluded(d.logical) || !d.op.blob_id) continue;
       if (this.state.files[d.logical]?.hash === d.op.blob_id) continue;
+      if (this.localPlain.has(d.op.blob_id)) continue; // already on this device under another name
       if (!uses.has(d.op.blob_id)) queue.push(d.op.blob_id);
       uses.set(d.op.blob_id, (uses.get(d.op.blob_id) ?? 0) + 1);
       counted.add(d);
@@ -1212,6 +1221,7 @@ export class Engine {
       prefetch();
     }
     this.setStatus({ progress: undefined });
+    this.localPlain.clear();
     for (const h of this.healAfterBatch.splice(0)) {
       const e = this.state.files[h.logical];
       if (!e || e.hash === null) continue;
@@ -1222,9 +1232,43 @@ export class Engine {
     }
   }
 
-  private async parallel<T>(items: T[], fn: (t: T) => Promise<void>): Promise<void> {
+  /**
+   * For the blobs a batch is about to write: find the ones this device
+   * already has on disk under some path (the content id is a keyed hash of
+   * the plaintext, so equal id means equal bytes) and keep their plaintext
+   * for writeRemote. This is what makes a rename done elsewhere free here
+   * too: the old name's delete is applied first, so the bytes are read now.
+   * The bytes are re-hashed before use (the file may have changed since the
+   * state entry was written) and the total held is bounded.
+   */
+  private async gatherLocalPlain(wanted: string[]): Promise<void> {
+    this.localPlain.clear();
+    if (wanted.length === 0) return;
+    const want = new Set(wanted);
+    let held = 0;
+    const LIMIT = 256 * 1024 * 1024;
+    for (const [logical, e] of Object.entries(this.state.files)) {
+      if (want.size === 0) break;
+      if (!e.hash || e.excluded || !want.has(e.hash)) continue;
+      if (held + e.size > LIMIT) continue;
+      try {
+        const dev = this.device(logical);
+        const st = await this.fs.stat(dev);
+        if (!st || !this.statMatches(e, st)) continue;
+        const { hash, bytes } = await this.hashFile(dev);
+        if (hash !== e.hash) continue;
+        this.localPlain.set(hash, bytes);
+        held += bytes.length;
+        want.delete(hash);
+      } catch {
+        /* unreadable: download it instead */
+      }
+    }
+  }
+
+  private async parallel<T>(items: T[], fn: (t: T) => Promise<void>, width = this.cfg.parallel): Promise<void> {
     const q = [...items];
-    const workers = Array.from({ length: Math.min(this.cfg.parallel, q.length) }, async () => {
+    const workers = Array.from({ length: Math.min(width, q.length) }, async () => {
       while (q.length) await fn(q.shift()!);
     });
     await Promise.all(workers);
@@ -1354,20 +1398,26 @@ export class Engine {
   private async writeRemote(logical: string, op: WireOp, meta: FileMeta, blobs?: BlobCache, seen?: FileStat | null): Promise<void> {
     const devPath = this.device(logical);
     const blobId = op.blob_id!;
-    const ct = await this.fetchBlob(blobId, blobs);
-    // Ciphertext is at most the plaintext plus one padding block and the
-    // headers (compression is kept only when it shrinks); anything larger
-    // cannot be the file the authenticated metadata describes, so it is
-    // refused before a byte of it is decrypted.
-    if (ct.length > meta.size + PAD_BLOCK + 256) throw new Error(`blob ${blobId} is ${ct.length} bytes of ciphertext for a ${meta.size}-byte file; refusing to decrypt it`);
     let plain: Uint8Array;
-    try {
-      plain = await this.vc.decryptBlob(blobId, ct, { maxPlain: meta.size });
-    } catch (e) {
-      if (e instanceof CryptoError && /epoch/.test(e.message)) {
-        await this.refreshKeys();
+    const local = this.localPlain.get(blobId);
+    if (local && local.length === meta.size) {
+      // Same content already on this device under another name: no download.
+      plain = local;
+    } else {
+      const ct = await this.fetchBlob(blobId, blobs);
+      // Ciphertext is at most the plaintext plus one padding block and the
+      // headers (compression is kept only when it shrinks); anything larger
+      // cannot be the file the authenticated metadata describes, so it is
+      // refused before a byte of it is decrypted.
+      if (ct.length > meta.size + PAD_BLOCK + 256) throw new Error(`blob ${blobId} is ${ct.length} bytes of ciphertext for a ${meta.size}-byte file; refusing to decrypt it`);
+      try {
         plain = await this.vc.decryptBlob(blobId, ct, { maxPlain: meta.size });
-      } else throw e;
+      } catch (e) {
+        if (e instanceof CryptoError && /epoch/.test(e.message)) {
+          await this.refreshKeys();
+          plain = await this.vc.decryptBlob(blobId, ct, { maxPlain: meta.size });
+        } else throw e;
+      }
     }
     // The metadata's size is authenticated; the blob's identity is a keyed
     // hash of its plaintext. A mismatch means the op was re-pointed at
@@ -1510,11 +1560,21 @@ export class Engine {
       for (const p of pending) if (p.op.blob_id && p.bytes) byBlob.set(p.op.blob_id, p.bytes);
       const missing = await this.client.missingBlobs(this.cfg.vaultId, [...byBlob.keys()]);
       let done = 0;
-      await this.parallel(missing, async (id) => {
+      const upload = async (id: string) => {
         const ct = await this.vc.encryptBlob(id, byBlob.get(id)!, { compress: this.cfg.compress, pad: this.cfg.pad });
         await this.client.putBlob(this.cfg.vaultId, id, ct);
         this.setStatus({ progress: { done: ++done, total: missing.length } });
-      });
+      };
+      // A note is one round trip to the server and almost no bytes, so over
+      // a real network a first upload is bounded by how many requests are in
+      // flight, not by bandwidth: small blobs go three times as wide (they
+      // share one HTTP/2 connection). Large ones keep the narrow pool, which
+      // bounds memory and does not starve the link.
+      const SMALL = 256 * 1024;
+      const small = missing.filter((id) => byBlob.get(id)!.length <= SMALL);
+      const large = missing.filter((id) => byBlob.get(id)!.length > SMALL);
+      await this.parallel(small, upload, this.cfg.parallel * 3);
+      await this.parallel(large, upload);
       this.setStatus({ progress: undefined });
       // Post ops in chunks.
       for (let i = 0; i < pending.length; i += 200) {

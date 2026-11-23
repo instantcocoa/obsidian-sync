@@ -82,6 +82,8 @@ export interface WireOp {
   device_id: string;
   path_id: string;
   blob_id: string | null;
+  /** A large file's content as chunk blobs, in order (1.0); blob_id is then the id of the whole content and names no blob. */
+  chunks?: string[];
   meta_enc: string; // base64
   meta_epoch: number;
   base_seq: number;
@@ -92,6 +94,7 @@ export interface OpInput {
   op_id: string;
   path_id: string;
   blob_id: string | null;
+  chunks?: string[];
   meta_enc: Uint8Array;
   meta_epoch: number;
   base_seq: number;

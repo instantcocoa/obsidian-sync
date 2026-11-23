@@ -957,7 +957,7 @@ export default class ObsyncPlugin extends Plugin {
             ? {
                 label: "Save copy",
                 run: async () => {
-                  const bytes = await s.vc.decryptBlob(o.blob_id!, await s.client.getBlob(s.identity.vaultId, o.blob_id!));
+                  const bytes = this.engine ? await this.engine.versionBytes(o) : await s.vc.decryptBlob(o.blob_id!, await s.client.getBlob(s.identity.vaultId, o.blob_id!));
                   const dot = f.path.lastIndexOf(".");
                   const out = (dot > 0 ? f.path.slice(0, dot) : f.path) + ` (version ${o.seq})` + (dot > 0 ? f.path.slice(dot) : "");
                   await this.app.vault.createBinary(out, bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer);

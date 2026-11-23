@@ -282,7 +282,7 @@ hex chars.
 | `PUT` | `/v1/vaults/{v}/blobs/{id}` | **authority**. raw body; `0x01‖epoch u32LE‖salt16‖nonce12‖ct`; 201 new or higher epoch, 200 no-op; `X-Blob-Replace: 1` overwrites at the same epoch (repair) |
 | `GET` | `/v1/vaults/{v}/blobs/{id}` | raw; supports `Range`; `X-Blob-Epoch` header |
 | `GET` | `/v1/vaults/{v}/blobs?epoch_lt=E` | re-encryption worklist |
-| `POST` | `/v1/vaults/{v}/ops` | **authority**. `[{op_id, path_id, blob_id|null, meta_enc, meta_epoch, base_seq}]` → per-op `{seq}` / `{conflict: headOp}` / `{error}` |
+| `POST` | `/v1/vaults/{v}/ops` | **authority**. `[{op_id, path_id, blob_id|null, chunks?, meta_enc, meta_epoch, base_seq}]` (`chunks`: ordered blob ids of a large file's content, all uploaded first; `blob_id` is then the id of the whole content) → per-op `{seq}` / `{conflict: headOp}` / `{error}` |
 | `PATCH` | `/v1/vaults/{v}/ops/{seq}/meta` | **authority**. `{meta_enc, meta_epoch}`; higher epoch only |
 | `GET` | `/v1/vaults/{v}/ops?meta_epoch_lt=E` | `{seqs}` re-encryption worklist |
 | `GET` | `/v1/vaults/{v}/ops?from=ms&to=ms` | op log by time |

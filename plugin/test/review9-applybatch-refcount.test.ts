@@ -62,7 +62,10 @@ describe("applyBatch refcount: an op that is not counted still decrements", () =
       };
       await b.sync();
       expect((await b.files()).filter((f) => f.startsWith("copies/")).length).toBe(6);
-      expect(fetches, `${fetches} downloads of one blob in one batch`).toBe(1);
+      // Since 1.0 the device writes content it already holds under another
+      // name (copies/0.bin) from its own disk: no download at all. Before,
+      // the point of this test was "once, not once per name".
+      expect(fetches, `${fetches} downloads of one blob in one batch`).toBe(0);
     } finally {
       await a.cleanup();
       await b.cleanup();

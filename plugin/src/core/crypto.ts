@@ -73,6 +73,7 @@ export const LEGACY_RECOVERY_ITERATIONS = 600_000;
 
 const INFO_BLOBID = utf8("obsync/blob-id/v1");
 const INFO_PATHID = utf8("obsync/path-id/v1");
+const INFO_CDC = utf8("obsync/cdc/v1");
 const INFO_META = utf8("obsync/meta/v1");
 const INFO_BLOB = utf8("obsync/blob/v1");
 const INFO_WRAP = utf8("obsync/wrap/v1");
@@ -229,6 +230,12 @@ export class VaultCrypto {
   async blobId(plaintext: Uint8Array): Promise<string> {
     this.blobIdKey ??= hkdf(this.keyring.kId, new Uint8Array(0), INFO_BLOBID).then(hmacKey);
     return hex(await hmac(await this.blobIdKey, plaintext));
+  }
+
+  private cdcSeedP?: Promise<Uint8Array>;
+  /** 1024 bytes for the chunker's gear table (chunks.ts): keyed, so chunk boundaries of a known file are not predictable. */
+  cdcSeed(): Promise<Uint8Array> {
+    return (this.cdcSeedP ??= hkdf(this.keyring.kId, new Uint8Array(0), INFO_CDC, 1024));
   }
 
   async pathId(path: string): Promise<string> {

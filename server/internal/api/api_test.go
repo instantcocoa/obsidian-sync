@@ -166,12 +166,13 @@ type device struct {
 }
 
 type opIn struct {
-	OpID      string  `json:"op_id"`
-	PathID    string  `json:"path_id"`
-	BlobID    *string `json:"blob_id"`
-	MetaEnc   []byte  `json:"meta_enc"`
-	MetaEpoch int64   `json:"meta_epoch"`
-	BaseSeq   int64   `json:"base_seq"`
+	OpID      string   `json:"op_id"`
+	PathID    string   `json:"path_id"`
+	BlobID    *string  `json:"blob_id"`
+	Chunks    []string `json:"chunks,omitempty"`
+	MetaEnc   []byte   `json:"meta_enc"`
+	MetaEpoch int64    `json:"meta_epoch"`
+	BaseSeq   int64    `json:"base_seq"`
 }
 
 type opsOut struct {

@@ -17,6 +17,7 @@ import { VaultCrypto, CryptoError, unwrapEpochKey, type FileMeta, PAD_BLOCK } fr
 import { fromB64, bytesEqual } from "./encoding";
 import type { FileStat, StateStore, VaultFS } from "./fs";
 import { mergeJson, mergeText } from "./merge";
+import { CHUNK_MAX, CHUNK_THRESHOLD, MAX_CHUNKS, gearTable, split } from "./chunks";
 import { aliasesConfigDir, compileExclusions, conflictPath, fromLogical, isJsonPath, isSafeDevicePath, isSafeLogicalPath, isTextPath, toLogical, logicalAliasesConfigDir, isConfigLogical } from "./paths";
 import { NetworkError, Client, HttpError, type Feed, type OpInput, type OpResult, type WireOp } from "./transport";
 
@@ -1155,6 +1156,7 @@ export class Engine {
       if (this.excluded(d.logical) || !d.op.blob_id) continue;
       if (this.state.files[d.logical]?.hash === d.op.blob_id) continue;
       if (this.localPlain.has(d.op.blob_id)) continue; // already on this device under another name
+      if (d.op.chunks?.length) continue; // chunked: fetched chunk by chunk when applied, reusing what the old file holds
       if (!uses.has(d.op.blob_id)) queue.push(d.op.blob_id);
       uses.set(d.op.blob_id, (uses.get(d.op.blob_id) ?? 0) + 1);
       counted.add(d);
@@ -1394,6 +1396,89 @@ export class Engine {
     return b;
   }
 
+  private gear?: Promise<Uint32Array>;
+  private gearTable(): Promise<Uint32Array> {
+    return (this.gear ??= this.vc.cdcSeed().then(gearTable));
+  }
+
+  /** A large file as chunks with their ids, or null when it is stored as one blob. */
+  private async chunksOf(bytes: Uint8Array): Promise<{ ids: string[]; parts: Uint8Array[] } | null> {
+    if (bytes.length <= CHUNK_THRESHOLD) return null;
+    const parts = split(bytes, await this.gearTable());
+    if (parts.length > MAX_CHUNKS) throw new Error(`file of ${bytes.length} bytes needs ${parts.length} chunks; the limit is ${MAX_CHUNKS}`);
+    const ids: string[] = [];
+    for (const p of parts) ids.push(await this.vc.blobId(p));
+    return { ids, parts };
+  }
+
+  private async decryptFetched(id: string, ct: Uint8Array, maxPlain: number): Promise<Uint8Array> {
+    // Ciphertext is at most the plaintext plus one padding block and the
+    // headers (compression is kept only when it shrinks); anything larger
+    // cannot be what the authenticated metadata describes, so it is refused
+    // before a byte of it is decrypted.
+    if (ct.length > maxPlain + PAD_BLOCK + 256) throw new Error(`blob ${id} is ${ct.length} bytes of ciphertext for at most ${maxPlain} bytes of content; refusing to decrypt it`);
+    try {
+      return await this.vc.decryptBlob(id, ct, { maxPlain });
+    } catch (e) {
+      if (e instanceof CryptoError && /epoch/.test(e.message)) {
+        await this.refreshKeys();
+        return await this.vc.decryptBlob(id, ct, { maxPlain });
+      }
+      throw e;
+    }
+  }
+
+  /**
+   * The plaintext of a remote version. One blob for an ordinary file. For a
+   * chunked one (op.chunks): the chunks this device already holds in the
+   * current file at `devPath` are taken from disk, the rest are downloaded,
+   * and the reassembled content must have the authenticated size and hash
+   * to op.blob_id (which the metadata binds). The chunk list itself comes
+   * from the server unauthenticated; a wrong, reordered or truncated list
+   * fails that final check and nothing is written.
+   */
+  private async fetchContent(op: WireOp, meta: FileMeta, blobs?: BlobCache, devPath?: string): Promise<Uint8Array> {
+    const blobId = op.blob_id!;
+    const ids = op.chunks ?? [];
+    if (ids.length === 0) return this.decryptFetched(blobId, await this.fetchBlob(blobId, blobs), meta.size);
+    if (ids.length > MAX_CHUNKS) throw new Error(`op ${op.seq} lists ${ids.length} chunks; refusing it`);
+    const have = new Map<string, Uint8Array>();
+    if (devPath) {
+      try {
+        const st = await this.fs.stat(devPath);
+        if (st && st.size > CHUNK_THRESHOLD) {
+          const cur = await this.chunksOf(await this.fs.read(devPath));
+          if (cur) cur.ids.forEach((id, i) => have.set(id, cur.parts[i]));
+        }
+      } catch {
+        /* nothing reusable */
+      }
+    }
+    const need = [...new Set(ids)].filter((id) => !have.has(id));
+    await this.parallel(need, async (id) => {
+      have.set(id, await this.decryptFetched(id, await this.fetchBlob(id), CHUNK_MAX));
+    });
+    const out = new Uint8Array(meta.size);
+    let off = 0;
+    for (const id of ids) {
+      const part = have.get(id)!;
+      if (off + part.length > meta.size) throw new Error(`chunks of op ${op.seq} exceed the ${meta.size} bytes its metadata names`);
+      out.set(part, off);
+      off += part.length;
+    }
+    if (off !== meta.size) throw new Error(`chunks of op ${op.seq} add up to ${off} bytes but the metadata says ${meta.size}`);
+    if ((await this.vc.blobId(out)) !== blobId) throw new Error(`chunks of op ${op.seq} do not reassemble to the content its metadata names`);
+    return out;
+  }
+
+  /** The content of one version from the op log (the history command), chunked or not, verified like any download. */
+  async versionBytes(op: WireOp): Promise<Uint8Array> {
+    if (!op.blob_id) throw new Error("that version is a deletion");
+    const meta = await this.vc.decryptMeta(op.path_id, fromB64(op.meta_enc));
+    if (meta.blob !== undefined && meta.blob !== op.blob_id) throw new Error("that version's record is inconsistent");
+    return this.fetchContent(op, meta);
+  }
+
   /** Download (if needed), decrypt, verify, and write a remote put to disk. */
   private async writeRemote(logical: string, op: WireOp, meta: FileMeta, blobs?: BlobCache, seen?: FileStat | null): Promise<void> {
     const devPath = this.device(logical);
@@ -1404,20 +1489,7 @@ export class Engine {
       // Same content already on this device under another name: no download.
       plain = local;
     } else {
-      const ct = await this.fetchBlob(blobId, blobs);
-      // Ciphertext is at most the plaintext plus one padding block and the
-      // headers (compression is kept only when it shrinks); anything larger
-      // cannot be the file the authenticated metadata describes, so it is
-      // refused before a byte of it is decrypted.
-      if (ct.length > meta.size + PAD_BLOCK + 256) throw new Error(`blob ${blobId} is ${ct.length} bytes of ciphertext for a ${meta.size}-byte file; refusing to decrypt it`);
-      try {
-        plain = await this.vc.decryptBlob(blobId, ct, { maxPlain: meta.size });
-      } catch (e) {
-        if (e instanceof CryptoError && /epoch/.test(e.message)) {
-          await this.refreshKeys();
-          plain = await this.vc.decryptBlob(blobId, ct, { maxPlain: meta.size });
-        } else throw e;
-      }
+      plain = await this.fetchContent(op, meta, blobs, devPath);
     }
     // The metadata's size is authenticated; the blob's identity is a keyed
     // hash of its plaintext. A mismatch means the op was re-pointed at
@@ -1486,7 +1558,7 @@ export class Engine {
       try {
         const [base, remote] = await Promise.all([
           this.fetchBlob(e.hash).then((b) => this.vc.decryptBlob(e.hash!, b)),
-          this.fetchBlob(head.blob_id, blobs).then((b) => this.vc.decryptBlob(head.blob_id!, b, { maxPlain: meta.size })),
+          this.fetchContent(head, meta, blobs),
         ]);
         const m = isJsonPath(logical) && isConfigLogical(logical) ? mergeJson(base, local, remote) : mergeText(base, local, remote);
         if (m.ok && m.merged) {
@@ -1557,7 +1629,15 @@ export class Engine {
       pending.sort((x, y) => Number(x.op.blob_id !== null) - Number(y.op.blob_id !== null));
       // Upload missing blobs first (server enforces blobs-before-ops).
       const byBlob = new Map<string, Uint8Array>(); // push side: bytes we read ourselves
-      for (const p of pending) if (p.op.blob_id && p.bytes) byBlob.set(p.op.blob_id, p.bytes);
+      for (const p of pending) {
+        if (!p.op.blob_id || !p.bytes) continue;
+        const c = await this.chunksOf(p.bytes);
+        if (c) {
+          // A large file: its chunks are the blobs; nothing is stored under the whole file's id.
+          p.op.chunks = c.ids;
+          c.ids.forEach((id, i) => byBlob.set(id, c.parts[i]));
+        } else byBlob.set(p.op.blob_id, p.bytes);
+      }
       const missing = await this.client.missingBlobs(this.cfg.vaultId, [...byBlob.keys()]);
       let done = 0;
       const upload = async (id: string) => {
@@ -1724,8 +1804,12 @@ export class Engine {
       const st = await this.fs.stat(devPath);
       if (!st) throw new Error(`${devPath} does not exist`);
       const { bytes, hash } = await this.hashFile(devPath);
-      const ct = await this.vc.encryptBlob(hash, bytes, { compress: this.cfg.compress, pad: this.cfg.pad });
-      await this.client.putBlob(this.cfg.vaultId, hash, ct, { replace: true });
+      const c = await this.chunksOf(bytes);
+      const blobsToPut: [string, Uint8Array][] = c ? c.ids.map((id, i) => [id, c.parts[i]] as [string, Uint8Array]) : [[hash, bytes]];
+      for (const [id, part] of new Map(blobsToPut)) {
+        const ct = await this.vc.encryptBlob(id, part, { compress: this.cfg.compress, pad: this.cfg.pad });
+        await this.client.putBlob(this.cfg.vaultId, id, ct, { replace: true });
+      }
       const pathId = await this.vc.pathId(logical);
       const e = this.state.files[logical];
       const meta: FileMeta = { path: logical, mtime: st.mtime, size: st.size, blob: hash };
@@ -1735,6 +1819,7 @@ export class Engine {
       // could read once that epoch was pruned).
       const epoch = this.vc.keyring.current;
       const op: OpInput = { op_id: opId(), path_id: pathId, blob_id: hash, meta_enc: await this.vc.encryptMeta(pathId, meta, { epoch }), meta_epoch: epoch, base_seq: e?.seq ?? 0 };
+      if (c) op.chunks = c.ids;
       let r = (await this.client.postOps(this.cfg.vaultId, [op])).results[0];
       if (r.conflict) {
         // An explicit repair means "these bytes win": rebase onto the current head once.

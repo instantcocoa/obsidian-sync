@@ -122,6 +122,12 @@ CREATE INDEX IF NOT EXISTS ops_path ON ops(vault_id, path_id, seq);
 CREATE INDEX IF NOT EXISTS ops_blob ON ops(vault_id, blob_id);
 CREATE INDEX IF NOT EXISTS ops_created ON ops(vault_id, created_at);
 CREATE INDEX IF NOT EXISTS ops_meta_epoch ON ops(vault_id, meta_epoch);
+CREATE TABLE IF NOT EXISTS op_chunks (
+  vault_id TEXT NOT NULL,
+  blob_id TEXT NOT NULL,
+  seq INTEGER NOT NULL,
+  PRIMARY KEY (vault_id, blob_id, seq)
+) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS heads (
   vault_id TEXT NOT NULL,
   path_id TEXT NOT NULL,
@@ -171,6 +177,7 @@ func (s *Store) migrate() error {
 	for _, m := range []struct{ table, col, ddl string }{
 		{"vaults", "auth_hash", "ALTER TABLE vaults ADD COLUMN auth_hash BLOB"},
 		{"devices", "recovery_salt", "ALTER TABLE devices ADD COLUMN recovery_salt BLOB"},
+		{"ops", "chunks", "ALTER TABLE ops ADD COLUMN chunks TEXT"},
 	} {
 		var n int
 		if err := s.db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info(?) WHERE name=?`, m.table, m.col).Scan(&n); err != nil {
@@ -1101,6 +1108,13 @@ type Op struct {
 	DeviceID  string  `json:"device_id"`
 	PathID    string  `json:"path_id"`
 	BlobID    *string `json:"blob_id"` // nil = deletion
+	// Chunks, when present, are the blobs that hold this version's content in
+	// order (a large file split by the client, 1.0); BlobID is then the
+	// content id of the whole file and no blob is stored under it. The list
+	// is not secret (sizes are visible anyway) and not trusted by clients,
+	// which check the reassembled content against BlobID; the server needs
+	// it to know which blobs a version keeps alive.
+	Chunks []string `json:"chunks,omitempty"`
 	MetaEnc   []byte  `json:"meta_enc"`
 	MetaEpoch int64   `json:"meta_epoch"`
 	BaseSeq   int64   `json:"base_seq"`
@@ -1131,17 +1145,84 @@ func (s *Store) OpIDAt(ctx context.Context, vault string, seq int64) (string, er
 	return id, err
 }
 
-const opCols = `seq, op_id, device_id, path_id, blob_id, meta_enc, meta_epoch, base_seq, created_at`
+const opCols = `seq, op_id, device_id, path_id, blob_id, meta_enc, meta_epoch, base_seq, created_at, chunks`
 
-func scanOp(sc interface{ Scan(...any) error }) (Op, error) {
+// MaxChunks bounds the chunk list of one op (about 4 GiB at the client's
+// average chunk size; the row stays under 300 KiB).
+const MaxChunks = 4096
+
+func joinChunks(c []string) any {
+	if len(c) == 0 {
+		return nil
+	}
+	return strings.Join(c, "")
+}
+
+func splitChunks(s sql.NullString) []string {
+	if !s.Valid || len(s.String) == 0 || len(s.String)%64 != 0 {
+		return nil
+	}
+	out := make([]string, 0, len(s.String)/64)
+	for i := 0; i < len(s.String); i += 64 {
+		out = append(out, s.String[i:i+64])
+	}
+	return out
+}
+
+func scanOp(sc interface{ Scan(...any) error }, extra ...any) (Op, error) {
 	var o Op
-	var blob sql.NullString
-	err := sc.Scan(&o.Seq, &o.OpID, &o.DeviceID, &o.PathID, &blob, &o.MetaEnc, &o.MetaEpoch, &o.BaseSeq, &o.CreatedAt)
+	var blob, chunks sql.NullString
+	dst := append([]any{&o.Seq, &o.OpID, &o.DeviceID, &o.PathID, &blob, &o.MetaEnc, &o.MetaEpoch, &o.BaseSeq, &o.CreatedAt, &chunks}, extra...)
+	err := sc.Scan(dst...)
 	if blob.Valid {
 		b := blob.String
 		o.BlobID = &b
 	}
+	o.Chunks = splitChunks(chunks)
 	return o, err
+}
+
+// contentPresent reports whether every blob an op's content needs is stored:
+// its chunks when it has any, otherwise the blob under its id.
+func contentPresent(ctx context.Context, tx *sql.Tx, vault string, o Op) (bool, error) {
+	ids := o.Chunks
+	if len(ids) == 0 {
+		if o.BlobID == nil {
+			return true, nil
+		}
+		ids = []string{*o.BlobID}
+	}
+	seen := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		if seen[id] {
+			continue
+		}
+		seen[id] = true
+		var n int
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM blobs WHERE vault_id=? AND blob_id=?`, vault, id).Scan(&n); err != nil {
+			return false, err
+		}
+		if n == 0 {
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
+// insertOp writes the op row and, for a chunked version, the rows that keep
+// its chunks alive.
+func insertOp(ctx context.Context, tx *sql.Tx, vault string, seq int64, device string, o Op, baseSeq, ts int64) error {
+	if _, err := tx.ExecContext(ctx,
+		`INSERT INTO ops(vault_id, seq, op_id, device_id, path_id, blob_id, meta_enc, meta_epoch, base_seq, created_at, chunks) VALUES(?,?,?,?,?,?,?,?,?,?,?)`,
+		vault, seq, o.OpID, device, o.PathID, o.BlobID, o.MetaEnc, o.MetaEpoch, baseSeq, ts, joinChunks(o.Chunks)); err != nil {
+		return err
+	}
+	for _, id := range o.Chunks {
+		if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO op_chunks(vault_id, blob_id, seq) VALUES(?,?,?)`, vault, id, seq); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (s *Store) GetOp(ctx context.Context, vault string, seq int64) (*Op, error) {
@@ -1161,6 +1242,19 @@ func (s *Store) validateOp(o Op) error {
 	}
 	if o.BlobID != nil && !ValidHexID(*o.BlobID) {
 		return fmt.Errorf("%w: blob_id must be 64 hex chars", ErrBadRequest)
+	}
+	if len(o.Chunks) > 0 {
+		if o.BlobID == nil {
+			return fmt.Errorf("%w: a deletion carries no chunks", ErrBadRequest)
+		}
+		if len(o.Chunks) > MaxChunks {
+			return fmt.Errorf("%w: more than %d chunks", ErrBadRequest, MaxChunks)
+		}
+		for _, c := range o.Chunks {
+			if !ValidHexID(c) {
+				return fmt.Errorf("%w: chunk ids must be 64 hex chars", ErrBadRequest)
+			}
+		}
 	}
 	if len(o.MetaEnc) == 0 {
 		return fmt.Errorf("%w: meta_enc required", ErrBadRequest)
@@ -1249,22 +1343,16 @@ func (s *Store) AppendOps(ctx context.Context, vault string, by Actor, ops []Op)
 				results[i].Conflict = &ho
 				continue
 			}
-			// Blobs before ops.
-			if o.BlobID != nil {
-				var n int
-				if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM blobs WHERE vault_id=? AND blob_id=?`, vault, *o.BlobID).Scan(&n); err != nil {
-					return err
-				}
-				if n == 0 {
-					results[i].Error = "blob not uploaded"
-					continue
-				}
+			// Blobs before ops: every chunk of a chunked version, or the one blob.
+			if ok, err := contentPresent(ctx, tx, vault, o); err != nil {
+				return err
+			} else if !ok {
+				results[i].Error = "blob not uploaded"
+				continue
 			}
 			seq++
 			ts := now()
-			if _, err := tx.ExecContext(ctx,
-				`INSERT INTO ops(vault_id, seq, op_id, device_id, path_id, blob_id, meta_enc, meta_epoch, base_seq, created_at) VALUES(?,?,?,?,?,?,?,?,?,?)`,
-				vault, seq, o.OpID, device, o.PathID, o.BlobID, o.MetaEnc, o.MetaEpoch, o.BaseSeq, ts); err != nil {
+			if err := insertOp(ctx, tx, vault, seq, device, o, o.BaseSeq, ts); err != nil {
 				return err
 			}
 			results[i].CreatedAt = ts
@@ -1402,35 +1490,26 @@ func (s *Store) Restore(ctx context.Context, vault string, by Actor, at int64) (
 		}
 		var todo []pair
 		for rows.Next() {
-			var o Op
-			var blob sql.NullString
 			var head int64
-			if err := rows.Scan(&o.Seq, &o.OpID, &o.DeviceID, &o.PathID, &blob, &o.MetaEnc, &o.MetaEpoch, &o.BaseSeq, &o.CreatedAt, &head); err != nil {
+			o, err := scanOp(rows, &head)
+			if err != nil {
 				rows.Close()
 				return err
-			}
-			if blob.Valid {
-				b := blob.String
-				o.BlobID = &b
 			}
 			todo = append(todo, pair{o, head})
 		}
 		rows.Close()
 		for _, p := range todo {
-			if p.old.BlobID != nil {
-				var n int
-				if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM blobs WHERE vault_id=? AND blob_id=?`, vault, *p.old.BlobID).Scan(&n); err != nil {
-					return err
-				}
-				if n == 0 {
-					skipped = append(skipped, p.old.PathID)
-					continue
-				}
+			if ok, err := contentPresent(ctx, tx, vault, p.old); err != nil {
+				return err
+			} else if !ok {
+				skipped = append(skipped, p.old.PathID)
+				continue
 			}
 			seq++
-			if _, err := tx.ExecContext(ctx,
-				`INSERT INTO ops(vault_id, seq, op_id, device_id, path_id, blob_id, meta_enc, meta_epoch, base_seq, created_at) VALUES(?,?,?,?,?,?,?,?,?,?)`,
-				vault, seq, "restore-"+randomHex(8), device, p.old.PathID, p.old.BlobID, p.old.MetaEnc, p.old.MetaEpoch, p.head, now()); err != nil {
+			re := p.old
+			re.OpID = "restore-" + randomHex(8)
+			if err := insertOp(ctx, tx, vault, seq, device, re, p.head, now()); err != nil {
 				return err
 			}
 			if _, err := tx.ExecContext(ctx, `UPDATE heads SET seq=? WHERE vault_id=? AND path_id=?`, seq, vault, p.old.PathID); err != nil {
@@ -1456,8 +1535,12 @@ func (s *Store) DeadBlobs(ctx context.Context, vault string, cutoff int64) ([]st
 		 WHERE b.vault_id=? AND b.created_at<=?
 		   AND NOT EXISTS (SELECT 1 FROM ops o JOIN heads h ON h.vault_id=o.vault_id AND h.seq=o.seq
 		                   WHERE o.vault_id=b.vault_id AND o.blob_id=b.blob_id)
-		   AND NOT EXISTS (SELECT 1 FROM ops o WHERE o.vault_id=b.vault_id AND o.blob_id=b.blob_id AND o.created_at>?)`,
-		vault, cutoff, cutoff)
+		   AND NOT EXISTS (SELECT 1 FROM ops o WHERE o.vault_id=b.vault_id AND o.blob_id=b.blob_id AND o.created_at>?)
+		   AND NOT EXISTS (SELECT 1 FROM op_chunks c JOIN heads h ON h.vault_id=c.vault_id AND h.seq=c.seq
+		                   WHERE c.vault_id=b.vault_id AND c.blob_id=b.blob_id)
+		   AND NOT EXISTS (SELECT 1 FROM op_chunks c JOIN ops o ON o.vault_id=c.vault_id AND o.seq=c.seq
+		                   WHERE c.vault_id=b.vault_id AND c.blob_id=b.blob_id AND o.created_at>?)`,
+		vault, cutoff, cutoff, cutoff)
 	if err != nil {
 		return nil, err
 	}
@@ -1484,8 +1567,12 @@ func (s *Store) DeleteDeadBlob(ctx context.Context, vault, id string, cutoff int
 			`DELETE FROM blobs WHERE vault_id=? AND blob_id=? AND created_at<=?
 			   AND NOT EXISTS (SELECT 1 FROM ops o JOIN heads h ON h.vault_id=o.vault_id AND h.seq=o.seq
 			                   WHERE o.vault_id=blobs.vault_id AND o.blob_id=blobs.blob_id)
-			   AND NOT EXISTS (SELECT 1 FROM ops o WHERE o.vault_id=blobs.vault_id AND o.blob_id=blobs.blob_id AND o.created_at>?)`,
-			vault, id, cutoff, cutoff)
+			   AND NOT EXISTS (SELECT 1 FROM ops o WHERE o.vault_id=blobs.vault_id AND o.blob_id=blobs.blob_id AND o.created_at>?)
+			   AND NOT EXISTS (SELECT 1 FROM op_chunks c JOIN heads h ON h.vault_id=c.vault_id AND h.seq=c.seq
+			                   WHERE c.vault_id=blobs.vault_id AND c.blob_id=blobs.blob_id)
+			   AND NOT EXISTS (SELECT 1 FROM op_chunks c JOIN ops o ON o.vault_id=c.vault_id AND o.seq=c.seq
+			                   WHERE c.vault_id=blobs.vault_id AND c.blob_id=blobs.blob_id AND o.created_at>?)`,
+			vault, id, cutoff, cutoff, cutoff)
 		if err != nil {
 			return err
 		}

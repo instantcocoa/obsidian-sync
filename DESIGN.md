@@ -325,7 +325,7 @@ blobs    (vault_id, blob_id, epoch, ct_size, created_at, last_ref_at)
 | `PUT` | `/v1/vaults/{v}/blobs/{id}` | Upload ciphertext. Idempotent. A re-upload is accepted only if its header epoch is higher than the stored one, and then only with vault authority (it replaces the only copy). |
 | `GET` | `/v1/vaults/{v}/blobs/{id}` | Download ciphertext. Supports `Range`. |
 | `GET` | `/v1/vaults/{v}/blobs?epoch_lt=E` | Blob IDs still encrypted under an old epoch (re-encryption worklist). |
-| `POST` | `/v1/vaults/{v}/ops` | Body: `[op…]`. Each op is CAS-checked and either `{seq}` or `{conflict: headOp}`. Applied atomically per op, not per batch. |
+| `POST` | `/v1/vaults/{v}/ops` | Body: `[op…]`. Each op is CAS-checked and either `{seq}` or `{conflict: headOp}`. Applied atomically per op, not per batch. An op may carry `chunks`, the ordered blob ids of a large file's content (§6.9); every one must be uploaded first. |
 | `PATCH` | `/v1/vaults/{v}/ops/{seq}/meta` | Replace `meta_enc` with a higher `meta_epoch` (re-encryption). Nothing else about an op can change. Vault authority required. |
 | `GET` | `/v1/vaults/{v}/history?path_id=…` | All ops for a path (versions UI, restore). |
 | `GET` | `/v1/vaults/{v}/ops?from=T` | Op log by time, for "restore vault to T" tooling. |
@@ -1198,6 +1198,51 @@ knows.
 - Warn (status bar) on path components over 255 UTF-8 bytes.
 
 ---
+
+### 6.9 Large files as chunks (1.0)
+
+Until 1.0 a file version was one encrypted blob, so one changed byte in a
+200 MB file uploaded 200 MB, and every other device downloaded it. Now:
+
+- A file of at most 1 MiB is one blob, exactly as before. Notes never chunk.
+- A larger file is cut into chunks by content (`chunks.ts`: a gear rolling
+  hash, a cut where twenty high bits are zero, chunks between 256 KiB and
+  4 MiB, about 1.25 MiB on average). Cutting by content means an insertion
+  moves the boundary it falls in and leaves the rest where they were.
+- Each chunk is an ordinary blob: named by the keyed hash of its plaintext,
+  encrypted like any blob, deduplicated by the server's existing "missing"
+  check, re-encrypted by key rotation like any blob. Equal chunks across
+  versions and across files are stored once.
+- The op keeps `blob_id` = the keyed hash of the whole file, so everything
+  that compares versions by id (convergence, the applier's "already have
+  it", conflict detection, state) is unchanged. It gains `chunks`, the
+  ordered chunk ids. No blob is stored under a chunked version's `blob_id`.
+- The gear table is derived from the vault key (`HKDF(K_id,
+  "obsync/cdc/v1")`). Chunk sizes are visible to the server; with a public
+  table, someone holding a candidate file could compute its chunk sizes and
+  recognise it. With a keyed table they cannot.
+
+What the server learns that it did not before: which blobs belong to one
+version, in order. It already saw sizes and timing. It needs the list to
+keep a version's chunks alive: the sweep treats a blob as live if a head or
+a recent op refers to it directly or through `op_chunks`, "blobs before
+ops" requires every chunk to be present, and restore-to-time re-emits a
+version only if all its chunks still are.
+
+The list is not authenticated and does not need to be. A reader fetches the
+chunks (taking from disk any the file it is replacing already has, so an
+edit downloads only the changed chunks), each chunk authenticates under its
+own id, and the reassembled content must have the size in the authenticated
+metadata and hash to the `blob_id` that metadata binds. A reordered,
+truncated or padded list fails that check and nothing is written
+(`test/chunks.test.ts`).
+
+Limits and edges: 4096 chunks per version (several GiB); a text file above
+1 MiB is merged only if its base is still one blob, otherwise a concurrent
+edit makes a sibling like any binary; files are still read whole into
+memory, as before. 0.x clients cannot read a chunked version (they ask for a
+blob that does not exist and skip the file), so a vault's devices all move to
+1.0 together; the format is otherwise additive and existing vaults carry on.
 
 ## 7. Syncing `.obsidian` properly
 

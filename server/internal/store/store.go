@@ -1103,22 +1103,22 @@ func (s *Store) BlobsBelowEpoch(ctx context.Context, vault string, epoch int64, 
 // ---------- ops ----------
 
 type Op struct {
-	Seq       int64   `json:"seq"`
-	OpID      string  `json:"op_id"`
-	DeviceID  string  `json:"device_id"`
-	PathID    string  `json:"path_id"`
-	BlobID    *string `json:"blob_id"` // nil = deletion
+	Seq      int64   `json:"seq"`
+	OpID     string  `json:"op_id"`
+	DeviceID string  `json:"device_id"`
+	PathID   string  `json:"path_id"`
+	BlobID   *string `json:"blob_id"` // nil = deletion
 	// Chunks, when present, are the blobs that hold this version's content in
 	// order (a large file split by the client, 1.0); BlobID is then the
 	// content id of the whole file and no blob is stored under it. The list
 	// is not secret (sizes are visible anyway) and not trusted by clients,
 	// which check the reassembled content against BlobID; the server needs
 	// it to know which blobs a version keeps alive.
-	Chunks []string `json:"chunks,omitempty"`
-	MetaEnc   []byte  `json:"meta_enc"`
-	MetaEpoch int64   `json:"meta_epoch"`
-	BaseSeq   int64   `json:"base_seq"`
-	CreatedAt int64   `json:"created_at"`
+	Chunks    []string `json:"chunks,omitempty"`
+	MetaEnc   []byte   `json:"meta_enc"`
+	MetaEpoch int64    `json:"meta_epoch"`
+	BaseSeq   int64    `json:"base_seq"`
+	CreatedAt int64    `json:"created_at"`
 }
 
 type OpResult struct {

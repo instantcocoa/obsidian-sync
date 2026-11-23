@@ -189,6 +189,39 @@ export function isJsonPath(path: string): boolean {
   return path.toLowerCase().endsWith(".json") || path.toLowerCase().endsWith(".canvas");
 }
 
+/**
+ * The inverse of conflictPath: for `notes/a (conflict laptop 2026-10-08 1432).md`
+ * the file it is a copy of, the device that wrote it and when. Null for
+ * any other name.
+ */
+export function conflictOrigin(path: string): { original: string; device: string; when: string } | null {
+  const m = /^(.*) \(conflict (.+) (\d{4}-\d{2}-\d{2}) (\d{2})(\d{2})(?: \d+)?\)(\.[^./]*)?$/.exec(path);
+  if (!m) return null;
+  return { original: m[1] + (m[6] ?? ""), device: m[2], when: `${m[3]} ${m[4]}:${m[5]}` };
+}
+
+/** Lines only in `a` and only in `b` (order kept, duplicates counted): enough to see what two versions of a note disagree on. */
+export function lineDiff(a: string, b: string): { onlyA: string[]; onlyB: string[] } {
+  const count = (lines: string[]) => {
+    const m = new Map<string, number>();
+    for (const l of lines) m.set(l, (m.get(l) ?? 0) + 1);
+    return m;
+  };
+  const la = a.split(/\r?\n/);
+  const lb = b.split(/\r?\n/);
+  const only = (xs: string[], other: Map<string, number>) => {
+    const left = new Map(other);
+    const out: string[] = [];
+    for (const l of xs) {
+      const n = left.get(l) ?? 0;
+      if (n > 0) left.set(l, n - 1);
+      else out.push(l);
+    }
+    return out;
+  };
+  return { onlyA: only(la, count(lb)), onlyB: only(lb, count(la)) };
+}
+
 /** `notes/a.md` → `notes/a (conflict laptop 2026-10-08 1432).md` */
 /**
  * Name of the conflict sibling for `path`. `n` > 1 adds an ordinal so a

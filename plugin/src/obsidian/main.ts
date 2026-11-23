@@ -29,7 +29,7 @@ import {
 import { ObsidianFS, ObsidianStateStore } from "./obsidian-fs";
 import { ConfigHooks } from "./hooks";
 import { ObsyncSettingTab } from "./settings";
-import { ConfirmModal, ListModal, PromptModal, ShowSecretModal, InviteModal, confirmPlainHttp } from "./modals";
+import { ConflictModal, ConfirmModal, ListModal, PromptModal, ShowSecretModal, InviteModal, confirmPlainHttp } from "./modals";
 import { deriveWrapKeyFromPin, newWrapKey, open as openKeystore, seal as sealKeystore, type ProtectionMethod, type SealedKeystore } from "../core/keystore";
 import { fromB64, randomBytes } from "../core/encoding";
 import { promptTouchId, safeStorageAvailable, safeUnwrap, safeWrap, secretDrop, secretGet, secretId, secretPut, secretStorageAvailable, touchIdAvailable } from "./protection";
@@ -128,6 +128,10 @@ export default class ObsyncPlugin extends Plugin {
     this.hooks = new ConfigHooks(this.app, this.manifest.id, (msg, ms) => this.routineNotice(msg, ms));
     this.statusEl = this.addStatusBarItem();
     this.statusEl.setText("obsync: off");
+    // Phones and tablets have no status bar: the ribbon icon carries the
+    // state in its label and a tap says it out loud.
+    this.ribbonEl = this.addRibbonIcon("refresh-cw", "obsync: off", () => this.cmdStatus());
+    this.addCommand({ id: "status", name: "Show sync status", callback: () => this.cmdStatus() });
     this.settingTab = new ObsyncSettingTab(this);
     this.addSettingTab(this.settingTab);
 
@@ -496,6 +500,28 @@ export default class ObsyncPlugin extends Plugin {
     await this.startEngine();
   }
 
+  private ribbonEl: HTMLElement | null = null;
+  private lastStatus: Status | null = null;
+  private lastPhase: Status["phase"] | null = null;
+
+  /** The sync state as a sentence (the ribbon label, the status command, the phone's notices). */
+  private statusText(s: Status): string {
+    const what = { idle: "up to date", scanning: "checking files", syncing: "syncing", offline: "offline, will retry", error: "stopped" }[s.phase];
+    let t = what;
+    if (s.progress) t += ` (${s.progress.done} of ${s.progress.total})`;
+    else if (s.pending) t += `, ${s.pending} change${s.pending === 1 ? "" : "s"} waiting`;
+    if (s.message) t += `: ${s.message}`;
+    else if (s.phase === "idle" && s.lastSync) t += `, last sync ${new Date(s.lastSync).toLocaleTimeString()}`;
+    return t;
+  }
+
+  cmdStatus(): void {
+    if (this.locked) return void new Notice("obsync: locked. Run “Unlock vault keys”.", 8000);
+    if (!this.engine || !this.lastStatus) return void new Notice("obsync: not connected to a vault. Open Settings → obsync.", 8000);
+    const conflicts = this.engine.conflictFiles().length;
+    new Notice(`obsync: ${this.statusText(this.lastStatus)}${conflicts ? `. ${conflicts} conflict cop${conflicts === 1 ? "y" : "ies"} to review (command: Show conflicts)` : ""}`, 8000);
+  }
+
   private renderStatus(s: Status): void {
     const icon = { idle: "✓", scanning: "…", syncing: "↕", offline: "⚠ offline", error: "✗" }[s.phase];
     if (s.phase === "error" && s.message === Engine.REMOVED_MESSAGE && !this.removedNoticed) {
@@ -507,6 +533,12 @@ export default class ObsyncPlugin extends Plugin {
     if (s.progress) txt += ` ${s.progress.done}/${s.progress.total}`;
     this.statusEl.setText(txt);
     this.statusEl.title = s.message ?? (s.lastSync ? `last sync ${new Date(s.lastSync).toLocaleTimeString()}` : "");
+    this.lastStatus = s;
+    this.ribbonEl?.setAttribute("aria-label", this.statusText(s));
+    this.ribbonEl?.toggleClass("obsync-attention", s.phase === "error" || s.phase === "offline");
+    // On a phone a problem would otherwise be invisible: say it once per change of state.
+    if (Platform.isMobile && (s.phase === "error" || s.phase === "offline") && this.lastPhase !== s.phase) new Notice(`obsync: ${this.statusText(s)}`, 8000);
+    this.lastPhase = s.phase;
   }
 
   // ---------- enrolment ----------
@@ -918,12 +950,7 @@ export default class ObsyncPlugin extends Plugin {
   cmdConflicts(): Promise<void> {
     return this.guard(async () => {
       const files = this.engine?.conflictFiles() ?? [];
-      new ListModal(
-        this.app,
-        "Conflict copies",
-        files.map((p) => ({ label: p, action: { label: "Open", run: async () => void this.app.workspace.openLinkText(p, "", true) } })),
-        "No conflict copies. 🎉",
-      ).open();
+      new ConflictModal(this.app, files).open();
     });
   }
 

@@ -189,8 +189,8 @@ Each invite works for **one device** and expires after **one hour**. Make a
 new one for each device.
 
 What you should see: your notes appear on the new device. Phones have no
-status bar, so look in **Settings → obsync**: the top of the page shows the
-sync state. On the first device, **Manage devices** now lists the new one.
+status bar, so tap the obsync icon in the ribbon menu (or run **obsync: Show
+sync status**) to see the sync state; a problem also shows a notice. On the first device, **Manage devices** now lists the new one.
 
 Files that were already identical on both devices are recognised without
 downloading again. If a file differed, both versions are kept: the second
@@ -232,7 +232,7 @@ make them, and catch up automatically after a device has been offline.
 | obsync is missing from Settings | The plugin is not installed in **this** vault | Plugins are per vault. Do Part 3 in this vault. |
 | "this device is already in a vault" | This Obsidian vault is already connected | Nothing to do, or **Settings → obsync → Advanced → Leave this vault** to connect it elsewhere. |
 | A notice that some files "cannot sync" because of their name | The name contains `? * : < > " \| \` | Rename the file inside Obsidian. Those characters are not allowed on every platform, so obsync refuses them everywhere. |
-| Files named "… (conflict device date).md" | The same file was changed in two places at once | Open both, keep what you want, delete the other. **Show conflicts** lists them. |
+| Files named "… (conflict device date).md" | The same file was changed in two places at once | Run **obsync: Show conflicts**. It lists each one with the lines that differ and buttons to keep the current file, keep the other version, or open both. |
 | A phone never syncs | No HTTPS, or the plugin is not enabled | The server address must start with `https://` and have a real certificate. Check **Settings → obsync** for the status line. |
 | A phone stops syncing in the background | iOS and Android pause apps that are not on screen | Open Obsidian; it catches up within seconds. |
 | "keys changed on another device" then normal again | Another device rotated the keys | Nothing. It is informational. |

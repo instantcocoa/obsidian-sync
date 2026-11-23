@@ -1,5 +1,6 @@
 /** Small modals used by settings and commands. No framework, plain Obsidian API. */
-import { App, Modal, Notice, Setting } from "obsidian";
+import { App, Modal, Notice, Setting, TFile } from "obsidian";
+import { conflictOrigin, isTextPath, lineDiff } from "../core/paths";
 import qrcode from "qrcode-generator";
 
 /** True when `url` is https or loopback, else after the person accepts an unencrypted connection. */
@@ -213,6 +214,111 @@ export class InviteModal extends Modal {
         }),
     );
   }
+  override onClose(): void {
+    this.contentEl.empty();
+  }
+}
+
+/**
+ * Review conflict copies (DESIGN.md §6.6). A conflict never overwrites: the
+ * losing version is kept beside the file as "name (conflict device date)".
+ * This lists every such copy with what differs and lets the user settle it:
+ * keep the current file (the copy is deleted), keep the copy (it replaces
+ * the current file, whose content stays in the server's history), or open
+ * both. Every choice is an ordinary edit or delete, so it syncs like one.
+ */
+export class ConflictModal extends Modal {
+  constructor(
+    app: App,
+    private paths: string[],
+  ) {
+    super(app);
+  }
+
+  override onOpen(): void {
+    void this.render();
+  }
+
+  private file(path: string): TFile | null {
+    const f = this.app.vault.getAbstractFileByPath(path);
+    return f instanceof TFile ? f : null;
+  }
+
+  private async render(): Promise<void> {
+    const el = this.contentEl;
+    el.empty();
+    this.titleEl.setText("Conflict copies");
+    const live = this.paths.filter((p) => this.file(p));
+    if (live.length === 0) {
+      el.createEl("p", { text: "No conflict copies. Every device agrees." });
+      return;
+    }
+    el.createEl("p", { text: `${live.length} file${live.length === 1 ? " was" : "s were"} changed in two places at once. Both versions were kept. Choose what to keep for each.` });
+    for (const path of live) await this.row(el, path);
+  }
+
+  private async row(el: HTMLElement, path: string): Promise<void> {
+    const copy = this.file(path)!;
+    const origin = conflictOrigin(path);
+    const current = origin ? this.file(origin.original) : null;
+    const box = el.createDiv({ cls: "obsync-conflict" });
+    box.createEl("h4", { text: origin?.original ?? path });
+    box.createEl("div", { cls: "setting-item-description", text: origin ? `Other version from ${origin.device}, ${origin.when}` : "Conflict copy" });
+    if (current && isTextPath(path) && copy.stat.size < 2_000_000 && current.stat.size < 2_000_000) {
+      const [a, b] = await Promise.all([this.app.vault.read(current), this.app.vault.read(copy)]);
+      const d = lineDiff(a, b);
+      if (d.onlyA.length === 0 && d.onlyB.length === 0) box.createEl("div", { cls: "setting-item-description", text: "The two versions have the same lines (they differ only in order or line endings)." });
+      else {
+        const det = box.createEl("details");
+        det.createEl("summary", { text: `${d.onlyA.length} line${d.onlyA.length === 1 ? "" : "s"} only in the current file, ${d.onlyB.length} only in the other version` });
+        const show = (title: string, lines: string[]) => {
+          if (lines.length === 0) return;
+          det.createEl("div", { cls: "setting-item-description", text: title });
+          det.createEl("pre", { cls: "obsync-diff", text: lines.slice(0, 40).join("\n") + (lines.length > 40 ? `\n… ${lines.length - 40} more` : "") });
+        };
+        show("Only in the current file:", d.onlyA);
+        show("Only in the other version:", d.onlyB);
+      }
+    } else if (current) {
+      box.createEl("div", { cls: "setting-item-description", text: `Current file ${current.stat.size} bytes, other version ${copy.stat.size} bytes.` });
+    } else {
+      box.createEl("div", { cls: "setting-item-description", text: "The original file no longer exists; this copy is the only version here." });
+    }
+    const act = async (fn: () => Promise<void>, done: string) => {
+      try {
+        await fn();
+        new Notice(`obsync: ${done}`);
+        await this.render();
+      } catch (e) {
+        new Notice(`obsync: ${(e as Error).message}`, 8000);
+      }
+    };
+    const s = new Setting(box);
+    s.addButton((b) =>
+      b.setButtonText("Open both").onClick(async () => {
+        if (current) await this.app.workspace.getLeaf("tab").openFile(current);
+        await this.app.workspace.getLeaf("split").openFile(copy);
+        this.close();
+      }),
+    );
+    if (current) {
+      s.addButton((b) => b.setButtonText("Keep current").onClick(() => act(() => this.app.fileManager.trashFile(copy), "kept the current file; the other version was removed")));
+      s.addButton((b) =>
+        b
+          .setButtonText("Keep other version")
+          .setWarning()
+          .onClick(() =>
+            act(async () => {
+              await this.app.vault.modifyBinary(current, await this.app.vault.readBinary(copy));
+              await this.app.fileManager.trashFile(copy);
+            }, "the other version is now the file; the previous content is in its history"),
+          ),
+      );
+    } else if (origin) {
+      s.addButton((b) => b.setButtonText("Restore as the file").onClick(() => act(() => this.app.fileManager.renameFile(copy, origin.original), "restored")));
+    }
+  }
+
   override onClose(): void {
     this.contentEl.empty();
   }

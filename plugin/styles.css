@@ -1,1 +1,6 @@
-/* obsync has no custom UI beyond stock Obsidian settings; intentionally empty. */
+/* obsync: the conflict review dialog and the ribbon icon's attention state. */
+.obsync-conflict { border-top: 1px solid var(--background-modifier-border); padding: 0.75em 0; }
+.obsync-conflict h4 { margin: 0 0 0.25em; word-break: break-word; }
+.obsync-conflict .setting-item { border: none; padding: 0.5em 0 0; }
+.obsync-diff { max-height: 12em; overflow: auto; white-space: pre-wrap; word-break: break-word; font-size: var(--font-smallest); background: var(--background-secondary); padding: 0.5em; margin: 0.25em 0 0.5em; }
+.obsync-attention { color: var(--text-error); }

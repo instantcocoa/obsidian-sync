@@ -83,6 +83,9 @@ vi.mock("obsidian", () => {
     }
     addCommand(): void {}
     addSettingTab(): void {}
+    addRibbonIcon(): { setAttribute(): void; toggleClass(): void } {
+      return { setAttribute() {}, toggleClass() {} };
+    }
     addStatusBarItem(): { setText(): void } {
       return { setText() {} };
     }

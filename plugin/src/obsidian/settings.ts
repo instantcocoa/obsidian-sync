@@ -249,6 +249,15 @@ export class ObsyncSettingTab extends PluginSettingTab {
       .setDesc("Forgets what this device thinks it has synced and re-derives it by hashing every file. Safe; uploads nothing that already matches.")
       .addButton((b) => b.setButtonText("Rebuild").onClick(() => this.run(() => this.plugin.engine!.rebuildState())));
     new Setting(el)
+      .setName("Reset this device to the server's copy")
+      .setDesc("One-way: this device's files become exactly what the server has; nothing is uploaded. Local edits the server lacks and files that exist only here are moved to .trash/obsync-reset-<time>/, not deleted.")
+      .addButton((b) =>
+        b
+          .setButtonText("Reset…")
+          .setWarning()
+          .onClick(() => this.run(() => this.plugin.cmdResetToServer())),
+      );
+    new Setting(el)
       .setName("Leave this vault")
       .setDesc("Stops syncing and forgets the keys and token on this device. Files stay on disk. Remove this device from another device afterwards to rotate keys.")
       .addButton((b) =>

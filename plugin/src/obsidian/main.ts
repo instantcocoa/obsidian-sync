@@ -136,6 +136,7 @@ export default class ObsyncPlugin extends Plugin {
     this.addCommand({ id: "apply-held-deletes", name: "Apply held deletions", callback: () => this.engine?.applyHeldDeletes() });
     this.addCommand({ id: "unlock", name: "Unlock vault keys", callback: () => void this.unlock() });
     this.addCommand({ id: "accept-restore", name: "Accept server restore (after the server was restored from a backup)", callback: () => this.cmdAcceptRestore() });
+    this.addCommand({ id: "reset-to-server", name: "Reset this device to the server's copy", callback: () => this.cmdResetToServer() });
     // A scanned invite QR (or a tapped obsidian:// link) lands here. Never
     // let this registration fail the whole plugin load: on a reload (an
     // update through BRAT is a disable/enable) Obsidian has been seen to
@@ -510,6 +511,35 @@ export default class ObsyncPlugin extends Plugin {
       `obsync: this vault folder is also handled by ${found.join(", ")}. Anything that copies the folder copies the vault keys in ${this.app.vault.configDir}/plugins/obsync/data.json unless they are protected: see Settings → obsync → Protect keys, or keep that folder out of the other tool.`,
       30000,
     );
+  }
+
+  /**
+   * The one-way recovery: this device's files become the server's copy,
+   * nothing is uploaded, and every local difference is parked under
+   * .trash/obsync-reset-<time>/ in the vault. For a device that has drifted
+   * (an old laptop, a vault brought over from another sync tool) when the
+   * other devices' copy is the one to keep.
+   */
+  cmdResetToServer(): Promise<void> {
+    return this.guard(async () => {
+      if (!this.engine) {
+        new Notice("obsync: not connected to a vault.", 8000);
+        return;
+      }
+      const ok = await ConfirmModal.ask(
+        this.app,
+        "Reset this device to the server's copy?",
+        [
+          "Every file on this device is made identical to the vault on the server. Nothing is uploaded.",
+          "Edits made here that the server does not have, and files that exist only here, are moved to .trash/obsync-reset-<time>/ inside this vault, not deleted. Empty that folder once you are sure.",
+          "Use this when this device has drifted and the copy on your other devices is the one to keep. For an ordinary resync that keeps local edits, use Rebuild local state instead.",
+        ],
+        "Reset",
+      );
+      if (!ok) return;
+      const moved = await this.engine.resetToServer();
+      new Notice(moved.length ? `obsync: reset done; ${moved.length} local version${moved.length === 1 ? "" : "s"} moved to .trash/obsync-reset-…` : "obsync: reset done; this device already matched the server.", 10000);
+    });
   }
 
   cmdAcceptRestore(): Promise<void> {

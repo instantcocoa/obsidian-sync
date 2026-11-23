@@ -221,19 +221,49 @@ export class IosDevice {
 /**
  * The obsync server on a real host reached over ssh, with the halt/resume/
  * backup/restore surface of TestServer so the recovery scenarios read the
- * same. `host` is an ssh config alias; the server lives in `~/obsync` there
- * as the systemd unit `obsync.service` (server/obsync.service), data under
- * /var/lib/private/obsync (DynamicUser's StateDirectory); the ssh user can sudo.
+ * same. `host` is an ssh config alias whose user can sudo. Two layouts:
+ *
+ * - `systemd` (the default, what util ran): `obsync.service` from
+ *   server/obsync.service, data under /var/lib/private/obsync (DynamicUser's
+ *   StateDirectory), the CLI at /usr/local/bin/obsync.
+ * - `compose` (kratz, server/deploy/): a service in the user's home-directory
+ *   compose stack, data on a bind mount, the CLI run inside the container.
+ *   IOS_SERVER_MODE=compose IOS_SERVER_SERVICE=obsync-test
+ *   IOS_SERVER_DATA=/var/lib/obsync-test (the defaults for compose).
+ *
+ * Both need the operator's marker ~/obsync/.allow-device-tests on the host
+ * before the harness stops, wipes or restores anything, and the compose
+ * layout additionally refuses the production service name "obsync" unless
+ * IOS_ALLOW_PROD_SERVER=1: these scenarios replace the data directory.
  */
+export type RemoteMode = "systemd" | "compose";
+
 export class RemoteServer {
+  readonly mode: RemoteMode;
+  readonly service: string;
+  readonly data: string;
+
   constructor(
     public url: string,
     public host: string,
-  ) {}
+    opts: { mode?: RemoteMode; service?: string; data?: string } = {},
+  ) {
+    this.mode = opts.mode ?? ((process.env.IOS_SERVER_MODE as RemoteMode | undefined) || "systemd");
+    this.service = opts.service ?? process.env.IOS_SERVER_SERVICE ?? (this.mode === "compose" ? "obsync-test" : "obsync");
+    this.data = opts.data ?? process.env.IOS_SERVER_DATA ?? (this.mode === "compose" ? "/var/lib/obsync-test" : "/var/lib/private/obsync");
+    if (this.mode === "compose" && this.service === "obsync" && process.env.IOS_ALLOW_PROD_SERVER !== "1") {
+      throw new Error('refusing to run device tests against the compose service "obsync" (production); point IOS_SERVER_SERVICE at a test instance, or set IOS_ALLOW_PROD_SERVER=1');
+    }
+  }
 
-  /** Mint a create link on the host: `sudo obsync vault create` (the CLI drops to the service user before touching the database). */
+  /** The CLI on the host: the installed binary, or the one inside the container (which runs as the data directory's owner). */
+  private cli(args: string): string {
+    return this.mode === "compose" ? `cd ~ && docker compose exec -T ${this.service} obsync ${args} --data /data` : `sudo /usr/local/bin/obsync ${args} --data ${this.data}`;
+  }
+
+  /** Mint a create link on the host (`obsync vault create`; the systemd CLI drops to the service user before touching the database). */
   createLink(): string {
-    const out = this.sh(`sudo /usr/local/bin/obsync vault create --data ${RemoteServer.DATA} --url ${this.url}`);
+    const out = this.sh(this.cli(`vault create --url ${this.url}`));
     const m = /obsync:\/\/create#\S+/.exec(out);
     if (!m) throw new Error("vault create printed no link: " + out);
     return m[0];
@@ -253,22 +283,28 @@ export class RemoteServer {
     }
   }
 
-  private static readonly DATA = "/var/lib/private/obsync";
-
   /** The server must carry an operator-placed marker before this harness stops, wipes or restores it. */
   private assertTestServer(): void {
     const r = spawnSync("ssh", ["-o", "BatchMode=yes", this.host, "test -f ~/obsync/.allow-device-tests"], { encoding: "utf8", timeout: 60_000 });
     if (r.status !== 0) throw new Error(`${this.host} has no ~/obsync/.allow-device-tests marker; refusing to stop or alter it (create the file on the host to allow device runs)`);
   }
 
+  private stopCmd(): string {
+    return this.mode === "compose" ? `cd ~ && docker compose stop ${this.service}` : `sudo systemctl stop ${this.service}`;
+  }
+
+  private startCmd(): string {
+    return this.mode === "compose" ? `cd ~ && docker compose start ${this.service}` : `sudo systemctl start ${this.service}`;
+  }
+
   async halt(): Promise<void> {
     this.assertTestServer();
-    this.sh("sudo systemctl stop obsync");
+    this.sh(this.stopCmd());
     await waitFor("server down", async () => !(await this.healthy()), 60_000, 2_000);
   }
 
   async resume(): Promise<void> {
-    this.sh("sudo systemctl start obsync");
+    this.sh(this.startCmd());
     await waitFor("server up", () => this.healthy(), 90_000, 2_000);
   }
 
@@ -277,8 +313,7 @@ export class RemoteServer {
     await this.resume();
   }
 
-  /** Snapshot the data directory while stopped (the ACME cache included, so the certificate survives a restore). */
-  /** Run `fn` with the unit stopped; the unit is started again whatever happens. */
+  /** Run `fn` with the service stopped; it is started again whatever happens. */
   private async whileStopped(fn: () => void): Promise<void> {
     await this.halt();
     try {
@@ -293,21 +328,27 @@ export class RemoteServer {
     return name;
   }
 
+  /** Where this harness keeps its snapshots of the data directory: beside it. */
+  private backupPath(name: string): string {
+    return `${this.data}.${name}`;
+  }
+
+  /** Snapshot the data directory while stopped (the ACME cache included on a systemd host, so the certificate survives a restore). */
   async backup(): Promise<string> {
     const name = `obsync-backup-${Date.now()}`;
-    await this.whileStopped(() => this.sh(`sudo cp -a ${RemoteServer.DATA} /var/lib/private/${name}`));
+    await this.whileStopped(() => this.sh(`sudo cp -a ${this.data} ${this.backupPath(name)}`));
     return name;
   }
 
   /** Restore a backup made by `backup()`: the live data directory is moved aside, never deleted. */
   async restoreFrom(name: string): Promise<void> {
-    const n = RemoteServer.backupName(name);
-    await this.whileStopped(() => this.sh(`sudo test -d /var/lib/private/${n} && sudo mv ${RemoteServer.DATA} ${RemoteServer.DATA}.replaced-${Date.now()} && sudo cp -a /var/lib/private/${n} ${RemoteServer.DATA}`));
+    const b = this.backupPath(RemoteServer.backupName(name));
+    await this.whileStopped(() => this.sh(`sudo test -d ${b} && sudo mv ${this.data} ${this.data}.replaced-${Date.now()} && sudo cp -a ${b} ${this.data}`));
   }
 
   /** Remove every vault and blob but keep the ACME cache: a fresh server for the next run. */
   async wipe(): Promise<void> {
-    await this.whileStopped(() => this.sh(`sudo find ${RemoteServer.DATA} -mindepth 1 -maxdepth 1 ! -name acme -exec rm -rf {} +`));
+    await this.whileStopped(() => this.sh(`sudo find ${this.data} -mindepth 1 -maxdepth 1 ! -name acme -exec rm -rf {} +`));
   }
 }
 

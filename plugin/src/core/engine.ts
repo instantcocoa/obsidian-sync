@@ -265,6 +265,16 @@ export class Engine {
   /** Request a sync soon (debounced). `delay` 0 = as soon as the loop is free. */
   /** Set once the server said our token is revoked; nothing short of a restart clears it. */
   private revoked = false;
+  /**
+   * Set while resetToServer() runs: the device path of the folder (under
+   * .trash, so excluded from sync) that receives every local version the
+   * server's head replaces. Null in normal operation, when a local
+   * difference is a conflict to resolve, never something to discard.
+   */
+  private serverWins: string | null = null;
+  private discarded: string[] = [];
+  /** Local files whose names can never sync, reported once each (DESIGN §6.5). */
+  private reportedUnsyncable = new Set<string>();
 
   kick(delay = this.cfg.debounceMs): void {
     if (this.stopped || this.revoked) return;
@@ -330,6 +340,81 @@ export class Engine {
     await this.flushState();
     await this.scan();
     this.kick(0);
+  }
+
+  /**
+   * One-way reset: make this device's files identical to the vault on the
+   * server, uploading nothing. Every local version the server's head
+   * replaces, and every file that exists only here, is moved (bytes and
+   * mtime) under `.trash/obsync-reset-<time>/` at its vault path; nothing is
+   * deleted outright. Returns the vault paths that were moved. The opposite
+   * of rebuildState(), which keeps every local difference and resolves it.
+   *
+   * Runs as the sync slot holder so no ordinary sync interleaves. If it fails
+   * midway (the network, say) the state is that of a fresh device: the next
+   * ordinary sync finishes the job the safe way, treating what is left as
+   * conflicts rather than discards.
+   */
+  async resetToServer(): Promise<string[]> {
+    if (this.stopped || this.revoked) throw new Error("not connected");
+    if (this.syncing) await this.syncing.catch(() => undefined);
+    const run = (async () => {
+      const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+      const dir = `.trash/obsync-reset-${stamp}`;
+      this.serverWins = dir;
+      this.discarded = [];
+      this.heldDeletes = [];
+      this.pullFirst.clear();
+      this.state = { version: 1, cursor: 0, epoch: this.vc.keyring.current, files: {}, dirty: [], inflight: {} };
+      this.dirty.clear();
+      await this.flushState();
+      this.setStatus({ phase: "syncing", message: "resetting to the server's copy" });
+      try {
+        // Cursor 0: the snapshot of every head, applied with serverWins set,
+        // so a differing local file is moved aside and the head written.
+        await this.pull();
+        // What the snapshot never mentioned exists only here.
+        for (const st of await this.fs.list()) {
+          if (this.unsyncable(st.path)) continue;
+          const logical = this.logical(st.path);
+          if (this.excluded(logical)) continue;
+          const e = this.state.files[logical];
+          if (e && e.hash !== null) continue;
+          await this.discardLocal(st.path);
+          await this.fs.remove(st.path);
+          if (e) this.dirty.delete(logical);
+        }
+      } finally {
+        this.serverWins = null;
+        await this.flushState();
+      }
+      await this.scan();
+      this.setStatus({ phase: "idle", lastSync: Date.now(), message: undefined });
+      this.log("info", `reset to the server's copy; ${this.discarded.length} local version(s) moved to ${dir}`);
+      return this.discarded;
+    })();
+    this.syncing = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    try {
+      return await run;
+    } finally {
+      this.syncing = null;
+      this.kick(0);
+    }
+  }
+
+  /** During a reset: park the local bytes of `devPath` under the reset folder, at the same vault path. */
+  private async discardLocal(devPath: string, bytes?: Uint8Array | null): Promise<void> {
+    const dir = this.serverWins;
+    if (!dir) throw new Error("discardLocal outside a reset");
+    const st = await this.fs.stat(devPath);
+    if (!st) return;
+    const data = bytes ?? (await this.fs.read(devPath));
+    await this.fs.write(`${dir}/${devPath}`, data, st.mtime);
+    this.discarded.push(devPath);
+    this.log("info", `reset: ${devPath} differs from the server; local version moved to ${dir}/${devPath}`);
   }
 
   // ----- helpers -----
@@ -435,8 +520,15 @@ export class Engine {
       const all = opts.onlyDot && this.fs.listDot ? await this.fs.listDot() : await this.fs.list();
       const seen = new Set<string>();
       let n = 0;
+      const unsyncable: string[] = [];
       for (const st of all) {
-        if (this.unsyncable(st.path)) continue;
+        if (this.unsyncable(st.path)) {
+          if (!this.reportedUnsyncable.has(st.path)) {
+            this.reportedUnsyncable.add(st.path);
+            unsyncable.push(st.path);
+          }
+          continue;
+        }
         const logical = this.logical(st.path);
         if (opts.onlyDot && !inDotScope(logical)) continue;
         seen.add(logical);
@@ -470,6 +562,15 @@ export class Engine {
       }
       await this.queueDeletions(missing, Object.keys(this.state.files).length);
       await this.flushState();
+      // Names no device can carry (DESIGN §6.5: ? * : < > " | \ and control
+      // characters, which Obsidian itself refuses on some platforms) stay
+      // local. Said once per file, so a vault brought over from another tool
+      // learns which of its files are not travelling.
+      if (unsyncable.length) {
+        const label = unsyncable.length === 1 ? unsyncable[0] : `${unsyncable.length} files (${unsyncable.slice(0, 3).join(", ")}${unsyncable.length > 3 ? ", …" : ""})`;
+        this.log("warn", `not synced, name unusable on other platforms: ${unsyncable.join(", ")}`);
+        this.hooks.onSkipped?.(label, "the name contains a character (? * : < > \" | \\) that cannot sync; rename the file to sync it");
+      }
     } finally {
       this.setStatus({ phase: this.status.phase === "scanning" ? "idle" : this.status.phase });
     }
@@ -1180,12 +1281,13 @@ export class Engine {
       if (!st) {
         this.state.files[logical] = { hash: null, seq: op.seq, at: op.created_at, size: 0, mtime: 0 };
         this.dirty.delete(logical);
-      } else if (diskHash !== (e?.hash ?? null)) {
+      } else if (diskHash !== (e?.hash ?? null) && !this.serverWins) {
         // Local edit vs remote delete: the edit wins; re-upload on top of the tombstone.
         this.log("info", `remote deleted ${devPath} but it was edited here; keeping local`);
         this.state.files[logical] = { hash: null, seq: op.seq, at: op.created_at, size: 0, mtime: 0 };
         this.markDirty(logical);
       } else {
+        if (diskHash !== (e?.hash ?? null)) await this.discardLocal(devPath, diskBytes);
         this.state.inflight[logical] = { blob: null, seq: op.seq, size: 0, mtime: 0 };
         await this.flushState();
         await this.fs.remove(devPath);
@@ -1207,6 +1309,12 @@ export class Engine {
       return;
     }
     if (st && localEdited) {
+      if (this.serverWins) {
+        // A reset: the server's head wins; the local version is parked, not merged.
+        await this.discardLocal(devPath, diskBytes);
+        await this.writeRemote(logical, op, meta, blobs, st);
+        return;
+      }
       if (!e && this.cfg.adoptConfig && isConfigLogical(logical)) {
         // A device that has never synced this config file (typically one that
         // just joined) is adopting the vault's configuration: its own copy is

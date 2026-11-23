@@ -28,85 +28,242 @@ Linux, macOS and Windows with real Obsidian, and on a physical iPhone. It has
 not yet been reviewed by a human security specialist, and it is young: keep a
 backup of your vault while you get to know it.
 
-## Quick start
+## Setup guide
 
-You need a host with a public domain name (phones require a real HTTPS
-certificate) and Obsidian on each device.
+Follow the parts in order. Each step says what to do and what you should see
+afterwards. If what you see differs, go to [Troubleshooting](#troubleshooting)
+before moving on.
 
-### 1. Run the server
+Short version for people who have done this before: run the server, run
+`obsync vault create`, install the plugin through BRAT, paste the link on the
+first device, scan an invite on the others.
 
-**Route A: one binary with built-in HTTPS.** The server obtains a Let's
-Encrypt certificate itself and listens on ports 443 and 80.
+### What you need before you start
+
+- **A server that is always on**, reachable from the internet. Any small
+  Linux VPS works (1 CPU, 512 MB of memory is plenty).
+- **A domain name pointing at that server**, for example `sync.example.com`.
+  Create an `A` record for it at your DNS provider with the server's IP
+  address. Phones refuse to sync without a real HTTPS certificate, and a
+  certificate needs a domain name.
+- **Ports 80 and 443 open** on the server's firewall.
+- **Obsidian** installed on each device you want to sync.
+- About 20 minutes.
+
+You do not need an account anywhere, a database, or a password for the
+server. There is no admin password.
+
+### Part 1: start the server
+
+Do this once, on the server, over SSH.
+
+**1. Install Go and git** (Debian or Ubuntu shown; any recent Go works):
+
+```sh
+sudo apt update && sudo apt install -y golang-go git
+```
+
+**2. Download and build obsync:**
 
 ```sh
 git clone https://github.com/instantcocoa/obsidian-sync
 cd obsidian-sync/server
 go build -o obsync ./cmd/obsync
-sudo ./obsync serve --data /var/lib/obsync --acme-domain sync.example.com
 ```
 
-`server/obsync.service` is a systemd unit that runs it as its own user.
+You should now have a file named `obsync` in this folder. `./obsync` with no
+arguments prints a list of commands.
 
-**Route B: Docker behind Caddy.** For a host that already runs a compose
-stack with a shared Caddy. From your own machine:
+**3. Install it as a service** so it starts on boot and restarts if it
+stops. Put your own domain in the first line, then paste the rest as is:
 
 ```sh
-git clone https://github.com/instantcocoa/obsidian-sync
-cd obsidian-sync
-OBSYNC_SITE=sync.example.com server/deploy/deploy.sh myhost
+DOMAIN=sync.example.com
+sudo cp obsync /usr/local/bin/obsync
+sed "s/sync\.example\.com/$DOMAIN/g" obsync.service | sudo tee /etc/systemd/system/obsync.service >/dev/null
+sudo systemctl daemon-reload
+sudo systemctl enable --now obsync
 ```
 
-The script copies the source to the host, builds the image, adds the
-service to the stack, installs the Caddy site file and the nightly backup,
-and waits for `https://sync.example.com/healthz`. Read
-[server/README.md](server/README.md) first: it lists what the script
-assumes about the host and how to adapt the two small config files.
+The server fetches its own HTTPS certificate from Let's Encrypt the first
+time something connects. Your notes will live under `/var/lib/obsync`,
+encrypted.
 
-To try it on your own machine only, no certificate needed:
+**4. Check it is running.** From any computer:
 
 ```sh
-cd server && go build -o obsync ./cmd/obsync
+curl https://sync.example.com/healthz
+```
+
+You should see `ok`. The first request can take ten seconds while the
+certificate is issued.
+
+Already run Docker with a Caddy reverse proxy? Use the kit in
+[server/deploy](server/deploy) instead of steps 1 to 3;
+[server/README.md](server/README.md) explains it.
+
+Just trying it on your own computer, with no domain? Skip step 3 and run
+this instead. Computers on the same machine can connect; phones cannot,
+because there is no certificate.
+
+```sh
 ./obsync serve --data ./data --listen 127.0.0.1:8080 --public-url http://127.0.0.1:8080
 ```
 
-### 2. Make a vault
+### Part 2: create a vault on the server
 
-On the server host:
+A "vault" on the server is an empty, locked box. The first device to open it
+makes the keys.
+
+On the server:
 
 ```sh
-sudo ./obsync vault create --data /var/lib/obsync
-# Docker: docker compose exec obsync obsync vault create --data /data
+sudo obsync vault create --data /var/lib/obsync
 ```
 
-It prints a one-time **create link** (`obsync://create#…`) and a QR code of
-it. The link works once and lasts an hour (`--ttl 24h` for longer). There is
-no admin password anywhere.
+It prints a line starting with `obsync://create#` and a QR code of the same
+link. This is your **create link**. Keep the terminal open.
 
-### 3. Install the plugin
+- The link works **once** and expires after **one hour**. Add `--ttl 24h` if
+  you need longer. Run the command again any time for a fresh link.
+- One link makes one vault. If you have two Obsidian vaults, run the command
+  twice and use one link in each.
 
-In Obsidian, on every device:
+### Part 3: install the plugin
 
-1. Settings → Community plugins → Browse → install and enable **BRAT**.
-2. Settings → BRAT → Add beta plugin → `instantcocoa/obsidian-sync`.
-3. Enable **obsync**.
+Do this in Obsidian on **every** device, in **each vault** you want synced.
+Plugins are installed per vault.
 
-### 4. First device
+1. Open the vault you want to sync.
+2. Open **Settings** (the gear icon).
+3. Go to **Community plugins**. If it says restricted mode is on, press
+   **Turn on community plugins**.
+4. Press **Browse**, search for **BRAT**, press **Install**, then **Enable**.
+5. Close the browser. In Settings, scroll the left column down to **BRAT**.
+6. Press **Add beta plugin**. Paste this and confirm:
 
-Settings → obsync → **Join or create with a link** → paste the create link →
-**Connect**. On a phone you can scan the QR code with the camera instead.
-The vault keys are generated on this device and the folder is uploaded.
+   ```
+   instantcocoa/obsidian-sync
+   ```
 
-### 5. Every other device
+7. Leave "Enable after installing" ticked.
 
-On a device already in the vault: Settings → obsync → **Generate invite
-link**. Scan the QR code with the new device's camera, or paste the link
-into **Join or create with a link**. Each invite works once, for one hour.
+You should now see **obsync** in the left column of Settings. If you use
+another sync plugin in this vault (Self-hosted LiveSync, Remotely Save),
+turn it off first. Two sync tools in one vault fight each other.
 
-### 6. Set a recovery passphrase
+### Part 4: connect your first device
 
-Settings → obsync → **Set recovery passphrase**. It is optional. It is also
-the only way back in if you lose every device, so keep it with the vault id
-shown on the same page.
+Use the device that has your notes, usually your computer.
+
+1. In Obsidian: **Settings → obsync**.
+2. Check **Device name**. It is how this device shows up on your other
+   devices. Change it if you like.
+3. Copy the create link from the server's terminal (the whole line starting
+   with `obsync://create#`).
+4. Paste it into **Join or create with a link** and press **Connect**.
+
+What you should see: a notice that the vault was created, and on a computer
+`obsync ✓` in the status bar at the bottom right once the upload finishes.
+A few hundred notes take under a minute.
+
+Your encryption keys were just made on this device. On a computer they are
+locked with the operating system's keychain automatically. Nothing to do.
+
+### Part 5: add your other devices
+
+Repeat for each phone, tablet or second computer. The new device can start
+with an empty vault or with a copy of the same notes; both work.
+
+1. On the new device, do [Part 3](#part-3-install-the-plugin) in the vault
+   you want to sync. **Leave that vault open.**
+2. On the **first** device: **Settings → obsync → Generate invite link**. A
+   QR code and a link appear.
+3. **Phone or tablet:** open the Camera app, point it at the QR code, tap
+   the Obsidian banner. **Computer:** copy the link, paste it into **Join or
+   create with a link** on the new device, press **Connect**.
+4. Obsidian asks "Join the vault on https://sync.example.com?" Press
+   **Join**.
+
+Each invite works for **one device** and expires after **one hour**. Make a
+new one for each device.
+
+What you should see: your notes appear on the new device. Phones have no
+status bar, so look in **Settings → obsync**: the top of the page shows the
+sync state. On the first device, **Manage devices** now lists the new one.
+
+Files that were already identical on both devices are recognised without
+downloading again. If a file differed, both versions are kept: the second
+one gets "(conflict …)" in its name. Nothing is overwritten.
+
+### Part 6: set a recovery passphrase
+
+Optional, and strongly recommended. Without it, if you lose **every**
+device, your notes on the server can never be decrypted by anyone, including
+you.
+
+1. On any connected device: **Settings → obsync → Set recovery passphrase**.
+2. Choose four or more random words, or 20 or more characters.
+3. Write down three things together, somewhere safe and not in the vault:
+   the passphrase, the **Vault id** shown at the top of the obsync settings,
+   and your server address.
+
+To use it later on a new device: **Settings → obsync → Join with recovery
+passphrase**.
+
+### Part 7: check that it works
+
+1. On device A, create a note called `sync test` and type a line.
+2. Within a few seconds it appears on device B.
+3. Edit it on B. The change appears on A.
+4. Run the command **obsync: Show conflicts** (open the command palette and
+   type "conflicts"). An empty list is what you want.
+
+You are done. From here on there is nothing to press: edits sync as you
+make them, and catch up automatically after a device has been offline.
+
+### Troubleshooting
+
+| What you see | What it means | What to do |
+| --- | --- | --- |
+| `curl` to `/healthz` fails or times out | The server is not reachable | Check the DNS record points at the server, ports 80 and 443 are open, and `sudo systemctl status obsync` says active. `sudo journalctl -u obsync -n 50` shows why it stopped. |
+| An error that the link was used, has expired or is not valid | Create links last an hour and work once | Run `sudo obsync vault create --data /var/lib/obsync` again and use the new link. |
+| "Unrecognized URI" or nothing happens when a link or QR opens Obsidian | obsync is not installed or not enabled in the vault that is open | Open the right vault, finish Part 3 there, try again. |
+| obsync is missing from Settings | The plugin is not installed in **this** vault | Plugins are per vault. Do Part 3 in this vault. |
+| "this device is already in a vault" | This Obsidian vault is already connected | Nothing to do, or **Settings → obsync → Advanced → Leave this vault** to connect it elsewhere. |
+| A notice that some files "cannot sync" because of their name | The name contains `? * : < > " \| \` | Rename the file inside Obsidian. Those characters are not allowed on every platform, so obsync refuses them everywhere. |
+| Files named "… (conflict device date).md" | The same file was changed in two places at once | Open both, keep what you want, delete the other. **Show conflicts** lists them. |
+| A phone never syncs | No HTTPS, or the plugin is not enabled | The server address must start with `https://` and have a real certificate. Check **Settings → obsync** for the status line. |
+| A phone stops syncing in the background | iOS and Android pause apps that are not on screen | Open Obsidian; it catches up within seconds. |
+| "keys changed on another device" then normal again | Another device rotated the keys | Nothing. It is informational. |
+| One device looks wrong and the others are right | That device drifted | **Settings → obsync → Advanced → Reset this device to the server's copy**. Its differing files are moved to `.trash/obsync-reset-…`, not deleted. |
+| Large files do not appear on one device | That device runs an older plugin | Update obsync on every device: **Settings → BRAT → Check for updates**. All devices of a vault need 1.0 or newer. |
+| You lost a device | Its copy of the keys is out of your hands | On another device: **Manage devices → Remove**. The keys rotate and the lost device can read nothing new. |
+
+### Common questions
+
+**Do I need the YubiKey or the `/admin` page?** No. It is an optional way to
+make create links from a browser instead of from SSH. See
+[server/README.md](server/README.md).
+
+**Can the server operator read my notes?** No. The server stores encrypted
+data and never receives a key. That is also why a lost recovery passphrase
+cannot be reset.
+
+**Where are my keys?** On each device, in the plugin's folder inside the
+vault, locked by the operating system's keychain on computers and by the
+device keychain on phones and tablets.
+
+**How do I update?** Plugin: **Settings → BRAT → Check for updates** on each
+device. Server: `git pull`, build again, copy the binary to
+`/usr/local/bin/obsync`, `sudo systemctl restart obsync`.
+
+**How do I back up the server?** Copy `/var/lib/obsync` while the service is
+stopped, or use the nightly backup kit in [server/deploy](server/deploy).
+Every device also holds a full copy of your notes.
+
+**How do I stop using it?** **Settings → obsync → Advanced → Leave this
+vault** on each device. Your notes stay on every device as ordinary files.
 
 ## How it works
 

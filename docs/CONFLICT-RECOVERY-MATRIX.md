@@ -97,6 +97,10 @@ These rows have their own test files, named in each row, not
 | 46 | A device is removed (key rotation, every chunk re-encrypted) while a large file exists; then the vault is restored to a time before that file's second version | A device that joins after the rotation reads the file; the restore brings the first version back on every device | `chunks.test.ts` |
 | 47 | Garbage collection with no retention, with live and superseded chunked versions | Chunks of every live version survive and a fresh device reads the files; chunks only a superseded version used are dropped | `chunks.test.ts`, server `chunks_test.go` |
 | 48 | An op lists a chunk that was never uploaded, or lists chunks on a deletion, or lists more than 4096 | Refused by the server, like an op whose blob is missing | server `chunks_test.go` |
+| 49 | A version stops the app twice while being written (a phone killed for memory) | Skipped and reported from the next start; the rest of the vault syncs; a later version of the file is applied | `review14.test.ts` |
+| 50 | A member or the server lists chunks the claimed size cannot hold, or pads an honest list | Refused before anything is fetched or allocated, or at the first chunk that overruns; nothing written | `review14.test.ts` |
+| 51 | Disjoint concurrent edits of a note large enough to be stored as chunks | One clean three-way merge, no copy | `review14.test.ts` |
+| 52 | A file named like a conflict copy, made by a vault member | The review dialog names the device that actually wrote it and will not replace an excluded or never-synced file | `review14.test.ts` |
 
 A file name no device can carry (`? * : < > " | \` or a control character)
 is not a conflict and not an error: the file stays where it is and the

@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -21,7 +22,7 @@ type limiter struct {
 	rate    float64 // tokens per second
 	burst   float64
 	lastGC  time.Time
-	trusted []*net.IPNet
+	trusted *trustSet
 }
 
 type bucket struct {
@@ -29,15 +30,100 @@ type bucket struct {
 	last   time.Time
 }
 
-func newLimiter(perMinute, burst int, trusted []*net.IPNet) *limiter {
+// trustSet is the --trust-proxy list: fixed CIDRs plus host names, which are
+// resolved now and every refresh after (a proxy in a container network has a
+// stable name and an address that changes when it is recreated). Trusting
+// one name is narrower than trusting the network's whole range, which also
+// covers its gateway and every other container on it.
+type trustSet struct {
+	static []*net.IPNet
+	hosts  []string
+	cur    atomic.Pointer[[]*net.IPNet]
+	lookup func(string) ([]net.IP, error)
+}
+
+func (t *trustSet) nets() []*net.IPNet {
+	if t == nil {
+		return nil
+	}
+	if p := t.cur.Load(); p != nil {
+		return *p
+	}
+	return t.static
+}
+
+// refresh resolves the host names; a name that does not resolve keeps its
+// previous addresses until it does (a proxy restarting must not drop trust,
+// and a lookup failure must not widen it).
+func (t *trustSet) refresh(prev map[string][]*net.IPNet) map[string][]*net.IPNet {
+	next := map[string][]*net.IPNet{}
+	all := append([]*net.IPNet{}, t.static...)
+	for _, h := range t.hosts {
+		ips, err := t.lookup(h)
+		if err != nil || len(ips) == 0 {
+			next[h] = prev[h]
+		} else {
+			for _, ip := range ips {
+				bits := 128
+				if ip.To4() != nil {
+					ip, bits = ip.To4(), 32
+				}
+				next[h] = append(next[h], &net.IPNet{IP: ip, Mask: net.CIDRMask(bits, bits)})
+			}
+		}
+		all = append(all, next[h]...)
+	}
+	t.cur.Store(&all)
+	return next
+}
+
+var hostName = func(s string) bool {
+	if s == "" || len(s) > 253 {
+		return false
+	}
+	for _, c := range s {
+		if !(c == '.' || c == '-' || c >= '0' && c <= '9' || c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z') {
+			return false
+		}
+	}
+	if net.ParseIP(s) != nil {
+		return false
+	}
+	// "1.2.3" or "10.0.5" is an address with a part missing, not a name:
+	// refuse it rather than look it up.
+	digits := true
+	for _, c := range s {
+		if c != '.' && (c < '0' || c > '9') {
+			digits = false
+			break
+		}
+	}
+	return !digits && s[0] != '-' && s[0] != '.'
+}
+
+func newLimiter(perMinute, burst int, trusted *trustSet) *limiter {
 	return &limiter{buckets: map[string]*bucket{}, rate: float64(perMinute) / 60, burst: float64(burst), lastGC: time.Now(), trusted: trusted}
 }
 
-// parseCIDRs parses the --trust-proxy value: comma-separated CIDRs, a bare
-// address meaning that host only. An unparsable entry is an error, never a
-// silently wider trust.
-func parseCIDRs(list []string) ([]*net.IPNet, error) {
+// parseTrust parses the --trust-proxy value: comma-separated CIDRs, a bare
+// address meaning that host only, or a host name (its addresses, re-resolved
+// while the server runs). An unparsable entry is an error, never a silently
+// wider trust.
+func parseTrust(list []string) (*trustSet, error) {
+	nets, hosts, err := parseCIDRs(list)
+	if err != nil {
+		return nil, err
+	}
+	t := &trustSet{static: nets, hosts: hosts, lookup: net.LookupIP}
+	if len(hosts) > 0 {
+		t.refresh(nil)
+	}
+	return t, nil
+}
+
+func parseCIDRs(list []string) ([]*net.IPNet, []string, error) {
 	var out []*net.IPNet
+	var hosts []string
 	for _, raw := range list {
 		for _, item := range strings.Split(raw, ",") {
 			item = strings.TrimSpace(item)
@@ -47,7 +133,11 @@ func parseCIDRs(list []string) ([]*net.IPNet, error) {
 			if !strings.Contains(item, "/") {
 				ip := net.ParseIP(item)
 				if ip == nil {
-					return nil, fmt.Errorf("trust-proxy: %q is not an address or CIDR", item)
+					if hostName(item) {
+						hosts = append(hosts, strings.ToLower(item))
+						continue
+					}
+					return nil, nil, fmt.Errorf("trust-proxy: %q is not an address, CIDR or host name", item)
 				}
 				bits := 32
 				if ip.To4() == nil {
@@ -57,12 +147,12 @@ func parseCIDRs(list []string) ([]*net.IPNet, error) {
 			}
 			_, n, err := net.ParseCIDR(item)
 			if err != nil {
-				return nil, fmt.Errorf("trust-proxy: %w", err)
+				return nil, nil, fmt.Errorf("trust-proxy: %w", err)
 			}
 			out = append(out, n)
 		}
 	}
-	return out, nil
+	return out, hosts, nil
 }
 
 // fromTrustedProxy reports whether the TCP peer is one of the configured
@@ -86,7 +176,7 @@ func fromTrustedProxy(r *http.Request, trusted []*net.IPNet) bool {
 }
 
 func (l *limiter) key(r *http.Request) string {
-	if fromTrustedProxy(r, l.trusted) {
+	if fromTrustedProxy(r, l.trusted.nets()) {
 		if ip := proxiedClient(r); ip != "" {
 			return bucketKey(ip)
 		}

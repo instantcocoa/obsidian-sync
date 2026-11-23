@@ -12,7 +12,7 @@
  *   same key changed on both sides to different values is a conflict.
  */
 
-import { diff3Merge } from "node-diff3";
+import { diff3MergeRegions } from "node-diff3";
 import { fromUtf8, isValidUtf8, utf8 } from "./encoding";
 
 export interface MergeResult {
@@ -24,11 +24,18 @@ export function mergeText(base: Uint8Array, local: Uint8Array, remote: Uint8Arra
   if (!isValidUtf8(base) || !isValidUtf8(local) || !isValidUtf8(remote)) return { ok: false };
   const [bs, ls, rs] = [fromUtf8(base), fromUtf8(local), fromUtf8(remote)];
   const lines = (s: string) => s.split("\n").map((x) => (x.endsWith("\r") ? x.slice(0, -1) : x));
-  const regions = diff3Merge(lines(ls), lines(bs), lines(rs), { excludeFalseConflicts: true, stringSeparator: "\n" });
+  // node-diff3's diff3Merge does this with push(...region): an unchanged
+  // region of a large note is hundreds of thousands of lines, past the
+  // engine's argument limit, so a merge of a big file threw. The same walk
+  // over its regions, with loops. A region both sides changed identically
+  // is not a conflict (excludeFalseConflicts).
   const out: string[] = [];
-  for (const reg of regions) {
-    if (reg.ok) out.push(...reg.ok);
+  for (const r of diff3MergeRegions(lines(ls), lines(bs), lines(rs))) {
+    let take: string[];
+    if (r.stable) take = r.bufferContent;
+    else if (r.aContent.length === r.bContent.length && r.aContent.every((x, i) => x === r.bContent[i])) take = r.aContent;
     else return { ok: false };
+    for (const l of take) out.push(l);
   }
   const [be, le, re] = [eol(bs), eol(ls), eol(rs)];
   const sep = le !== be ? le : re !== be ? re : be;

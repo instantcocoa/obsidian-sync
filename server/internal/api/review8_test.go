@@ -516,8 +516,11 @@ func TestR8TrustProxyCIDRs(t *testing.T) {
 			t.Fatalf("::/0 semantics leaked into 0.0.0.0/0: %v", c)
 		}
 	})
+	// Since 1.0.3 a host name is a valid entry (its addresses, re-resolved;
+	// see trust_internal_test.go), so "proxy.internal" is no longer here. A
+	// dotted run of digits is still a mistyped address, never a name.
 	t.Run("unparsable entries refuse to start", func(t *testing.T) {
-		for _, bad := range []string{"fe80::1%en0", "127.0.0.1:8080", "proxy.internal", "10.0.0.0/33", "127.0.0.1/", "1.2.3"} {
+		for _, bad := range []string{"fe80::1%en0", "127.0.0.1:8080", "10.0.0.0/33", "127.0.0.1/", "1.2.3", "10.0.5", "caddy:80", "under_score"} {
 			func() {
 				defer func() {
 					if recover() == nil {

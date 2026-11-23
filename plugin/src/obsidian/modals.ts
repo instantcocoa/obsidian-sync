@@ -227,10 +227,23 @@ export class InviteModal extends Modal {
  * the current file, whose content stays in the server's history), or open
  * both. Every choice is an ordinary edit or delete, so it syncs like one.
  */
+export interface ConflictInfo {
+  /** This device made the copy when it resolved a conflict. */
+  own: boolean;
+  /** Device id that wrote the version on disk here, when known. */
+  by: string | null;
+  /** The file the copy belongs to, judged from its name. */
+  target: string | null;
+  /** That file is one sync tracks (not excluded, has synced history). */
+  targetSynced: boolean;
+}
+
 export class ConflictModal extends Modal {
   constructor(
     app: App,
     private paths: string[],
+    private info: (path: string) => ConflictInfo,
+    private deviceName: (id: string) => string | null,
   ) {
     super(app);
   }
@@ -261,9 +274,16 @@ export class ConflictModal extends Modal {
     const copy = this.file(path)!;
     const origin = conflictOrigin(path);
     const current = origin ? this.file(origin.original) : null;
+    const info = this.info(path);
     const box = el.createDiv({ cls: "obsync-conflict" });
     box.createEl("h4", { text: origin?.original ?? path });
-    box.createEl("div", { cls: "setting-item-description", text: origin ? `Other version from ${origin.device}, ${origin.when}` : "Conflict copy" });
+    // Who wrote it comes from the sync record, never from the file name,
+    // which any vault member can choose.
+    let from: string;
+    if (info.own) from = `Your version from this device, set aside ${origin?.when ?? ""} when a newer one arrived`;
+    else if (info.by) from = `Other version, written by ${this.deviceName(info.by) ?? "a device no longer in the vault"} (${origin?.when ?? "time unknown"})`;
+    else from = `A file named like a conflict copy (${path}); where it came from is not known`;
+    box.createEl("div", { cls: "setting-item-description", text: from });
     if (current && isTextPath(path) && copy.stat.size < 2_000_000 && current.stat.size < 2_000_000) {
       const [a, b] = await Promise.all([this.app.vault.read(current), this.app.vault.read(copy)]);
       const d = lineDiff(a, b);
@@ -303,7 +323,12 @@ export class ConflictModal extends Modal {
     );
     if (current) {
       s.addButton((b) => b.setButtonText("Keep current").onClick(() => act(() => this.app.fileManager.trashFile(copy), "kept the current file; the other version was removed")));
-      s.addButton((b) =>
+      if (!info.targetSynced) {
+        box.createEl("div", {
+          cls: "setting-item-description",
+          text: `${origin?.original ?? "The current file"} is not synced (excluded, or never uploaded), so replacing it would leave no copy of its content anywhere. Open both and copy by hand if you need to.`,
+        });
+      } else s.addButton((b) =>
         b
           .setButtonText("Keep other version")
           .setWarning()

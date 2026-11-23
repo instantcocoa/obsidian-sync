@@ -53,6 +53,13 @@ The codebase is small. Everything security-relevant is in these files
 | Server security tests | `server/internal/api/security_test.go`, `api_test.go` |
 | Design and threat model | `DESIGN.md` §4.4, §4.6, §5 (all), §6.5, §7.3 |
 
+
+**Round 14 (1.0.2, agent review) and its fixes in 1.0.3.** Eight findings
+and three known items; the highest was a vault member making every device
+allocate up to 16 GiB from one chunk listed many times. All are fixed or
+documented in 1.0.3; `docs/HANDOFF.md` lists each with its test. A human
+reviewer should re-check area H (chunking bounds) and area E (keychain
+confirmation) against that list rather than trust it.
 ## Assumptions to accept or challenge first
 
 1. **The server is honest but curious.** It may read everything it stores

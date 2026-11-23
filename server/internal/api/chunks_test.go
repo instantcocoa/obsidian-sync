@@ -71,3 +71,44 @@ func TestChunkedOpsLivenessAndValidation(t *testing.T) {
 		t.Fatalf("superseded chunks not dead: %v", dead)
 	}
 }
+
+// A page of the feed, the snapshot or a history carries at most
+// maxPageChunkIDs chunk ids, however many ops would fit by count; the
+// client pages through the rest (review 14, F3).
+func TestChunkListsDoNotInflatePages(t *testing.T) {
+	e := newEnv(t)
+	v, a, _ := e.setup()
+	c := strings.Repeat("c", 64)
+	e.upload(v, a, c, blob(1, "one chunk")).expect(t, 201)
+	whole := strings.Repeat("f", 64)
+	list := make([]string, store.MaxChunks)
+	for i := range list {
+		list[i] = c
+	}
+	for i := 0; i < 12; i++ {
+		o := put("p"+strings.Repeat("x", i), &whole, 0)
+		o.Chunks = list
+		if r := e.ops(v, a, o).Results[0]; r.Seq == 0 {
+			t.Fatalf("%+v", r)
+		}
+	}
+	ids := func(ops []store.Op) (n int) {
+		for _, o := range ops {
+			n += len(o.Chunks)
+		}
+		return n
+	}
+	f := e.changes(v, a, 0, "")
+	if !f.More || len(f.Ops) != 8 || ids(f.Ops) > 32768 {
+		t.Fatalf("first page: more=%v ops=%d ids=%d", f.More, len(f.Ops), ids(f.Ops))
+	}
+	g := e.changes(v, a, f.Cursor, "")
+	if g.More || len(g.Ops) != 4 {
+		t.Fatalf("second page: more=%v ops=%d", g.More, len(g.Ops))
+	}
+	var snap feed
+	e.do("GET", "/v1/vaults/"+v+"/snapshot", a.token, nil, nil).expect(t, 200).json(t, &snap)
+	if !snap.More || ids(snap.Ops) > 32768 {
+		t.Fatalf("snapshot page: more=%v ids=%d", snap.More, ids(snap.Ops))
+	}
+}

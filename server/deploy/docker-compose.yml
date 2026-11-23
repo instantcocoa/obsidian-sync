@@ -4,7 +4,9 @@
 #     - ./obsync/docker-compose.yml
 # and drop deploy/ob.frob.io.caddy into Caddy's sites directory. The service
 # publishes no port: only Caddy, on the stack's network, can reach it, and
-# --trust-proxy names that network so rate limits key on the real client.
+# --trust-proxy names the Caddy service (resolved on the stack network and
+# re-resolved while running), so only Caddy's X-Forwarded-For is believed:
+# not the network's gateway, not any other container on it.
 #
 # Data is a bind mount so backups are a plain copy of one directory
 # (README.md, "Backup and restore"). The image runs as uid 65532 (distroless
@@ -31,7 +33,7 @@ services:
       - --public-url
       - ${OBSYNC_PUBLIC_URL:-https://ob.frob.io}
       - --trust-proxy
-      - ${OBSYNC_TRUST_PROXY:-10.0.5.0/24}
+      - ${OBSYNC_TRUST_PROXY:-caddy}
     volumes:
       - ${OBSYNC_DATA:-/var/lib/obsync}:/data
     healthcheck:

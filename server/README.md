@@ -120,12 +120,17 @@ Unauthenticated routes (create-link and invite redemption, recovery join,
 the admin page's sign-in and registration ceremonies) and
 failed token checks are rate-limited per client IP: `--auth-rate N` requests
 per minute (default 10, burst 2N; `-1` disables, for tests). Behind a reverse
-proxy pass `--trust-proxy CIDR[,CIDR]` (the proxy's own addresses) so the
+proxy pass `--trust-proxy` the proxy's own addresses, CIDRs, or its host
+name (resolved at start and every 30 seconds, for a proxy in a container
+network whose address changes when it is recreated), so the
 limiter and the security log key on the last `X-Forwarded-For` entry, the one
 your proxy appended, for requests that arrive from those addresses; requests
 from any other peer are keyed on the peer itself, so nothing that reaches the
 listener directly can pick its own bucket. Give it the proxy's addresses,
-never `0.0.0.0/0` (that would trust every IPv4 peer's header again). Without
+never `0.0.0.0/0` (that would trust every IPv4 peer's header again), and
+never a whole container network: its gateway is where Docker's userland
+proxy delivers clients it relays (all IPv6 clients, for one), and every
+other container on it could then choose its own limiter bucket. Without
 the flag every client behind a proxy would share the proxy's address.
 All `X-Forwarded-For` lines are read as one list, so a proxy that adds its
 own line (HAProxy's default) is handled the same as one that appends to the
@@ -142,7 +147,11 @@ stack with Caddy needs:
 - `deploy/docker-compose.yml`: the `obsync` service. No published port; only
   Caddy, on the stack's network, can reach it. Data is a bind mount of
   `/var/lib/obsync`, so a backup is a copy of one directory. `--trust-proxy`
-  names the stack's network.
+  names the Caddy service (`caddy`; set `OBSYNC_TRUST_PROXY` if yours is
+  called something else). If clients reach Caddy over IPv6 through Docker's
+  userland proxy, they all arrive from the network gateway and share one
+  limiter bucket: enable IPv6 on the stack network, or publish AAAA records
+  only once it is.
 - `deploy/ob.caddy`: the site block, `reverse_proxy obsync:8080` with the
   body size and timeouts from `Caddyfile.example`.
 - `deploy/deploy.sh [host]`: rsyncs this directory to `~/obsync/src` on the
@@ -207,6 +216,14 @@ the changes feed) and reconciles against the restored heads. Versions the
 restore forgot are pushed back by whichever device still holds them, blobs
 included; a version written by another device after the restore is kept as
 a conflict copy rather than overwritten. See `DESIGN.md` §6.8.
+
+**A restore also brings back devices you removed after the backup was
+taken**, with the vault's write authority as it was then: a lost phone you
+removed last week can sync again after restoring the week-before backup.
+After any restore, open **Manage devices** on a device you trust, remove
+anything that should not be there, and the keys rotate again. Devices whose
+keys were rotated after the backup also see the vault's key epoch go back
+and pause until you run **Accept server restore** on them.
 
 ```sh
 ./obsync vault create --data /var/lib/obsync   # a one-time create link for a new vault's first device

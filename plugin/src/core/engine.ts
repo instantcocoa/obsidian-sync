@@ -13,11 +13,12 @@
  *      against the exact base blob, everything else becomes a sibling file.
  */
 
-import { VaultCrypto, CryptoError, unwrapEpochKey, type FileMeta, PAD_BLOCK } from "./crypto";
+import { VaultCrypto, CryptoError, unwrapEpochKey, type FileMeta, PAD_BLOCK, MAX_PLAIN } from "./crypto";
 import { fromB64, bytesEqual } from "./encoding";
 import type { FileStat, StateStore, VaultFS } from "./fs";
 import { mergeJson, mergeText } from "./merge";
-import { CHUNK_MAX, CHUNK_THRESHOLD, MAX_CHUNKS, gearTable, split } from "./chunks";
+import { CHUNK_MAX, CHUNK_MIN, CHUNK_THRESHOLD, MAX_CHUNKS, gearTable, split } from "./chunks";
+import { conflictOrigin } from "./paths";
 import { aliasesConfigDir, compileExclusions, conflictPath, fromLogical, isJsonPath, isSafeDevicePath, isSafeLogicalPath, isTextPath, toLogical, logicalAliasesConfigDir, isConfigLogical } from "./paths";
 import { NetworkError, Client, HttpError, type Feed, type OpInput, type OpResult, type WireOp } from "./transport";
 
@@ -35,6 +36,8 @@ export interface FileEntry {
   mtime: number;
   /** Set when the remote head was recorded but not written because the path is excluded here. */
   excluded?: true;
+  /** Device id that wrote this version (from the op), when known. */
+  by?: string;
 }
 
 export interface Inflight {
@@ -65,6 +68,17 @@ export interface State {
    * runs out.
    */
   deferred?: Record<string, { path_id: string; seq: number; since: number; tries: number; op?: WireOp }>;
+  /**
+   * The chunked version being written right now, saved before the work
+   * starts. Found at the next launch, it means the app died applying it
+   * (a phone killed for memory); twice for the same op and the op is skipped,
+   * so one oversized version cannot crash a device at every launch.
+   */
+  applying?: { seq: number; tries: number };
+  /** Ops skipped that way, kept so a replay does not try them again. */
+  poisoned?: number[];
+  /** Conflict copies this device made itself (vault path → time), so the review dialog can tell them from look-alikes. */
+  siblings?: Record<string, number>;
 }
 
 export interface EngineConfig {
@@ -322,6 +336,13 @@ export class Engine {
     }
     this.dirty = new Set(this.state.dirty);
     if (this.state.epoch > this.vc.keyring.current) this.vc.keyring.current = this.state.epoch;
+    const a = this.state.applying;
+    if (a && a.tries >= 2) {
+      // The app died twice while writing this version: skip it from now on.
+      this.state.poisoned = [...(this.state.poisoned ?? []), a.seq].slice(-50);
+      delete this.state.applying;
+      this.log("error", `op ${a.seq} stopped the app twice while being applied; skipping it`);
+    }
   }
 
   private saveChain: Promise<void> = Promise.resolve();
@@ -1302,6 +1323,10 @@ export class Engine {
     const devPath = this.device(logical);
     const e = this.state.files[logical];
     if (e && e.seq >= op.seq) return; // already applied (replay after a rewind)
+    if (this.state.poisoned?.includes(op.seq)) {
+      this.hooks.onSkipped?.(this.device(logical), "this version stopped the app twice while it was being written (probably too large for this device's memory), so it was skipped; a later version of the file will be tried");
+      return;
+    }
     if (this.excluded(logical)) {
       this.state.files[logical] = { hash: op.blob_id, seq: op.seq, at: op.created_at, size: meta.size, mtime: meta.mtime, excluded: true };
       this.scheduleSave();
@@ -1349,7 +1374,7 @@ export class Engine {
     // Remote put.
     if (diskHash === op.blob_id) {
       // Converged (echo of our own upload, or both sides wrote the same bytes).
-      this.state.files[logical] = { hash: op.blob_id, seq: op.seq, at: op.created_at, size: st!.size, mtime: st!.mtime };
+      this.state.files[logical] = { hash: op.blob_id, seq: op.seq, at: op.created_at, size: st!.size, mtime: st!.mtime, by: op.device_id };
       this.dirty.delete(logical);
       this.scheduleSave();
       return;
@@ -1441,15 +1466,21 @@ export class Engine {
     const blobId = op.blob_id!;
     const ids = op.chunks ?? [];
     if (ids.length === 0) return this.decryptFetched(blobId, await this.fetchBlob(blobId, blobs), meta.size);
-    if (ids.length > MAX_CHUNKS) throw new Error(`op ${op.seq} lists ${ids.length} chunks; refusing it`);
-    // The size comes from a vault member's metadata and is about to be
-    // allocated: it cannot exceed what this many chunks can hold.
-    if (!Number.isSafeInteger(meta.size) || meta.size < 0 || meta.size > ids.length * CHUNK_MAX) throw new Error(`op ${op.seq} claims ${meta.size} bytes in ${ids.length} chunks; refusing it`);
+    // Everything below is bounded before a byte is fetched or allocated. The
+    // size is authenticated but chosen by whichever member wrote it; the
+    // list is not authenticated at all. An honest chunked file is larger than
+    // CHUNK_THRESHOLD and at most MAX_PLAIN, like any file; every chunk but
+    // the last is longer than CHUNK_MIN, none longer than CHUNK_MAX.
+    const size = meta.size;
+    if (!Number.isSafeInteger(size) || size <= CHUNK_THRESHOLD || size > MAX_PLAIN) throw new Error(`op ${op.seq}: a chunked version of ${size} bytes is outside what this device accepts`);
+    const most = Math.min(MAX_CHUNKS, Math.floor(size / CHUNK_MIN) + 1);
+    const least = Math.ceil(size / CHUNK_MAX);
+    if (ids.length > most || ids.length < least) throw new Error(`op ${op.seq} lists ${ids.length} chunks for ${size} bytes; refusing it`);
     const have = new Map<string, Uint8Array>();
     if (devPath) {
       try {
         const st = await this.fs.stat(devPath);
-        if (st && st.size > CHUNK_THRESHOLD) {
+        if (st && st.size > CHUNK_THRESHOLD && st.size <= MAX_PLAIN) {
           const cur = await this.chunksOf(await this.fs.read(devPath));
           if (cur) cur.ids.forEach((id, i) => have.set(id, cur.parts[i]));
         }
@@ -1457,21 +1488,90 @@ export class Engine {
         /* nothing reusable */
       }
     }
-    const need = [...new Set(ids)].filter((id) => !have.has(id));
-    await this.parallel(need, async (id) => {
-      have.set(id, await this.decryptFetched(id, await this.fetchBlob(id), CHUNK_MAX));
-    });
-    const out = new Uint8Array(meta.size);
+    // Chunks are fetched in list order through a small window and written
+    // straight into place, with the running total checked at every step: a
+    // padded or inflated list is refused after at most one chunk too many,
+    // never after the whole list has been downloaded.
+    const order: string[] = [];
+    const seen = new Set<string>();
+    for (const id of ids) if (!seen.has(id) && !have.has(id)) (seen.add(id), order.push(id));
+    const pending = new Map<string, Promise<Uint8Array>>();
+    let next = 0;
+    const window = Math.max(1, Math.min(this.cfg.parallel, 4));
+    const pump = () => {
+      while (next < order.length && pending.size < window) {
+        const id = order[next++];
+        const p = this.fetchBlob(id);
+        p.catch(() => undefined);
+        pending.set(id, p);
+      }
+    };
+    const out = new Uint8Array(size);
+    const placed = new Map<string, [number, number]>();
     let off = 0;
-    for (const id of ids) {
-      const part = have.get(id)!;
-      if (off + part.length > meta.size) throw new Error(`chunks of op ${op.seq} exceed the ${meta.size} bytes its metadata names`);
+    for (let i = 0; i < ids.length; i++) {
+      const id = ids[i];
+      const room = size - off;
+      if (room <= 0) throw new Error(`chunks of op ${op.seq} exceed the ${size} bytes its metadata names`);
+      let part: Uint8Array;
+      const at = placed.get(id);
+      if (at) part = out.subarray(at[0], at[0] + at[1]);
+      else if (have.has(id)) part = have.get(id)!;
+      else {
+        pump();
+        const ct = await pending.get(id)!;
+        pending.delete(id);
+        part = await this.decryptFetched(id, ct, Math.min(CHUNK_MAX, room));
+        pump();
+      }
+      if (part.length > room) throw new Error(`chunks of op ${op.seq} exceed the ${size} bytes its metadata names`);
+      if (i < ids.length - 1 && part.length <= CHUNK_MIN) throw new Error(`op ${op.seq}: chunk ${i} is ${part.length} bytes, too short for its place in the list`);
+      if (!at) placed.set(id, [off, part.length]);
       out.set(part, off);
       off += part.length;
     }
-    if (off !== meta.size) throw new Error(`chunks of op ${op.seq} add up to ${off} bytes but the metadata says ${meta.size}`);
+    if (off !== size) throw new Error(`chunks of op ${op.seq} add up to ${off} bytes but the metadata says ${size}`);
     if ((await this.vc.blobId(out)) !== blobId) throw new Error(`chunks of op ${op.seq} do not reassemble to the content its metadata names`);
     return out;
+  }
+
+  /**
+   * The content a merge needs as its base: the version this device last
+   * synced (`hash`). One blob for an ordinary file; a chunked version has no
+   * blob under its id, so it is found in the path's history and read like
+   * any chunked download.
+   */
+  private async baseContent(logical: string, hash: string): Promise<Uint8Array> {
+    try {
+      return await this.vc.decryptBlob(hash, await this.fetchBlob(hash));
+    } catch (err) {
+      if (!(err instanceof HttpError && err.status === 404)) throw err;
+    }
+    const ops = await this.client.history(this.cfg.vaultId, await this.vc.pathId(logical));
+    const op = ops.find((o) => o.blob_id === hash && o.chunks?.length);
+    if (!op) throw new Error(`the base version of ${logical} is no longer on the server`);
+    const meta = await this.vc.decryptMeta(op.path_id, fromB64(op.meta_enc));
+    if (meta.path.normalize("NFC") !== logical || (meta.blob !== undefined && meta.blob !== op.blob_id)) throw new Error(`the base version of ${logical} has an inconsistent record`);
+    return this.fetchContent(op, meta);
+  }
+
+  /**
+   * What the conflict review dialog needs to know about a file named like a
+   * conflict copy: whether this device made it, who wrote the version here,
+   * and whether the file it claims to belong to is one sync tracks (only
+   * then does "keep the other version" leave the old content in history).
+   */
+  conflictInfo(devPath: string): { own: boolean; by: string | null; target: string | null; targetSynced: boolean } {
+    const logical = this.logical(devPath);
+    const origin = conflictOrigin(devPath);
+    const targetLogical = origin ? this.logical(origin.original) : null;
+    const t = targetLogical ? this.state.files[targetLogical] : undefined;
+    return {
+      own: Boolean(this.state.siblings?.[logical]),
+      by: this.state.files[logical]?.by ?? null,
+      target: origin?.original ?? null,
+      targetSynced: Boolean(targetLogical && t && t.hash !== null && !t.excluded && !this.excluded(targetLogical)),
+    };
   }
 
   /** The content of one version from the op log (the history command), chunked or not, verified like any download. */
@@ -1491,6 +1591,15 @@ export class Engine {
     if (local && local.length === meta.size) {
       // Same content already on this device under another name: no download.
       plain = local;
+    } else if (op.chunks?.length) {
+      const prev = this.state.applying;
+      this.state.applying = { seq: op.seq, tries: prev?.seq === op.seq ? prev.tries + 1 : 1 };
+      await this.flushState();
+      try {
+        plain = await this.fetchContent(op, meta, blobs, devPath);
+      } finally {
+        delete this.state.applying;
+      }
     } else {
       plain = await this.fetchContent(op, meta, blobs, devPath);
     }
@@ -1512,7 +1621,7 @@ export class Engine {
     const st = (await this.fs.stat(devPath)) ?? { path: devPath, size: plain.length, mtime };
     delete this.state.inflight[logical];
     this.busyReported.delete(logical);
-    this.state.files[logical] = { hash: blobId, seq: op.seq, at: op.created_at, size: st.size, mtime: st.mtime };
+    this.state.files[logical] = { hash: blobId, seq: op.seq, at: op.created_at, size: st.size, mtime: st.mtime, by: op.device_id };
     this.dirty.delete(logical);
     this.scheduleSave();
     this.hooks.afterApply?.(devPath, "put");
@@ -1560,7 +1669,7 @@ export class Engine {
     if (e?.hash && isTextPath(logical)) {
       try {
         const [base, remote] = await Promise.all([
-          this.fetchBlob(e.hash).then((b) => this.vc.decryptBlob(e.hash!, b)),
+          this.baseContent(logical, e.hash),
           this.fetchContent(head, meta, blobs),
         ]);
         const m = isJsonPath(logical) && isConfigLogical(logical) ? mergeJson(base, local, remote) : mergeText(base, local, remote);
@@ -1584,6 +1693,9 @@ export class Engine {
     }
     // Sibling copy, then apply the head.
     const sibLogical = await this.siblingFor(logical, local);
+    const own = (this.state.siblings ??= {});
+    own[sibLogical] = Date.now();
+    for (const k of Object.keys(own).slice(0, Math.max(0, Object.keys(own).length - 500))) delete own[k];
     const sibDev = this.device(sibLogical);
     await this.fs.write(sibDev, local, Date.now());
     this.markDirty(sibLogical);
@@ -1691,7 +1803,7 @@ export class Engine {
   /** Apply one post result to local state: accepted, conflicting, or rejected. */
   private async settle(p: { logical: string; op: OpInput; bytes?: Uint8Array; st?: FileStat }, r: OpResult): Promise<void> {
     if (r.seq && !r.conflict && !r.error) {
-      this.state.files[p.logical] = { hash: p.op.blob_id, seq: r.seq, at: r.created_at, size: p.st?.size ?? 0, mtime: p.st?.mtime ?? 0 };
+      this.state.files[p.logical] = { hash: p.op.blob_id, seq: r.seq, at: r.created_at, size: p.st?.size ?? 0, mtime: p.st?.mtime ?? 0, by: this.cfg.deviceId };
       this.dirty.delete(p.logical);
       // The server's cursor can jump past our own op; keep cursor in step so we do not re-pull it.
       if (r.seq === this.state.cursor + 1) {

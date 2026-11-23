@@ -31,8 +31,8 @@ import { ConfigHooks } from "./hooks";
 import { ObsyncSettingTab } from "./settings";
 import { ConflictModal, ConfirmModal, ListModal, PromptModal, ShowSecretModal, InviteModal, confirmPlainHttp } from "./modals";
 import { deriveWrapKeyFromPin, newWrapKey, open as openKeystore, seal as sealKeystore, type ProtectionMethod, type SealedKeystore } from "../core/keystore";
-import { fromB64, randomBytes } from "../core/encoding";
-import { promptTouchId, safeStorageAvailable, safeUnwrap, safeWrap, secretDrop, secretGet, secretId, secretPut, secretStorageAvailable, touchIdAvailable } from "./protection";
+import { fromB64, hex, randomBytes } from "../core/encoding";
+import { nativeSecretHas, promptTouchId, safeStorageAvailable, safeUnwrap, safeWrap, secretDrop, secretGet, secretId, secretPut, secretStorageAvailable, touchIdAvailable } from "./protection";
 
 interface Protection {
   method: ProtectionMethod;
@@ -48,6 +48,21 @@ interface Protection {
    * a keychain write that never landed cannot cost the device its keys.
    */
   fallback?: { method: ProtectionMethod; identity?: Identity | null; sealed?: SealedKeystore | null };
+  /**
+   * method "secret", set while the keychain write is unconfirmed. `nonce`
+   * identifies the JavaScript context that wrote it: a plugin reload in the
+   * same context reads Obsidian's in-memory copy, which proves nothing, so
+   * only a new context (a real relaunch) or a direct native read confirms.
+   */
+  pending?: { nonce: string };
+}
+
+/** Per JavaScript context: survives a plugin reload, not an app relaunch. */
+const CONTEXT_KEY = "__obsyncSecretContext";
+function contextNonce(): string {
+  const g = globalThis as Record<string, unknown>;
+  if (typeof g[CONTEXT_KEY] !== "string") g[CONTEXT_KEY] = hex(randomBytes(8));
+  return g[CONTEXT_KEY] as string;
 }
 
 interface Settings {
@@ -290,15 +305,7 @@ export default class ObsyncPlugin extends Plugin {
       this.pinSalt = randomBytes(16);
       this.wrapKey = await deriveWrapKeyFromPin(opts.pin, this.pinSalt);
     } else if (method === "secret") {
-      if (!secretStorageAvailable(this.app)) throw new Error("the device keychain is not available here (needs Obsidian 1.11.4 or newer on a phone or tablet)");
-      // Obsidian writes the keychain item in the background and reports
-      // nothing, so what protected the keys until now stays on disk beside
-      // the new seal until a later launch has read the secret back.
-      p.fallback = was.method === "secret" && was.fallback ? was.fallback : { method: was.method, identity: was.method === "none" ? this.settings.identity : null, sealed: was.method === "none" ? null : await this.sealedNow() };
-      p.secretId = secretId(this.settings.identity.vaultId, this.settings.identity.deviceId);
-      this.wrapKey = newWrapKey();
-      secretPut(this.app, p.secretId, this.wrapKey);
-      this.pinSalt = undefined;
+      return this.protectWithSecret(was);
     } else if (method === "safe") {
       if (!safeStorageAvailable()) throw new Error("OS keychain protection is not available on this device (no keychain backend)");
       this.wrapKey = newWrapKey();
@@ -310,6 +317,87 @@ export default class ObsyncPlugin extends Plugin {
     }
     this.settings.protection = p;
     await this.saveSettings();
+  }
+
+  /**
+   * Switch to the device keychain. Obsidian's setSecret writes the native
+   * item in the background and reports nothing, so the write is confirmed
+   * before anything that could open the keys without it is given up:
+   *
+   * 1. The keys are sealed under a new wrapping key placed in the keychain.
+   *    From "none" nothing readable is written to disk at any point.
+   * 2. The native item is read back directly (nativeSecretHas). Confirmed:
+   *    done. Read and absent after a few seconds: the keychain did not take
+   *    it, so the previous protection is put back while the keys are still
+   *    in memory, and the caller is told.
+   * 3. No way to read it back here: the previous form is kept on disk (from
+   *    "none", the keys in the clear, for seconds) and on a phone Obsidian is
+   *    restarted once, which re-reads the keychain; the next start of a new
+   *    context finds the key and removes the previous form (unlockFromSecret).
+   */
+  private async protectWithSecret(was: Protection): Promise<void> {
+    const s = this.settings;
+    const identity = s.identity!;
+    if (!secretStorageAvailable(this.app)) throw new Error("the device keychain is not available here (needs Obsidian 1.11.4 or newer on a phone or tablet)");
+    const prevKey = this.wrapKey;
+    const prevSalt = this.pinSalt;
+    const prevSealed = was.method === "secret" ? (was.fallback?.sealed ?? null) : was.method === "none" ? null : await this.sealedNow();
+    const p: Protection = { method: "secret", touchId: false, secretId: secretId(identity.vaultId, identity.deviceId), pending: { nonce: contextNonce() } };
+    const key = newWrapKey();
+    this.wrapKey = key;
+    this.pinSalt = undefined;
+    secretPut(this.app, p.secretId!, key);
+    if (was.method !== "none" && was.method !== "secret") p.fallback = { method: was.method, sealed: prevSealed };
+    s.protection = p;
+    await this.saveSettings();
+    let seen: boolean | null = null;
+    for (let i = 0; i < 12; i++) {
+      seen = await nativeSecretHas(p.secretId!, hex(key));
+      if (seen !== false) break;
+      await new Promise((r) => setTimeout(r, 500));
+    }
+    if (seen === true) {
+      delete p.pending;
+      delete p.fallback;
+      await this.saveSettings();
+      return;
+    }
+    if (seen === false) {
+      // Read, and not there: the keychain did not keep it. Back to how it was.
+      secretDrop(this.app, p.secretId!);
+      s.protection = was.method === "secret" ? { method: "none", touchId: false } : was;
+      s.sealed = was.method === "none" || was.method === "secret" ? null : prevSealed;
+      this.wrapKey = was.method === "none" || was.method === "secret" ? null : prevKey;
+      this.pinSalt = prevSalt;
+      await this.saveSettings();
+      throw new Error("the device keychain did not keep the vault key, so the previous key protection is still in force");
+    }
+    // Cannot read the native store from here: keep the previous form until a
+    // new context finds the key, and get one soon on a phone.
+    if (was.method === "none" || was.method === "secret") p.fallback = { method: "none", identity };
+    await this.saveSettings();
+    if (Platform.isMobile) this.scheduleConfirmRestart();
+  }
+
+  private confirmRestartArmed = false;
+
+  /** Restart Obsidian once, when sync is idle, so the keychain is re-read from the device (protectWithSecret, step 3). */
+  private scheduleConfirmRestart(): void {
+    if (this.confirmRestartArmed) return;
+    const run = (this.app as unknown as { commands?: { executeCommandById?: (id: string) => boolean } }).commands?.executeCommandById;
+    if (typeof run !== "function") return;
+    this.confirmRestartArmed = true;
+    const t0 = Date.now();
+    const tick = () => {
+      if (this.unloaded || !this.settings.protection.pending) return;
+      const phase = this.engine?.getStatus().phase;
+      if (phase !== "idle" && Date.now() - t0 < 120_000) return void window.setTimeout(tick, 2000);
+      new Notice("obsync: restarting Obsidian once to confirm the vault key is in this device's keychain.", 5000);
+      window.setTimeout(() => {
+        if (!this.unloaded && this.settings.protection.pending) run.call((this.app as unknown as { commands: unknown }).commands, "app:reload");
+      }, 4000);
+    };
+    window.setTimeout(tick, 3000);
   }
 
   /** The keys as they are sealed right now (for the fallback copy kept across a switch to the device keychain). */
@@ -333,9 +421,18 @@ export default class ObsyncPlugin extends Plugin {
     if (key) {
       s.identity = await openKeystore<Identity>(s.sealed!, key);
       this.wrapKey = key;
-      if (s.protection.fallback) {
-        delete s.protection.fallback;
-        await this.saveSettings();
+      if (s.protection.fallback || s.protection.pending) {
+        // Confirmed by a direct native read, or by being found in a context
+        // other than the one that wrote it (Obsidian loaded it from the
+        // device). A plugin reload in the writing context confirms nothing.
+        const pend = s.protection.pending;
+        const fresh = !pend || pend.nonce !== contextNonce();
+        const native = await nativeSecretHas(s.protection.secretId!, hex(key));
+        if (native === true || (native === null && fresh)) {
+          delete s.protection.fallback;
+          delete s.protection.pending;
+          await this.saveSettings();
+        }
       }
       return;
     }
@@ -574,9 +671,14 @@ export default class ObsyncPlugin extends Plugin {
       }
       if (secretStorageAvailable(this.app)) {
         // Obsidian 1.11.4+: the phone's own keychain, no PIN to type.
-        await this.setProtection("secret");
-        this.routineNotice("obsync: vault keys are sealed with this device's keychain. Add a PIN instead under Protect keys if you prefer.");
-        return;
+        try {
+          await this.setProtection("secret");
+          this.routineNotice("obsync: vault keys are sealed with this device's keychain. Add a PIN instead under Protect keys if you prefer.");
+          return;
+        } catch (e) {
+          // The keychain did not take it: offer the PIN below instead.
+          new Notice(`obsync: ${(e as Error).message}.`, 8000);
+        }
       }
       const want = await ConfirmModal.ask(
         this.app,
@@ -950,7 +1052,14 @@ export default class ObsyncPlugin extends Plugin {
   cmdConflicts(): Promise<void> {
     return this.guard(async () => {
       const files = this.engine?.conflictFiles() ?? [];
-      new ConflictModal(this.app, files).open();
+      const engine = this.engine!;
+      const names = new Map<string, string>();
+      try {
+        for (const d of await listDevices(this.need())) if (d.name) names.set(d.id, d.id === this.settings.identity?.deviceId ? `${d.name} (this device)` : d.name);
+      } catch {
+        /* offline: show ids as unknown */
+      }
+      new ConflictModal(this.app, files, (p) => engine.conflictInfo(p), (id) => names.get(id) ?? null).open();
     });
   }
 

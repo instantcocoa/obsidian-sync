@@ -703,16 +703,24 @@ when available; the PIN remains as the alternative and the only option on
 older Obsidian.
 
 Two properties shape the implementation. `setSecret` returns before the
-native write finishes and reports no failure, so the previous form of the
-keys stays in `data.json` as `protection.fallback` until a later launch has
-read the wrapping key back from the keychain; only then is it removed. A
-write that never landed therefore reverts to the previous protection
-instead of costing the device its keys. And a keychain that has lost the
-entry (Obsidian reinstalled, a restore without the keychain) leaves the
-sealed keys untouched and says to join again with an invite or the recovery
-passphrase. What it does not defend against: another plugin running in
-Obsidian on the same device, which can read any secret, as it can read the
-notes. Not yet confirmed by a run on a physical device.
+native write finishes and reports no failure, and a plugin reload in the
+same app session reads Obsidian's in-memory copy, which proves nothing about
+the device. So since 1.0.3 (fourteenth review): the keys are sealed straight
+under the keychain-held key, and from "none" nothing readable is written to
+disk. The plugin then reads the native item back directly through the
+Capacitor SecureStorage bridge. Found: done. Read and absent after a few
+seconds: the switch is undone while the keys are still in memory, and a
+phone is offered a PIN. Not readable from the plugin: the previous form is
+kept on disk, from "none" the keys in the clear for those seconds, and the
+phone restarts Obsidian once when sync is idle; only a start in a new
+JavaScript context (the restart, or the next launch) finding the key removes
+the previous form. A keychain that has lost the entry later (Obsidian
+reinstalled, a restore without the keychain) leaves the sealed keys untouched
+and says to join again with an invite or the recovery passphrase. What it
+does not defend against: another plugin running in Obsidian on the same
+device, which can read any secret, as it can read the notes. The keychain
+itself was verified on an iPhone on 2026-11-23; the direct native read has
+not yet been run on a device.
 
 ### 5.6 Full re-key (replaces `K_id`)
 
@@ -1236,6 +1244,22 @@ own id, and the reassembled content must have the size in the authenticated
 metadata and hash to the `blob_id` that metadata binds. A reordered,
 truncated or padded list fails that check and nothing is written
 (`test/chunks.test.ts`).
+
+Bounds, since the fourteenth review (1.0.3). The list is unauthenticated
+and its ids may repeat (a file of zeros legitimately repeats one chunk), so
+nothing is fetched or allocated on its strength alone. A reader refuses a
+chunked version whose size is not between 1 MiB and `MAX_PLAIN` (1 GiB, the
+ceiling every download has), or whose list is longer than
+`size / CHUNK_MIN + 1` or shorter than `size / CHUNK_MAX`. It then fetches
+in list order through a window of four, decrypts each chunk against the
+room left in the file, writes it into place, and stops at the first chunk
+that overruns or is too short for its position. Before writing a chunked
+version it saves `applying = {seq, tries}`; an app killed during it (a phone
+out of memory) finds that at the next start, and an op that has stopped the
+app twice is skipped and reported, so no version can crash a device at every
+launch. The server keeps pages of the feed, the snapshot and a history to
+32,768 chunk ids. A merge whose base is a chunked version reads that base
+from the path's history like any chunked download.
 
 Limits and edges: 4096 chunks per version (several GiB); a text file above
 1 MiB is merged only if its base is still one blob, otherwise a concurrent

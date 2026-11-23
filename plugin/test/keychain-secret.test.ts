@@ -12,7 +12,7 @@
  */
 import { describe, expect, it, vi } from "vitest";
 
-const stub = vi.hoisted(() => ({ data: null as unknown }));
+const stub = vi.hoisted(() => ({ data: null as unknown, writes: [] as string[] }));
 vi.mock("obsidian", () => {
   class Component {
     register(): void {}
@@ -31,6 +31,7 @@ vi.mock("obsidian", () => {
     }
     async saveData(d: unknown): Promise<void> {
       stub.data = JSON.parse(JSON.stringify(d));
+      stub.writes.push(JSON.stringify(d));
     }
     addCommand(): void {}
     addSettingTab(): void {}
@@ -110,6 +111,7 @@ class FakeSecretStorage {
   setSecret(id: string, v: string): void {
     if (!/^[a-z0-9-]+$/.test(id) || id.length > 64) throw new Error("invalid id");
     this.secrets[id] = v;
+    (globalThis as { __lastSecret?: Record<string, string> }).__lastSecret = { ...this.secrets };
     if (this.native.persist) this.native.kept = { ...this.secrets }; // adapter.save(), not awaited
   }
   getSecret(id: string): string | null {
@@ -139,7 +141,13 @@ const identity = {
 
 type P = InstanceType<typeof ObsyncPlugin>;
 
-async function launch(native: FakeNative): Promise<P> {
+/**
+ * A launch of Obsidian. `fresh` (the default) is a new JavaScript context, as
+ * after a real relaunch; `fresh: false` is a plugin reload inside the same
+ * context (a toggle, a BRAT update), which must not count as confirmation.
+ */
+async function launch(native: FakeNative, opts: { fresh?: boolean } = {}): Promise<P> {
+  if (opts.fresh !== false) delete (globalThis as Record<string, unknown>).__obsyncSecretContext;
   const app = { vault: { configDir: ".obsidian", adapter: {} }, workspace: { on: () => ({}), onLayoutReady: () => {} }, secretStorage: new FakeSecretStorage(native) };
   const plugin = new ObsyncPlugin(app as never, { id: "obsync", dir: ".obsidian/plugins/obsync" } as never) as P;
   (plugin as unknown as { startEngine: () => Promise<void> }).startEngine = async () => {};
@@ -240,3 +248,92 @@ describe("device keychain protection (method secret)", () => {
     expect(disk().protection.fallback).toBeUndefined();
   });
 });
+
+/** The native store behind Obsidian's secret storage, as Obsidian 1.15 lays it out, reachable through a Capacitor bridge. */
+function bridge(native: FakeNative, opts: { readable?: boolean } = {}): void {
+  (globalThis as Record<string, unknown>).Capacitor = {
+    Plugins: {
+      SecureStorage: {
+        getPrefixedKeys: async () => ({ keys: ["capacitor-storage_secrets-encrypted"] }),
+        internalGetItem: async () => ({ data: opts.readable === false ? null : JSON.stringify(JSON.stringify(native.kept)) }),
+      },
+    },
+  };
+}
+const noBridge = () => delete (globalThis as Record<string, unknown>).Capacitor;
+
+describe("device keychain: confirmed before anything is given up (review 14)", () => {
+  it("from none, with a native read: the keys are never on disk in the clear, and the write is confirmed at once", async () => {
+    const native = new FakeNative();
+    bridge(native);
+    stub.data = { identity, sealed: null, protection: { method: "none", touchId: false }, deviceName: "phone", protectionOffered: true };
+    stub.writes = [];
+    const p = await launch(native);
+    await p.setProtection("secret");
+    expect(stub.writes.length).toBeGreaterThan(0);
+    for (const w of stub.writes) expect(w).not.toContain("dt_secret-token");
+    expect(disk().protection.method).toBe("secret");
+    expect(disk().protection.fallback).toBeUndefined();
+    expect((disk().protection as { pending?: unknown }).pending).toBeUndefined();
+    const q = await launch(native);
+    expect(await q.unlock()).toBe(true);
+    expect(q.settings.identity).toEqual(identity);
+    noBridge();
+  });
+
+  it("from none, the native store read back without our key: the switch is refused and the keys stay as they were", async () => {
+    const native = new FakeNative();
+    native.persist = false;
+    bridge(native);
+    stub.data = { identity, sealed: null, protection: { method: "none", touchId: false }, deviceName: "phone", protectionOffered: true };
+    const p = await launch(native);
+    await expect(p.setProtection("secret")).rejects.toThrow(/did not keep/);
+    expect(disk().protection.method).toBe("none");
+    expect(disk().identity).toEqual(identity);
+    expect(disk().sealed).toBeNull();
+    expect(p.settings.identity).toEqual(identity);
+    noBridge();
+  }, 20_000);
+
+  it("F5: a plugin reload in the same context does not confirm; only a new context does", async () => {
+    noBridge();
+    const native = new FakeNative();
+    native.persist = false; // the native write never lands
+    stub.data = { identity, sealed: null, protection: { method: "none", touchId: false }, deviceName: "phone", protectionOffered: true };
+    await (await launch(native)).setProtection("secret");
+    expect(disk().protection.fallback).toBeTruthy();
+    // A toggle: Obsidian's in-memory map still holds the key, so it opens...
+    const same = new ObsyncPlugin(
+      { vault: { configDir: ".obsidian", adapter: {} }, workspace: { on: () => ({}), onLayoutReady: () => {} }, secretStorage: sameContextStore } as never,
+      { id: "obsync", dir: ".obsidian/plugins/obsync" } as never,
+    );
+    (same as unknown as { startEngine: () => Promise<void> }).startEngine = async () => {};
+    await same.loadSettings();
+    expect(await same.unlock()).toBe(true);
+    // ...but the fallback is kept, because nothing proved the write landed.
+    expect(disk().protection.fallback).toBeTruthy();
+    // The real relaunch: the native store never got it, the fallback restores the keys.
+    const q = await launch(native);
+    expect(await q.unlock()).toBe(true);
+    expect(q.settings.identity).toEqual(identity);
+    expect(disk().protection.method).toBe("none");
+  });
+});
+
+/** Obsidian's in-memory secret map in the context that wrote the secret: it has the key whether or not the device does. */
+const sameContextStore = {
+  map: {} as Record<string, string>,
+  setSecret(id: string, v: string) {
+    this.map[id] = v;
+  },
+  getSecret(id: string) {
+    const d = (globalThis as { __lastSecret?: Record<string, string> }).__lastSecret;
+    return d?.[id] ?? null;
+  },
+  deleteSecret() {
+    return true;
+  },
+  listSecrets() {
+    return [];
+  },
+};

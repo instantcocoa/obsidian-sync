@@ -26,9 +26,9 @@ use `rg`, never `grep`; never run `find /`. Commit messages end with the
 attribution lines your session was given; use a heredoc, never a
 double-quoted `-m` (backticks get command-substituted).
 
-## Status in one paragraph (2026-11-23, release 1.0.2)
+## Status in one paragraph (2026-11-23, release 1.0.3)
 
-obsync is released as 1.0.2 and in real use. The production server runs in
+obsync is released as 1.0.3 and in real use. The production server runs in
 Docker behind Caddy on the owner's host, with a nightly local snapshot and
 an encrypted off-site copy (`server/deploy/`, `server/README.md`). The
 owner's main vault is live on it (a Mac and an iPhone, with a recovery
@@ -219,6 +219,20 @@ DESIGN.md has the reasoning for each; the READMEs describe the result.
 - **1.0.2.** A chunked version's claimed size is checked against what its
   chunks can hold before anything is allocated (found while bringing the
   docs up to date); README "Everyday use" explains status and conflicts.
+- **1.0.3, fourteenth review fixed** (`plugin/test/review14.test.ts`,
+  `keychain-secret.test.ts`, server `chunks_test.go`,
+  `trust_internal_test.go`; reviewer report graded server 4.0, plugin 3.5).
+  Chunked versions bounded by `MAX_PLAIN` and by list length against size,
+  fetched in order with a running total (F4, F1, F2); an op that stops the
+  app twice is skipped (crash loop); feed, snapshot and history pages capped
+  at 32,768 chunk ids (F3); keychain sealing confirmed by a direct native
+  read or a new app context, never by a plugin reload, and no clear copy on
+  disk when the read works (known item a, F5); merges of chunked text read
+  the base from history, and merging no longer overflows the stack on large
+  notes (node-diff3's `push(...)`, F6); the conflict dialog names the writer
+  from the sync record and will not replace an unsynced file (known item b);
+  `--trust-proxy` takes a host name and the deploy kit trusts `caddy` only
+  (F7); restoring a backup un-removes devices, now documented (F8).
 
 ## What needs to be done (2026-11-23)
 

@@ -117,6 +117,63 @@ export function secretGet(app: unknown, id: string): Uint8Array | null {
   return fromHex(v);
 }
 
+/**
+ * Read our entry straight from the native store behind Obsidian's secret
+ * storage, bypassing Obsidian's in-memory copy: the only way to know a
+ * `setSecret` really reached the iOS Keychain or Android Keystore. Obsidian
+ * 1.15 keeps every secret in one native item, "secrets-encrypted" under the
+ * Capacitor SecureStorage plugin's prefix, as a JSON object.
+ *
+ * true: the native item holds `value` under `id`. false: the native item
+ * was read and does not (the write has not landed, or never will). null:
+ * this cannot be checked here (no native bridge, an unknown layout), which
+ * callers must treat as "not confirmed", never as "failed".
+ */
+export async function nativeSecretHas(id: string, value: string): Promise<boolean | null> {
+  type Bridge = { Plugins?: Record<string, Record<string, (o: unknown) => Promise<unknown>>>; nativePromise?: (plugin: string, method: string, o: unknown) => Promise<unknown> };
+  const cap = (globalThis as { Capacitor?: Bridge }).Capacitor;
+  if (!cap) return null;
+  const call = async (method: string, opts: unknown): Promise<unknown> => {
+    const p = cap.Plugins?.SecureStorage;
+    if (p && typeof p[method] === "function") return p[method](opts);
+    if (typeof cap.nativePromise === "function") return cap.nativePromise("SecureStorage", method, opts);
+    throw new Error("no SecureStorage bridge");
+  };
+  try {
+    let keys: string[] = [];
+    try {
+      keys = ((await call("getPrefixedKeys", { prefix: "", sync: false })) as { keys?: string[] })?.keys ?? [];
+    } catch {
+      /* listing unsupported: try the default name */
+    }
+    const names = keys.filter((k) => k.endsWith("secrets-encrypted"));
+    if (names.length === 0) names.push("capacitor-storage_secrets-encrypted");
+    let readAny = false;
+    for (const prefixedKey of names) {
+      let d: unknown;
+      try {
+        d = ((await call("internalGetItem", { prefixedKey, sync: false })) as { data?: unknown })?.data;
+      } catch {
+        continue;
+      }
+      // Stored JSON-encoded, and the plugin layer encodes once more.
+      for (let i = 0; i < 3 && typeof d === "string"; i++) {
+        try {
+          d = JSON.parse(d);
+        } catch {
+          break;
+        }
+      }
+      if (!d || typeof d !== "object") continue;
+      readAny = true;
+      if ((d as Record<string, unknown>)[id] === value) return true;
+    }
+    return readAny ? false : null;
+  } catch {
+    return null;
+  }
+}
+
 export function secretDrop(app: unknown, id: string): void {
   try {
     secretStore(app)?.deleteSecret?.(id);

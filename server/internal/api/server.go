@@ -57,7 +57,7 @@ type Config struct {
 }
 
 type Server struct {
-	trusted []*net.IPNet // proxies whose X-Forwarded-For is believed
+	trusted *trustSet // proxies whose X-Forwarded-For is believed
 	cfg     Config
 	st      *store.Store
 	blobs   *blobstore.FS
@@ -103,9 +103,18 @@ func (s *Server) dropOrphan(ctx context.Context, vault, id string) {
 }
 
 func New(cfg Config, st *store.Store, blobs *blobstore.FS) *Server {
-	trusted, err := parseCIDRs(cfg.TrustedProxies)
+	trusted, err := parseTrust(cfg.TrustedProxies)
 	if err != nil {
 		panic(err)
+	}
+	if len(trusted.hosts) > 0 {
+		go func() {
+			names := map[string][]*net.IPNet{}
+			names = trusted.refresh(names)
+			for range time.Tick(30 * time.Second) {
+				names = trusted.refresh(names)
+			}
+		}()
 	}
 	if cfg.MaxBlobSize == 0 {
 		cfg.MaxBlobSize = 1 << 30
@@ -292,7 +301,7 @@ func (s *Server) limited(next http.HandlerFunc) http.HandlerFunc {
 // clientIP is the address the request is attributed to in the event log:
 // the proxy-appended hop under --trust-proxy, else the peer address.
 func (s *Server) clientIP(r *http.Request) string {
-	if fromTrustedProxy(r, s.trusted) {
+	if fromTrustedProxy(r, s.trusted.nets()) {
 		if ip := proxiedClient(r); ip != "" {
 			return ip
 		}
@@ -702,6 +711,26 @@ func (s *Server) recoveryJoin(w http.ResponseWriter, r *http.Request) {
 
 // ---------- feed ----------
 
+// maxPageChunkIDs bounds the chunk ids one page of ops may carry (64 bytes
+// each, so about 2 MiB of them). Pages are counted in ops, and an op's
+// chunk list may be 4096 ids long, so without this a member could make
+// every page of the feed, the snapshot or a path's history hundreds of
+// megabytes for every device to download and parse.
+const maxPageChunkIDs = 32768
+
+// capChunkIDs cuts a page so the chunk ids it carries stay within budget,
+// always keeping the first op. Reports whether anything was cut.
+func capChunkIDs(ops []store.Op) ([]store.Op, bool) {
+	n := 0
+	for i, o := range ops {
+		n += len(o.Chunks)
+		if n > maxPageChunkIDs && i > 0 {
+			return ops[:i], true
+		}
+	}
+	return ops, false
+}
+
 type feedResponse struct {
 	Epoch    int64 `json:"epoch"`
 	MinEpoch int64 `json:"min_epoch"`
@@ -744,6 +773,9 @@ func (s *Server) snapshot(w http.ResponseWriter, r *http.Request) {
 	if len(ops) > limit {
 		ops = ops[:limit]
 		more = true
+	}
+	if cut, was := capChunkIDs(ops); was {
+		ops, more = cut, true
 	}
 	cursorOp, err := s.st.OpIDAt(r.Context(), v, vault.Seq)
 	if err != nil {
@@ -811,6 +843,9 @@ func (s *Server) changes(w http.ResponseWriter, r *http.Request) {
 			more := len(ops) > limit
 			if more {
 				ops = ops[:limit]
+			}
+			if cut, was := capChunkIDs(ops); was {
+				ops, more = cut, true
 			}
 			cursor := since
 			cursorOp := ""
@@ -1200,6 +1235,8 @@ func (s *Server) history(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, err)
 		return
 	}
+	// Newest first, so a cut keeps the head and the recent versions.
+	ops, _ = capChunkIDs(ops)
 	writeJSON(w, http.StatusOK, map[string]any{"ops": ops})
 }
 

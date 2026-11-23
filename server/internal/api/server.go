@@ -11,7 +11,6 @@ import (
 	"hash/fnv"
 	"io"
 	"log/slog"
-	"net"
 	"net/http"
 	"os"
 	"strconv"
@@ -109,10 +108,8 @@ func New(cfg Config, st *store.Store, blobs *blobstore.FS) *Server {
 	}
 	if len(trusted.hosts) > 0 {
 		go func() {
-			names := map[string][]*net.IPNet{}
-			names = trusted.refresh(names)
 			for range time.Tick(30 * time.Second) {
-				names = trusted.refresh(names)
+				trusted.names = trusted.refresh(trusted.names)
 			}
 		}()
 	}
@@ -1230,14 +1227,24 @@ func (s *Server) history(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "path_id required")
 		return
 	}
-	ops, err := s.st.History(r.Context(), r.PathValue("v"), pid, maxListLimit)
+	// Paged newest first: `before` is the lowest seq of the previous page.
+	// A page ends at maxListLimit ops or at the chunk-id budget, and `more`
+	// says whether older versions remain, so a member's few ops with long
+	// chunk lists cannot hide a file's earlier history from a client that
+	// keeps asking.
+	ops, err := s.st.HistoryBefore(r.Context(), r.PathValue("v"), pid, qInt(r, "before", 0), maxListLimit+1)
 	if err != nil {
 		s.fail(w, err)
 		return
 	}
-	// Newest first, so a cut keeps the head and the recent versions.
-	ops, _ = capChunkIDs(ops)
-	writeJSON(w, http.StatusOK, map[string]any{"ops": ops})
+	more := len(ops) > maxListLimit
+	if more {
+		ops = ops[:maxListLimit]
+	}
+	if cut, was := capChunkIDs(ops); was {
+		ops, more = cut, true
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ops": ops, "more": more})
 }
 
 func (s *Server) restore(w http.ResponseWriter, r *http.Request) {

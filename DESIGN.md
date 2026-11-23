@@ -1253,11 +1253,15 @@ ceiling every download has), or whose list is longer than
 `size / CHUNK_MIN + 1` or shorter than `size / CHUNK_MAX`. It then fetches
 in list order through a window of four, decrypts each chunk against the
 room left in the file, writes it into place, and stops at the first chunk
-that overruns or is too short for its position. Before writing a chunked
-version it saves `applying = {seq, tries}`; an app killed during it (a phone
-out of memory) finds that at the next start, and an op that has stopped the
-app twice is skipped and reported, so no version can crash a device at every
-launch. The server keeps pages of the feed, the snapshot and a history to
+that overruns or is too short for its position. Everything that can hold a chunked version in memory (applying it,
+merging against it, resolving a push conflict with it, writing it to disk)
+first saves `applying = {seq, path, tries}`; an app killed inside (a phone
+out of memory) finds it at the next start, and a version that has stopped
+the app twice is marked skipped on its own path, reported, and never loaded
+again on that device; the next version of the file is applied as usual, and
+a server restore clears the marks (sequence numbers are re-issued). Since
+1.0.4 (fifteenth review) the mark lives on the file entry, not in a capped
+list a batch of 51 such versions could overflow. The server keeps pages of the feed, the snapshot and a history to
 32,768 chunk ids. A merge whose base is a chunked version reads that base
 from the path's history like any chunked download.
 

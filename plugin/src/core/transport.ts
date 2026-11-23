@@ -439,8 +439,24 @@ export class Client {
     await this.json("PATCH", `/v1/vaults/${vaultId}/ops/${seq}/meta`, { meta_enc: b64(metaEnc), meta_epoch: metaEpoch }, { authority: true });
   }
 
-  async history(vaultId: string, pathId: string): Promise<WireOp[]> {
-    return (await this.json<{ ops: WireOp[] }>("GET", `/v1/vaults/${vaultId}/history?path_id=${pathId}`)).ops ?? [];
+  /**
+   * A path's versions, newest first, following the server's pages back as
+   * far as `maxPages` (each page is up to 5,000 versions or a bounded number
+   * of chunk ids). An older server answers in one page without `more`.
+   */
+  async history(vaultId: string, pathId: string, opts: { maxPages?: number } = {}): Promise<WireOp[]> {
+    const out: WireOp[] = [];
+    let before = 0;
+    for (let page = 0; page < (opts.maxPages ?? 50); page++) {
+      const r = await this.json<{ ops: WireOp[]; more?: boolean }>("GET", `/v1/vaults/${vaultId}/history?path_id=${pathId}${before ? `&before=${before}` : ""}`);
+      const ops = r.ops ?? [];
+      for (const o of ops) out.push(o);
+      if (!r.more || ops.length === 0) break;
+      const low = Math.min(...ops.map((o) => o.seq));
+      if (before && low >= before) break; // a server that does not honour `before`
+      before = low;
+    }
+    return out;
   }
 
   async restore(vaultId: string, atMs: number): Promise<{ emitted: number; skipped_path_ids: string[]; cursor: number }> {

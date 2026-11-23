@@ -380,6 +380,8 @@ export default class ObsyncPlugin extends Plugin {
   }
 
   private confirmRestartArmed = false;
+  /** Last time Obsidian saved an edit to a note; the confirming restart waits until editing has paused. */
+  private lastEdit = 0;
 
   /** Restart Obsidian once, when sync is idle, so the keychain is re-read from the device (protectWithSecret, step 3). */
   private scheduleConfirmRestart(): void {
@@ -387,15 +389,21 @@ export default class ObsyncPlugin extends Plugin {
     const run = (this.app as unknown as { commands?: { executeCommandById?: (id: string) => boolean } }).commands?.executeCommandById;
     if (typeof run !== "function") return;
     this.confirmRestartArmed = true;
+    this.registerEvent(this.app.vault.on("modify", () => (this.lastEdit = Date.now())));
     const t0 = Date.now();
+    // "Reload app" does not wait for the editor's pending save, so the
+    // restart waits for sync to be idle and for 30 s without a saved edit
+    // (Obsidian saves within two seconds of typing). After ten minutes of
+    // steady editing it gives up: the next launch confirms just the same.
+    const quiet = () => this.engine?.getStatus().phase === "idle" && Date.now() - this.lastEdit > 30_000;
     const tick = () => {
       if (this.unloaded || !this.settings.protection.pending) return;
-      const phase = this.engine?.getStatus().phase;
-      if (phase !== "idle" && Date.now() - t0 < 120_000) return void window.setTimeout(tick, 2000);
-      new Notice("obsync: restarting Obsidian once to confirm the vault key is in this device's keychain.", 5000);
+      if (!quiet()) return void (Date.now() - t0 < 600_000 && window.setTimeout(tick, 5000));
+      new Notice("obsync: restarting Obsidian in a few seconds, once, to confirm the vault key is in this device's keychain.", 6000);
       window.setTimeout(() => {
-        if (!this.unloaded && this.settings.protection.pending) run.call((this.app as unknown as { commands: unknown }).commands, "app:reload");
-      }, 4000);
+        if (!this.unloaded && this.settings.protection.pending && quiet()) run.call((this.app as unknown as { commands: unknown }).commands, "app:reload");
+        else if (!this.unloaded && this.settings.protection.pending) window.setTimeout(tick, 5000);
+      }, 6000);
     };
     window.setTimeout(tick, 3000);
   }

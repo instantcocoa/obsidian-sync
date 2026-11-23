@@ -40,6 +40,9 @@ type trustSet struct {
 	hosts  []string
 	cur    atomic.Pointer[[]*net.IPNet]
 	lookup func(string) ([]net.IP, error)
+	// names holds the last good addresses per host, so a later failed
+	// lookup keeps them; only the refresher goroutine touches it.
+	names map[string][]*net.IPNet
 }
 
 func (t *trustSet) nets() []*net.IPNet {
@@ -64,6 +67,12 @@ func (t *trustSet) refresh(prev map[string][]*net.IPNet) map[string][]*net.IPNet
 			next[h] = prev[h]
 		} else {
 			for _, ip := range ips {
+				// A proxy answers from a real host address, never from
+				// "any", a broadcast or a multicast address; a DNS answer
+				// naming one would widen trust, so it is ignored.
+				if ip.IsUnspecified() || ip.IsMulticast() || ip.Equal(net.IPv4bcast) {
+					continue
+				}
 				bits := 128
 				if ip.To4() != nil {
 					ip, bits = ip.To4(), 32
@@ -110,13 +119,27 @@ func newLimiter(perMinute, burst int, trusted *trustSet) *limiter {
 // while the server runs). An unparsable entry is an error, never a silently
 // wider trust.
 func parseTrust(list []string) (*trustSet, error) {
+	return parseTrustWith(list, net.LookupIP)
+}
+
+func parseTrustWith(list []string, lookup func(string) ([]net.IP, error)) (*trustSet, error) {
 	nets, hosts, err := parseCIDRs(list)
 	if err != nil {
 		return nil, err
 	}
-	t := &trustSet{static: nets, hosts: hosts, lookup: net.LookupIP}
+	t := &trustSet{static: nets, hosts: hosts, lookup: lookup}
 	if len(hosts) > 0 {
-		t.refresh(nil)
+		t.names = t.refresh(nil)
+		// A name that resolves to nothing trusts nothing, which quietly
+		// puts every client behind the proxy into the proxy's one limiter
+		// bucket: a single client could then lock everyone out of joining.
+		// Refuse to start instead, so the mistake is seen (in a container
+		// stack the service restarts until the proxy is up).
+		for _, h := range hosts {
+			if len(t.names[h]) == 0 {
+				return nil, fmt.Errorf("trust-proxy: host %q does not resolve", h)
+			}
+		}
 	}
 	return t, nil
 }

@@ -157,7 +157,7 @@ describe("review 14: chunked content is bounded before it is fetched or allocate
       await b.engine.flushState();
       const f = await b.stateFile();
       const st = JSON.parse(await fsp.readFile(f, "utf8"));
-      st.applying = { seq: op.seq, tries };
+      st.applying = { seq: op.seq, path: "big.bin", tries };
       await fsp.writeFile(f, JSON.stringify(st));
       await b.restart({ crash: true });
     };
@@ -172,7 +172,7 @@ describe("review 14: chunked content is bounded before it is fetched or allocate
     await c.engine.flushState();
     const f = await c.stateFile();
     const st = JSON.parse(await fsp.readFile(f, "utf8"));
-    st.applying = { seq: op.seq, tries: 2 };
+    st.applying = { seq: op.seq, path: "big.bin", tries: 2 };
     await fsp.writeFile(f, JSON.stringify(st));
     await c.restart({ crash: true });
     await c.sync();

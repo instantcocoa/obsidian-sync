@@ -20,7 +20,7 @@ What you get:
   copy the snapshots off the host.
 - **Large files sync as chunks**, so an edit uploads only what changed.
 
-**Status.** Version 1.0.3. Every device in a vault needs 1.0 or newer,
+**Status.** Version 1.0.4. Every device in a vault needs 1.0 or newer,
 because older versions cannot read large files stored as chunks. Upgrading
 from 0.2 needs nothing else: update the server and every device, and
 existing vaults carry on. The code is tested on Linux, macOS and Windows

@@ -26,9 +26,9 @@ use `rg`, never `grep`; never run `find /`. Commit messages end with the
 attribution lines your session was given; use a heredoc, never a
 double-quoted `-m` (backticks get command-substituted).
 
-## Status in one paragraph (2026-11-23, release 1.0.3)
+## Status in one paragraph (2026-11-23, release 1.0.4)
 
-obsync is released as 1.0.3 and in real use. The production server runs in
+obsync is released as 1.0.4 and in real use. The production server runs in
 Docker behind Caddy on the owner's host, with a nightly local snapshot and
 an encrypted off-site copy (`server/deploy/`, `server/README.md`). The
 owner's main vault is live on it (a Mac and an iPhone, with a recovery
@@ -233,6 +233,17 @@ DESIGN.md has the reasoning for each; the READMEs describe the result.
   from the sync record and will not replace an unsynced file (known item b);
   `--trust-proxy` takes a host name and the deploy kit trusts `caddy` only
   (F7); restoring a backup un-removes devices, now documented (F8).
+- **1.0.4, fifteenth review's smaller fixes** (`plugin/test/review15.test.ts`;
+  report graded server 4.0, plugin 3.5). The crash guard keeps its skip mark
+  on the file entry instead of a 50-entry list (N1), covers merges and push
+  conflicts (N2) and the write to disk (N3), never arms for an already
+  skipped version (found by the new test), and is cleared by a server restore
+  (N6). History is paged (`before`, `more`) and the client follows the pages
+  (N4). Another device's edit of a conflict copy clears "own" (N5).
+  `--trust-proxy` refuses to start on a name that does not resolve and keeps
+  the last good addresses (N7). The keychain-confirming restart waits for 30
+  s without an edit (N8). Still open: streaming chunked writes to disk so a
+  phone never holds a large file in memory (the root of N1 to N3).
 
 ## What needs to be done (2026-11-23)
 

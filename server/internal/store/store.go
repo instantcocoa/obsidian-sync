@@ -19,6 +19,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"strings"
 	"sync"
@@ -1404,7 +1405,16 @@ func (s *Store) Snapshot(ctx context.Context, vault string, since int64, limit i
 // the head: a client resolving "the current version" from a long history
 // must never be handed version 5000 of 5002.
 func (s *Store) History(ctx context.Context, vault, pathID string, limit int) ([]Op, error) {
-	return s.queryOps(ctx, `SELECT `+opCols+` FROM ops WHERE vault_id=? AND path_id=? ORDER BY seq DESC LIMIT ?`, vault, pathID, limit)
+	return s.HistoryBefore(ctx, vault, pathID, 0, limit)
+}
+
+// HistoryBefore is History from below seq `before` (0: from the newest), so
+// a client can page back through a long history.
+func (s *Store) HistoryBefore(ctx context.Context, vault, pathID string, before int64, limit int) ([]Op, error) {
+	if before <= 0 {
+		before = math.MaxInt64
+	}
+	return s.queryOps(ctx, `SELECT `+opCols+` FROM ops WHERE vault_id=? AND path_id=? AND seq<? ORDER BY seq DESC LIMIT ?`, vault, pathID, before, limit)
 }
 
 func (s *Store) OpsByTime(ctx context.Context, vault string, from, to int64, limit int) ([]Op, error) {

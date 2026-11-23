@@ -122,7 +122,10 @@ failed token checks are rate-limited per client IP: `--auth-rate N` requests
 per minute (default 10, burst 2N; `-1` disables, for tests). Behind a reverse
 proxy pass `--trust-proxy` the proxy's own addresses, CIDRs, or its host
 name (resolved at start and every 30 seconds, for a proxy in a container
-network whose address changes when it is recreated), so the
+network whose address changes when it is recreated; a name that does not
+resolve at start stops the server, because trusting nothing would put every
+client in the proxy's one limiter bucket, and a later failed lookup keeps the
+last good address), so the
 limiter and the security log key on the last `X-Forwarded-For` entry, the one
 your proxy appended, for requests that arrive from those addresses; requests
 from any other peer are keyed on the peer itself, so nothing that reaches the
@@ -337,7 +340,7 @@ hex chars.
 | `PATCH` | `/v1/vaults/{v}/ops/{seq}/meta` | **authority**. `{meta_enc, meta_epoch}`; higher epoch only |
 | `GET` | `/v1/vaults/{v}/ops?meta_epoch_lt=E` | `{seqs}` re-encryption worklist |
 | `GET` | `/v1/vaults/{v}/ops?from=ms&to=ms` | op log by time |
-| `GET` | `/v1/vaults/{v}/history?path_id=…` | ops for a path (first 5000) |
+| `GET` | `/v1/vaults/{v}/history?path_id=…` | ops for a path, newest first, 5000 or a chunk-id budget per page; `before=SEQ` pages back, `more` says older versions remain |
 | `POST` | `/v1/vaults/{v}/restore` | **authority**. `{at: ms}` → re-emits older heads, chunk lists included; a version whose blob or any chunk is gone is skipped; `{emitted, skipped_path_ids}`. There is no CLI for this on purpose: the route needs the vault authority token, which the server never holds, so only the plugin's **Restore vault to a point in time** can ask (DESIGN.md §4.5) |
 
 Invariants enforced server-side: a `put` needs its blob uploaded first, or

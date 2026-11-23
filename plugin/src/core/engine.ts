@@ -38,6 +38,13 @@ export interface FileEntry {
   excluded?: true;
   /** Device id that wrote this version (from the op), when known. */
   by?: string;
+  /**
+   * The newest version of this path that stopped the app twice while being
+   * written here (a phone out of memory), so it is not tried again. Kept on
+   * the path, not in a list: there is nothing to overflow, a later version
+   * is applied as usual, and a server restore clears it.
+   */
+  skip?: number;
 }
 
 export interface Inflight {
@@ -74,8 +81,8 @@ export interface State {
    * (a phone killed for memory); twice for the same op and the op is skipped,
    * so one oversized version cannot crash a device at every launch.
    */
-  applying?: { seq: number; tries: number };
-  /** Ops skipped that way, kept so a replay does not try them again. */
+  applying?: { seq: number; path?: string; tries: number };
+  /** Before 1.0.4: ops skipped by seq. Read once and dropped (skips now live on the file entry). */
   poisoned?: number[];
   /** Conflict copies this device made itself (vault path → time), so the review dialog can tell them from look-alikes. */
   siblings?: Record<string, number>;
@@ -336,12 +343,14 @@ export class Engine {
     }
     this.dirty = new Set(this.state.dirty);
     if (this.state.epoch > this.vc.keyring.current) this.vc.keyring.current = this.state.epoch;
+    delete this.state.poisoned;
     const a = this.state.applying;
-    if (a && a.tries >= 2) {
+    if (a && a.tries >= 2 && a.path) {
       // The app died twice while writing this version: skip it from now on.
-      this.state.poisoned = [...(this.state.poisoned ?? []), a.seq].slice(-50);
+      const e = this.state.files[a.path];
+      this.state.files[a.path] = e ? { ...e, skip: Math.max(e.skip ?? 0, a.seq) } : { hash: null, seq: 0, size: 0, mtime: 0, skip: a.seq };
       delete this.state.applying;
-      this.log("error", `op ${a.seq} stopped the app twice while being applied; skipping it`);
+      this.log("error", `op ${a.seq} for ${a.path} stopped the app twice while being applied; skipping it`);
     }
   }
 
@@ -865,6 +874,10 @@ export class Engine {
   private async recoverFromRewind(serverSeq: number): Promise<void> {
     const v = this.cfg.vaultId;
     this.log("warn", `server sequence went backwards (${this.state.cursor} -> ${serverSeq}); reconciling against a restored server`);
+    // Sequence numbers are re-issued by a restore: a skip recorded by seq
+    // could now name a different version.
+    delete this.state.applying;
+    for (const e of Object.values(this.state.files)) delete e.skip;
     const snap = await this.fullSnapshot(v);
     await this.adoptEpoch(snap.epoch, snap.min_epoch);
     const heads = new Map<string, WireOp>();
@@ -1308,10 +1321,49 @@ export class Engine {
    * abandoned and the decision remade, so the edit becomes a merge or a
    * sibling instead of being overwritten.
    */
+  private skipReported = new Set<string>();
+  private reportSkip(logical: string): void {
+    if (this.skipReported.has(logical)) return;
+    this.skipReported.add(logical);
+    this.hooks.onSkipped?.(this.device(logical), "a version of this file stopped the app twice while it was being written (probably too large for this device's memory), so this device skipped it; the next version will be tried");
+  }
+
+  private guardDepth = 0;
+
+  /**
+   * Run the work that reads and writes a chunked version (download, merge,
+   * the write to disk) with a record of it saved first. If the app dies
+   * inside, the record is still on disk at the next start; twice for the
+   * same version and loadState marks it skipped on its path. Everything
+   * that can hold a large version in memory goes through here: applying a
+   * remote op, and resolving a push conflict against one.
+   */
+  private async guarded<T>(logical: string, op: WireOp, fn: () => Promise<T>): Promise<T> {
+    // Nothing to guard for a version already written or already skipped
+    // here: arming for it would overwrite the record of the one that is
+    // actually crashing, and its count would never reach two.
+    const e = this.state.files[logical];
+    if (!op.chunks?.length || this.guardDepth > 0 || (e && (e.seq >= op.seq || (e.skip ?? 0) >= op.seq))) return fn();
+    const prev = this.state.applying;
+    this.state.applying = { seq: op.seq, path: logical, tries: prev && prev.seq === op.seq && prev.path === logical ? prev.tries + 1 : 1 };
+    await this.flushState();
+    this.guardDepth++;
+    try {
+      const r = await fn();
+      delete this.state.applying;
+      return r;
+    } catch (e) {
+      delete this.state.applying;
+      throw e;
+    } finally {
+      this.guardDepth--;
+    }
+  }
+
   private async applyRemote(logical: string, op: WireOp, meta: FileMeta, blobs: BlobCache): Promise<void> {
     for (let attempt = 0; ; attempt++) {
       try {
-        return await this.applyRemoteOnce(logical, op, meta, blobs);
+        return await this.guarded(logical, op, () => this.applyRemoteOnce(logical, op, meta, blobs));
       } catch (e) {
         if (!(e instanceof ConcurrentLocalEdit) || attempt >= 4) throw e;
         this.log("info", `${this.device(logical)} changed while a remote version was being applied; deciding again`);
@@ -1323,8 +1375,8 @@ export class Engine {
     const devPath = this.device(logical);
     const e = this.state.files[logical];
     if (e && e.seq >= op.seq) return; // already applied (replay after a rewind)
-    if (this.state.poisoned?.includes(op.seq)) {
-      this.hooks.onSkipped?.(this.device(logical), "this version stopped the app twice while it was being written (probably too large for this device's memory), so it was skipped; a later version of the file will be tried");
+    if (e?.skip !== undefined && op.seq <= e.skip) {
+      this.reportSkip(logical);
       return;
     }
     if (this.excluded(logical)) {
@@ -1375,6 +1427,7 @@ export class Engine {
     if (diskHash === op.blob_id) {
       // Converged (echo of our own upload, or both sides wrote the same bytes).
       this.state.files[logical] = { hash: op.blob_id, seq: op.seq, at: op.created_at, size: st!.size, mtime: st!.mtime, by: op.device_id };
+      if (this.state.siblings && op.device_id !== this.cfg.deviceId) delete this.state.siblings[logical];
       this.dirty.delete(logical);
       this.scheduleSave();
       return;
@@ -1591,15 +1644,6 @@ export class Engine {
     if (local && local.length === meta.size) {
       // Same content already on this device under another name: no download.
       plain = local;
-    } else if (op.chunks?.length) {
-      const prev = this.state.applying;
-      this.state.applying = { seq: op.seq, tries: prev?.seq === op.seq ? prev.tries + 1 : 1 };
-      await this.flushState();
-      try {
-        plain = await this.fetchContent(op, meta, blobs, devPath);
-      } finally {
-        delete this.state.applying;
-      }
     } else {
       plain = await this.fetchContent(op, meta, blobs, devPath);
     }
@@ -1622,6 +1666,8 @@ export class Engine {
     delete this.state.inflight[logical];
     this.busyReported.delete(logical);
     this.state.files[logical] = { hash: blobId, seq: op.seq, at: op.created_at, size: st.size, mtime: st.mtime, by: op.device_id };
+    // Another device's version of a copy this device made is theirs now.
+    if (this.state.siblings && op.device_id !== this.cfg.deviceId) delete this.state.siblings[logical];
     this.dirty.delete(logical);
     this.scheduleSave();
     this.hooks.afterApply?.(devPath, "put");
@@ -1811,6 +1857,14 @@ export class Engine {
         this.state.cursorOp = p.op.op_id;
       }
     } else if (r.conflict) {
+      const skipped = this.state.files[p.logical]?.skip;
+      if (skipped !== undefined && r.conflict.seq <= skipped) {
+        // The head is a version this device skipped: resolving against it
+        // would load it again. The local edit stays on disk, unsynced.
+        this.reportSkip(p.logical);
+        this.dirty.delete(p.logical);
+        return;
+      }
       let meta: FileMeta | null = null;
       try {
         meta = await this.vc.decryptMeta(r.conflict.path_id, fromB64(r.conflict.meta_enc));
@@ -1847,7 +1901,7 @@ export class Engine {
         if (honest) {
           if (p.bytes) {
             try {
-              await this.resolveConflict(p.logical, p.bytes, p.op.blob_id!, honest.op, honest.meta, undefined, p.st ?? null);
+              await this.guarded(p.logical, honest.op, () => this.resolveConflict(p.logical, p.bytes!, p.op.blob_id!, honest.op, honest.meta, undefined, p.st ?? null));
             } catch (e) {
               if (!(e instanceof ConcurrentLocalEdit)) throw e;
               this.markDirty(p.logical);
@@ -1882,7 +1936,8 @@ export class Engine {
         // them would overwrite that edit. Leave the file dirty instead: the
         // next round re-reads it and resolves against the real head.
         try {
-          await this.resolveConflict(p.logical, p.bytes, p.op.blob_id!, r.conflict, meta, undefined, p.st ?? null);
+          const head = r.conflict;
+          await this.guarded(p.logical, head, () => this.resolveConflict(p.logical, p.bytes!, p.op.blob_id!, head, meta, undefined, p.st ?? null));
         } catch (e) {
           if (!(e instanceof ConcurrentLocalEdit)) throw e;
           this.log("info", `${this.device(p.logical)} changed while its push was in flight; resolving next round`);

@@ -329,6 +329,7 @@ blobs    (vault_id, blob_id, epoch, ct_size, created_at, last_ref_at)
 | `PATCH` | `/v1/vaults/{v}/ops/{seq}/meta` | Replace `meta_enc` with a higher `meta_epoch` (re-encryption). Nothing else about an op can change. Vault authority required. |
 | `GET` | `/v1/vaults/{v}/history?path_id=…` | All ops for a path (versions UI, restore). |
 | `GET` | `/v1/vaults/{v}/ops?from=T` | Op log by time, for "restore vault to T" tooling. |
+| `POST` | `/v1/vaults/{v}/restore` | `{at: ms}`: re-emit, as new `put` ops, the head every path had at `at` (§4.5). Vault authority required, so only a member device can rewind. |
 
 All requests carry `Authorization: Bearer <device token>`, never a token in
 the query string. List routes clamp `limit` to 5000, `snapshot` is paged
@@ -360,8 +361,13 @@ Server-side, automatic, no device coordination:
   itself: a blob in the normal upload-then-post gap is never swept.
 - A daily sweep deletes dead blobs. The op log itself is retained forever.
 - "Restore vault to time T" = for every path, take the latest op with
-  `created_at ≤ T`; if its blob is still present, emit a new `put` op. This is
-  a CLI command on the server and a command in the plugin.
+  `created_at ≤ T`; if its blob is still present, emit a new `put` op. The
+  server does the work (`POST /v1/vaults/{v}/restore`), but the request needs
+  the vault authority token (§5.8), which the server never holds, so only a
+  member device can ask for it: the plugin command **Restore vault to a point
+  in time**. There is deliberately no server CLI for it; the operator can
+  restore the whole data directory from a backup (§6.8 covers how devices
+  reconcile), not rewrite one vault's history.
 
 Compare with LiveSync: GC V3 is manual, beta, CouchDB-only, requires "fetch
 chunks on demand" off and all devices synced, and then needs CouchDB compaction

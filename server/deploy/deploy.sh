@@ -12,6 +12,8 @@
 #   /var/lib/obsync              data, owned by uid 65532 (the image's user)
 #   /usr/local/sbin/obsync-backup.sh + obsync-backup.{service,timer}
 #                                nightly snapshot to /var/backups/obsync (14 kept)
+#   /usr/local/sbin/obsync-offsite.sh  restic copy of that snapshot to S3 when
+#                                /etc/obsync/offsite.env exists (restic via apt)
 # then builds the image, starts the service, reloads Caddy and checks
 # https://<site>/healthz.
 set -euo pipefail
@@ -26,7 +28,7 @@ ssh "$host" 'mkdir -p ~/obsync ~/caddy/conf/sites'
 rsync -az --delete --exclude '/obsync' --exclude '/obsync-*' --exclude '*.db*' --exclude '/deploy/' "$server/" "$host:obsync/src/"
 rsync -az "$here/docker-compose.yml" "$host:obsync/docker-compose.yml"
 rsync -az "$here/$sitefile" "$host:caddy/conf/sites/$sitefile"
-rsync -az "$here/obsync-backup.sh" "$here/obsync-backup.service" "$here/obsync-backup.timer" "$host:obsync/"
+rsync -az "$here/obsync-backup.sh" "$here/obsync-offsite.sh" "$here/offsite.env.example" "$here/obsync-backup.service" "$here/obsync-backup.timer" "$host:obsync/"
 
 echo "== wire into the stack"
 ssh "$host" bash -s <<'REMOTE'
@@ -41,6 +43,10 @@ sudo mkdir -p /var/lib/obsync
 sudo chown 65532:65532 /var/lib/obsync
 sudo chmod 700 /var/lib/obsync
 sudo install -m 755 ~/obsync/obsync-backup.sh /usr/local/sbin/obsync-backup.sh
+sudo install -m 755 ~/obsync/obsync-offsite.sh /usr/local/sbin/obsync-offsite.sh
+sudo install -d -m 700 /etc/obsync
+command -v restic >/dev/null || sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq restic >/dev/null
+[[ -r /etc/obsync/offsite.env ]] || sudo test -e /etc/obsync/offsite.env || echo "note: no /etc/obsync/offsite.env, so nightly snapshots stay on this host (see ~/obsync/offsite.env.example)"
 sudo install -m 644 ~/obsync/obsync-backup.service ~/obsync/obsync-backup.timer /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now obsync-backup.timer >/dev/null 2>&1

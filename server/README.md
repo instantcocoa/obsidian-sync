@@ -173,8 +173,22 @@ sudo chown -R 65532:65532 /var/lib/obsync
 docker compose start obsync
 ```
 
-The snapshots live on the same host; copy the directory elsewhere as well
-if the host itself is what you are insuring against.
+The snapshots live on the same host. For the case where the host itself
+is lost, the same service then runs `obsync-offsite.sh`, which pushes the
+newest snapshot with [restic](https://restic.net) to any S3-compatible
+bucket when `/etc/obsync/offsite.env` exists (`deploy/offsite.env.example`;
+root-only, holds the bucket credentials and the restic password). Restic
+deduplicates and encrypts, keeps 14 daily, 8 weekly and 12 monthly
+snapshots, prunes on Sundays and verifies a sample of the data monthly.
+Without the env file the step is a no-op. Keep `RESTIC_PASSWORD` in a
+password manager as well: the off-site copies are unreadable without it.
+To restore from off-site onto a fresh host:
+
+```sh
+sudo sh -c 'set -a; . /etc/obsync/offsite.env; restic snapshots --tag obsync-nightly'
+sudo sh -c 'set -a; . /etc/obsync/offsite.env; restic restore latest --target /var/backups/obsync-restored'
+# then the four lines above, from /var/backups/obsync-restored/var/backups/obsync/<date>/
+```
 
 ## Backup and restore
 

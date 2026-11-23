@@ -26,9 +26,9 @@ use `rg`, never `grep`; never run `find /`. Commit messages end with the
 attribution lines your session was given; use a heredoc, never a
 double-quoted `-m` (backticks get command-substituted).
 
-## Status in one paragraph (2026-11-23, release 1.0.1)
+## Status in one paragraph (2026-11-23, release 1.0.2)
 
-obsync is released as 1.0.1 and in real use. The production server runs in
+obsync is released as 1.0.2 and in real use. The production server runs in
 Docker behind Caddy on the owner's host, with a nightly local snapshot and
 an encrypted off-site copy (`server/deploy/`, `server/README.md`). The
 owner's main vault is live on it (a Mac and an iPhone, with a recovery
@@ -216,6 +216,9 @@ DESIGN.md has the reasoning for each; the READMEs describe the result.
   judged obsync ahead on correctness and performance, and listed what the
   items above then fixed: no conflict review, re-download on rename, whole
   files re-sent for an edit.
+- **1.0.2.** A chunked version's claimed size is checked against what its
+  chunks can hold before anything is allocated (found while bringing the
+  docs up to date); README "Everyday use" explains status and conflicts.
 
 ## What needs to be done (2026-11-23)
 

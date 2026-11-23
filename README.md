@@ -20,13 +20,13 @@ What you get:
   copy the snapshots off the host.
 - **Large files sync as chunks**, so an edit uploads only what changed.
 
-**Status.** Version 1.0.0. It adds chunked storage for large files, which
-0.x clients cannot read, so every device in a vault must run 1.0 or newer.
-Vaults made with 0.2 keep working after the server and all devices are
-upgraded; nothing is migrated. The code is tested by an automated suite on
-Linux, macOS and Windows with real Obsidian, and on a physical iPhone. It has
-not yet been reviewed by a human security specialist, and it is young: keep a
-backup of your vault while you get to know it.
+**Status.** Version 1.0.2. Every device in a vault needs 1.0 or newer,
+because older versions cannot read large files stored as chunks. Upgrading
+from 0.2 needs nothing else: update the server and every device, and
+existing vaults carry on. The code is tested on Linux, macOS and Windows
+with real Obsidian, and on a physical iPhone. It has not yet been reviewed
+by a human security specialist, and it is young: keep a backup of your vault
+while you get to know it.
 
 ## Setup guide
 
@@ -290,14 +290,27 @@ vault key, so a stolen token alone cannot change or delete anything.
 
 ## Everyday use
 
-Sync is automatic. On desktop the status bar shows `obsync ✓`. Phones have
-no status bar; the state is under Settings → obsync.
+Sync is automatic. There is nothing to press.
+
+**Is it working?** On a computer, the status bar at the bottom right shows
+`obsync ✓` when everything is up to date, `↕` while syncing, and `⚠` when
+offline. Phones and tablets have no status bar: tap the obsync icon in the
+ribbon menu, or run **obsync: Show sync status**. If sync stops or goes
+offline on a phone, a notice tells you.
+
+**Two versions of a file?** If the same file is changed on two devices at
+once and the edits overlap, both are kept: the second gets "(conflict
+device date)" in its name. Run **obsync: Show conflicts** to see each one
+with the lines that differ, and choose **Keep current**, **Keep other
+version** or **Open both**. Edits that do not overlap are merged without
+asking.
 
 Commands, from the command palette or the settings page:
 
 | Command | What it does |
 | --- | --- |
-| Show conflicts | Lists conflict copies so you can open and resolve them |
+| Show sync status | Says whether this device is up to date, syncing or offline, and how many conflicts wait |
+| Show conflicts | Shows each conflict copy with what differs; keep one version or open both |
 | Show history for current file | Lets you save any earlier version |
 | Manage devices | Lists devices; Remove revokes one and rotates the keys |
 | Rotate vault keys | Makes new keys and re-encrypts, without removing anyone |

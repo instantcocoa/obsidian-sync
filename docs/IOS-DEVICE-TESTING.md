@@ -23,11 +23,12 @@ it and what it cannot do.
     lock timer, so a locked screen reads as "the plugin stopped syncing".
   - **Trust author and enable plugins** the first time Obsidian opens the
     vault after the plugin is pushed in. Obsidian asks once per vault.
-- A server the devices can reach. Obsidian's web view is fine with a
+- A **test** server the devices can reach, never the one that holds real
+  vaults: the suite stops it, wipes it and replaces its data directory
+  (see the warning under Running). Obsidian's web view is fine with a
   public-CA certificate; the runs here used `obsync serve --acme-domain`
-  on a small EC2 box. The test controls that server over ssh
-  (`run.sh start|stop`, `~/obsync/data`), see `RemoteServer` in
-  `plugin/test/ios-harness.ts`.
+  on a small EC2 box. The test controls that server over ssh, see
+  `RemoteServer` in `plugin/test/ios-harness.ts`.
 
 ## Running
 
@@ -38,13 +39,38 @@ IOS_IPHONE=<udid or device name> IOS_IPAD=<udid or device name> \
 npx vitest run test/ios-devices.test.ts --reporter=verbose
 ```
 
-The harness's `RemoteServer` drives a systemd install (`sudo systemctl
-stop|start obsync`, data in `/var/lib/private/obsync`, the CLI at
-`/usr/local/bin/obsync`), which is what util ran. The production server on
-kratz is the Docker deployment (`server/deploy/`), so a device run against
-it needs `RemoteServer` taught `docker compose stop|start obsync`,
-`/var/lib/obsync` and `docker compose exec obsync obsync …`, or a systemd
-test host.
+**The suite is destructive to the server it points at.** The recovery
+scenarios stop the server, copy its data directory aside, move the live
+directory away and put a backup in its place, and a fresh run wipes every
+vault. Point it only at an instance made for testing. Two guards exist: the
+host must carry the marker file `~/obsync/.allow-device-tests` before the
+harness will stop or alter anything, and in compose mode the harness
+refuses the service name `obsync` (the production service) unless
+`IOS_ALLOW_PROD_SERVER=1` is set. Do not set it.
+
+`RemoteServer` knows two host layouts, chosen with `IOS_SERVER_MODE`:
+
+| | `systemd` (the default) | `compose` |
+| --- | --- | --- |
+| What it is | `server/obsync.service`, as on the EC2 box the runs above used | a service in a Docker compose stack in the ssh user's home directory, as in `server/deploy/` |
+| Stop and start | `sudo systemctl stop\|start <service>` | `cd ~ && docker compose stop\|start <service>` |
+| CLI (create links) | `sudo /usr/local/bin/obsync … --data <data>` | `docker compose exec -T <service> obsync … --data /data` |
+| `IOS_SERVER_SERVICE` default | `obsync` | `obsync-test` |
+| `IOS_SERVER_DATA` default | `/var/lib/private/obsync` | `/var/lib/obsync-test` (the host path of the bind mount) |
+| Backups made by the run | beside the data directory, `<data>.obsync-backup-<time>` | the same |
+
+```sh
+IOS_DEVICES=1 IOS_SERVER=https://sync-test.example.com IOS_SERVER_HOST=myhost \
+IOS_SERVER_MODE=compose IOS_SERVER_SERVICE=obsync-test IOS_SERVER_DATA=/var/lib/obsync-test \
+IOS_IPHONE=<udid or device name> IOS_IPAD=<udid or device name> \
+npx vitest run test/ios-devices.test.ts --reporter=verbose
+```
+
+The compose layout needs a second service beside the production one: its
+own container name, data directory, hostname and Caddy site. The deploy kit
+does not create it yet, so as of 1.0.1 no device run has been made against
+a compose host; the last full run (run 12, 2026-11-08, plugin 0.1.14) used
+the systemd layout.
 
 Each run mints a create link on the host over ssh (`sudo obsync vault
 create`), creates a fresh vault with it, enrols the two devices from
@@ -67,6 +93,38 @@ Two things that cost an hour each: devicectl's `appDataContainer` file
 domain refuses App Store apps, hence pymobiledevice3; and `--device` must
 precede the positional bundle id or devicectl hands it to the app as an
 argument.
+
+## Checking the device keychain by hand
+
+Since 0.2.2 a phone or tablet on Obsidian 1.11.4 or newer seals the vault
+keys with the device keychain (the iOS Keychain through Obsidian's secret
+storage; DESIGN.md §5.5a). The USB suite does not cover it: it enrols the
+devices from the Mac and pushes a ready-made `data.json`, so the plugin's
+own enrolment, where the protection is chosen, never runs. Check it by
+hand. It needs no cable and no pairing:
+
+1. On the device, in an empty test vault, install the plugin through BRAT
+   (`instantcocoa/obsidian-sync`) and enable it.
+2. Mint a create link on the server (`obsync vault create`) and scan its QR
+   code with the camera, or paste the link under **Join or create with a
+   link**. Press Create.
+3. A notice says the vault keys are sealed with this device's keychain
+   (unless **Sync notices** is off).
+   Settings → obsync → **Protect keys** reads "Device keychain". If a PIN
+   is offered instead, Obsidian's secret storage was not found.
+4. Force-quit Obsidian from the app switcher and open the vault again.
+5. Create or edit a note. Nothing should have been asked.
+6. Confirm from the server that the device wrote after the relaunch (a
+   higher `seq` for the vault in `obsync vault list`).
+   Writing needs the vault keys, and after a relaunch the only way to them
+   is the keychain entry, so this proves the entry was written and read
+   back. Obsidian's own Settings → Keychain lists an entry starting with
+   `obsync-`.
+
+Result on 2026-11-23: iPhone 18,1, iOS 27.0.1, Obsidian 1.15.1, plugin
+0.2.2. Vault created at 06:58:06 UTC with 9 ops; after a force-quit and
+relaunch the same device posted 4 more ops at 07:01, nothing typed. Not yet
+done on an iPad or on Android.
 
 ## What it does not prove
 

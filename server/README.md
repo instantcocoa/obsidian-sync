@@ -4,7 +4,9 @@ Single-binary sync server for the obsync Obsidian plugin. Implements the API in
 `../DESIGN.md` §4: an append-only op log with compare-and-swap on each path's
 head, a keyed content-addressed blob store, epoch-based key rotation, invites,
 recovery, restore-to-time, and garbage collection. SQLite (WAL) plus a blob
-directory; no other dependencies.
+directory; no other dependencies. Since 1.0 a large file's version is a
+list of chunk blobs (see "Large files" below); every device of a vault then
+needs plugin 1.0 or newer.
 
 The server never sees plaintext, paths, names, or keys. It stores and orders
 ciphertext.
@@ -212,6 +214,35 @@ a conflict copy rather than overwritten. See `DESIGN.md` §6.8.
 ./obsync gc           --data /var/lib/obsync --retention 2160h   # also runs daily inside `serve`; run the CLI only while `serve` is stopped (the two processes do not share the per-blob locks)
 ```
 
+## Large files (1.0)
+
+A client stores a file over 1 MiB as chunks, each an ordinary blob uploaded
+through the same `PUT …/blobs/{id}` and found missing through the same
+`blobs/missing`. The op for that version carries `chunks`, the ordered blob
+ids, and its `blob_id` is the content id of the whole file, under which no
+blob is stored. What the server does with the list:
+
+- **Blobs before ops.** An op with `chunks` is accepted only when every
+  listed blob is present (`blob not uploaded` otherwise); an op without
+  them needs the blob under `blob_id`, as before.
+- **Shape.** At most 4096 chunks per op, each a 64-hex id, and never on a
+  deletion.
+- **Liveness.** Table `op_chunks(vault_id, blob_id, seq)` records which op
+  uses which chunk. The sweep keeps a blob that a head or an op inside the
+  retention window refers to, directly or through `op_chunks`.
+- **Restore to a point in time** re-emits a chunked version with its list,
+  and skips it if any chunk is gone.
+- **Feeds** (`snapshot`, `changes`, `history`, `ops`) return `chunks` with
+  each op, in order.
+
+The server does not check that the chunks reassemble to `blob_id`; it
+cannot, it holds no key. Readers do (plugin `engine.ts`, `fetchContent`).
+The list tells the server which blobs belong to one version, in order, and
+nothing else it did not already see (sizes and timing). `../DESIGN.md` §6.9.
+
+An older database is upgraded in place at start: the `chunks` column is
+added to `ops` and `op_chunks` is created. Existing vaults carry on.
+
 ## Test
 
 ```sh
@@ -222,6 +253,9 @@ CGO_ENABLED=1 go test -race ./... # with the race detector
 The suite enrols two devices, exchanges ops, races 32 goroutines on one
 path, long-polls, uses the WebSocket, rotates keys and revokes a device,
 re-encrypts, joins via recovery, restores to a point in time, and runs GC.
+`chunks_test.go` covers chunked ops: a missing chunk refused, the list
+returned in order, bad shapes refused, live chunks surviving a sweep with
+no retention and superseded ones becoming dead.
 `security_test.go` is adversarial: every route with another vault's token,
 revoked and malformed tokens, invite expiry and reuse, traversal-shaped blob
 ids, oversized bodies, unknown JSON fields, and brute-force throttling of
@@ -275,7 +309,7 @@ hex chars.
 | `PUT` | `/v1/vaults/{v}/recovery` | **authority**. `{pub_kex, recovery_enc, salt, auth:"rc_…"}` |
 | `GET` | `/v1/vaults/{v}/recovery` | no auth → `{device_id, pub_kex, salt}` (salt only; nothing to attack offline) |
 | `POST` | `/v1/vaults/{v}/recovery/join` | bearer `rc_…` → device token, keybox rows for the recovery identity, and `recovery_enc` |
-| `GET` | `/v1/vaults/{v}/snapshot` | head op per path incl. tombstones, `cursor` |
+| `GET` | `/v1/vaults/{v}/snapshot` | head op per path incl. tombstones (each with its `chunks` when chunked), `cursor` |
 | `GET` | `/v1/vaults/{v}/changes?since=N&wait=S&limit=L` | long-poll up to 60 s; `more` flag; a device revoked while waiting gets 401 |
 | `GET` | `/v1/vaults/{v}/live` | WebSocket (token in the subprotocol list), pushes `{seq, epoch}` hints on every change and as a 25 s heartbeat; closed when the device is revoked |
 | `POST` | `/v1/vaults/{v}/blobs/missing` | `[ids]` → `{missing:[ids]}` |
@@ -287,20 +321,23 @@ hex chars.
 | `GET` | `/v1/vaults/{v}/ops?meta_epoch_lt=E` | `{seqs}` re-encryption worklist |
 | `GET` | `/v1/vaults/{v}/ops?from=ms&to=ms` | op log by time |
 | `GET` | `/v1/vaults/{v}/history?path_id=…` | ops for a path (first 5000) |
-| `POST` | `/v1/vaults/{v}/restore` | **authority**. `{at: ms}` → re-emits older heads; `{emitted, skipped_path_ids}` |
+| `POST` | `/v1/vaults/{v}/restore` | **authority**. `{at: ms}` → re-emits older heads, chunk lists included; a version whose blob or any chunk is gone is skipped; `{emitted, skipped_path_ids}`. There is no CLI for this on purpose: the route needs the vault authority token, which the server never holds, so only the plugin's **Restore vault to a point in time** can ask (DESIGN.md §4.5) |
 
-Invariants enforced server-side: a `put` needs its blob uploaded first;
+Invariants enforced server-side: a `put` needs its blob uploaded first, or
+every one of its chunks when it carries `chunks`;
 `base_seq` must equal the path's current head (0 for a new path); ops are
 never mutated except `meta_enc` re-encryption; `rotate` rejects a keybox that
 would lock any remaining device out; blob GC only removes blobs that no head
-references and no op newer than the retention window references; every list
+references and no op newer than the retention window references, whether
+as its `blob_id` or as one of its chunks; every list
 route clamps `limit` to 5000.
 
 ## Layout
 
 ```
-cmd/obsync          CLI: serve, vault create|list|auth, admin register|keys|remove|forget, gc
-internal/store      SQLite schema and all queries (CAS lives in AppendOps; links.go: create/register links, security keys)
+cmd/obsync          CLI: serve, vault create|list|auth, admin register|keys|remove|forget, gc, health
+internal/store      SQLite schema and all queries (CAS lives in AppendOps; op_chunks keeps a chunked version's blobs alive; links.go: create/register links, security keys)
+deploy/             Docker compose service, Caddy site, deploy.sh, nightly backup and restic off-site units
 internal/blobstore  sharded on-disk blobs, atomic temp+rename
 internal/api        HTTP handlers, CORS, long-poll hub, WebSocket, GC; admin.go + adminpage/: the security-key page
 internal/qr         QR codes as SVG (admin page) and half-block text (terminal)

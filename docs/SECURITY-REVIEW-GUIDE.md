@@ -19,13 +19,31 @@ the author's and the agents' judgement and would benefit from a person who
 breaks things for a living. It is written so that the reviewer can start
 cold. Budget: one to two days for a thorough pass.
 
+**State on 2026-11-23, release 1.0.1.** Thirteen agent rounds ran in all,
+the last on 2026-11-08 against 0.1.14 (`docs/HANDOFF.md` lists them). What
+has landed since then has had tests but **no adversarial round at all**,
+and is where a reviewer's time is best spent first:
+
+- 0.2.0: the admin token removed; create links and the WebAuthn admin page,
+  later hidden behind register links (area C, DESIGN §5.9).
+- 0.2.1: the one-way "Reset this device to the server's copy" (area I).
+- 0.2.2: vault keys sealed by the device keychain on phones and tablets
+  (area E).
+- 1.0.0: large files stored as content-defined chunks, a change to the op
+  format and to the server's liveness rules (area H).
+- 1.0.1: the conflict review dialog (area I).
+
 The codebase is small. Everything security-relevant is in these files
-(about 7,800 lines total including tests):
+(about 17,000 lines of source, tests not counted):
 
 | Area | Files |
 | --- | --- |
 | Crypto, key hierarchy, formats | `plugin/src/core/crypto.ts`, `plugin/test/vectors.json`, `plugin/test/crypto.test.ts` |
-| Local key protection on device | `plugin/src/core/keystore.ts`, `plugin/src/obsidian/protection.ts`, `plugin/test/keystore.test.ts` |
+| Local key protection on device | `plugin/src/core/keystore.ts`, `plugin/src/obsidian/protection.ts`, the protection code in `plugin/src/obsidian/main.ts` (`setProtection`, `unlock`, `unlockFromSecret`), `plugin/test/keystore.test.ts`, `plugin/test/keychain-secret.test.ts` |
+| Large files as chunks | `plugin/src/core/chunks.ts`, `fetchContent` / `chunksOf` / `gatherLocalPlain` in `plugin/src/core/engine.ts`, server `contentPresent` / `insertOp` / `DeadBlobs` / `Restore` in `store.go`, `plugin/test/chunks.test.ts`, `server/internal/api/chunks_test.go` |
+| Reset and conflict review | `resetToServer` / `discardLocal` in `engine.ts`, `ConflictModal` in `plugin/src/obsidian/modals.ts`, `conflictOrigin` in `paths.ts`, `plugin/test/reset-to-server.test.ts`, `plugin/test/conflict-review.test.ts` |
+| Admin page and links | `server/internal/api/admin.go`, `adminpage/`, `server/internal/store/links.go`, `admin_test.go` |
+| Deployment and backups | `server/Dockerfile`, `server/deploy/` (compose service, Caddy site, backup and restic off-site scripts) |
 | Enrolment, rotation, recovery, revocation | `plugin/src/core/admin.ts`, server `rotate`/`recovery`/`invites` handlers |
 | HTTP client, auth headers, WebSocket | `plugin/src/core/transport.ts` |
 | Path validation and file I/O containment | `plugin/src/core/paths.ts`, `plugin/src/core/node-fs.ts`, `plugin/src/obsidian/obsidian-fs.ts`, `plugin/test/merge-paths.test.ts` |
@@ -228,21 +246,69 @@ and the local filesystem.
 
 ### E. Local key protection (`keystore.ts`, `protection.ts`, DESIGN §5.5a)
 
-- Three modes, with the keychain chosen automatically at enrolment on
-  desktop and a PIN offered once on phones (fourth review): none (keys in
-  `data.json` in the clear), PIN (PBKDF2 600k,
-  AES-GCM sealed identity, offline-guessable, minimum 6 digits with a
-  warning), OS keychain (Electron `safeStorage`, desktop only, with an
-  optional Touch ID prompt on macOS). Review the sealed format, the AAD,
-  what else in `data.json` is sensitive when sealed (device token, vault id,
-  server URL, roster names), and whether the documentation's security claims
-  for each mode are accurate rather than reassuring.
+- Four modes, chosen automatically at enrolment where a keychain exists:
+  none (keys in `data.json` in the clear), PIN (PBKDF2 600k, AES-GCM sealed
+  identity, offline-guessable, minimum 8 characters with a warning), OS
+  keychain (method `safe`: Electron `safeStorage`, desktop only, the
+  desktop default, with an optional Touch ID prompt on macOS), and device
+  keychain (method `secret`, 0.2.2: phones and tablets, the mobile default
+  on Obsidian 1.11.4 or newer; an older mobile Obsidian is offered a PIN
+  once). Review the sealed format, the AAD, what else in `data.json` is
+  sensitive when sealed (device token, vault id, server URL, roster names),
+  and whether the documentation's security claims for each mode are
+  accurate rather than reassuring.
 - `safeStorageAvailable()` refuses Electron's `basic_text` backend on
   Linux. Confirm the detection cannot be fooled into storing the key under a
   non-keychain backend.
-- Mobile has only none and PIN (no keychain bridge). Judge whether the
-  default of none on mobile is defensible given OS disk encryption, and
-  whether the settings text makes the trade clear.
+- **Device keychain (method `secret`).** A random 32-byte wrapping key is
+  handed to Obsidian's `app.secretStorage` as hex under the id
+  `obsync-<vault id>-<device id>` (truncated to Obsidian's 64-character id
+  rule), and the identity is sealed in `data.json` under it, as method
+  `safe` does with safeStorage. Things to check:
+  - *What secretStorage is.* Obsidian documents only the desktop. The
+    mobile claim in DESIGN §5.5a was read out of Obsidian 1.15.1's bundled
+    code: a Capacitor SecureStorage plugin, on iOS one generic-password
+    Keychain item (accessible when unlocked, iCloud Keychain sync never
+    switched on), on Android a preference encrypted by the Android
+    Keystore, holding every secret of every vault in one item. Confirm it
+    independently, and on Android in particular, where nothing has been
+    run. On desktop it is safeStorage plus localStorage, and the method is
+    not offered there.
+  - *Accessibility class.* "When unlocked", not "this device only": judge
+    whether the item travelling in an encrypted device backup to a new
+    phone is acceptable (it brings the wrapping key; `data.json` comes only
+    if the vault folder is restored too).
+  - *The fallback window.* `setSecret` returns before the native write and
+    reports no failure. So `setProtection("secret")` keeps the previous
+    form in `data.json` as `protection.fallback` until a later launch reads
+    the key back (`unlockFromSecret`), then deletes it. Coming from "none",
+    that is the identity **in the clear, beside the new seal, until the
+    next successful launch**; coming from a PIN it is the PIN-sealed blob.
+    On a phone that default-enrols, the keys are therefore unsealed on disk
+    for one launch. Is that window acceptable, is it documented plainly
+    enough, and can it be shortened (the native plugin is reachable as
+    `Capacitor.Plugins.SecureStorage`, which could confirm the write)?
+  - *Any plugin can read it.* `getSecret` and `listSecrets` are open to
+    every plugin in every vault of that Obsidian install. The design
+    accepts this (a plugin can read the notes too). Note it is wider than
+    method `safe`, where another plugin would have to call safeStorage on
+    the wrapped key itself, and wider than one vault: a plugin in another
+    vault on the same device can read this vault's wrapping key.
+  - *A lost entry.* With no fallback left and no entry (reinstall, a
+    restore without the keychain, the user deleting it under Settings →
+    Keychain), `unlock` must leave `sealed` untouched and stay locked.
+    Confirm no path writes `sealed: null` or regenerates the key
+    (`keychain-secret.test.ts`, fourth case; the real-Obsidian case in
+    `obsidian-ui.test.ts`).
+  - *The test seam.* `secretStorageAvailable` is true on mobile, or when
+    `globalThis.__obsyncSecretOnDesktop === true` (the end-to-end suite
+    sets it). Confirm that flag can do nothing but make the option
+    selectable.
+  - *Evidence so far.* One physical run: iPhone 18,1, iOS 27.0.1, Obsidian
+    1.15.1, 2026-11-23. A vault was created on the phone, the settings
+    showed Device keychain, Obsidian was force-quit and reopened, and the
+    server recorded new writes from the device with nothing typed. Android
+    and iPad are unverified.
 
 ### F. Protocol-level behaviours worth a look
 
@@ -258,6 +324,106 @@ and the local filesystem.
   (Capacitor crashed LiveSync on floats). Check other decoded fields for
   trust assumptions (flags byte, epoch field, JSON shape).
 
+### H. Large files as chunks (1.0; `chunks.ts`, `engine.ts`, `store.go`, DESIGN §6.9)
+
+A file over 1 MiB is cut by a gear rolling hash into chunks of 256 KiB to
+4 MiB. Each chunk is an ordinary blob named `HMAC(K_blobid, chunk)`. The op
+keeps `blob_id` = the id of the whole file (no blob is stored under it) and
+gains `chunks`, the ordered chunk ids, in the clear beside `meta_enc`.
+
+- **The chunk list is not authenticated.** It is not in `meta_enc`; the
+  server, or anyone who can alter a response, can reorder, truncate, pad
+  or substitute it. The defence is the final check in `fetchContent`: each
+  chunk decrypts under its own id, the pieces must add up to the
+  authenticated `meta.size`, and `blobId(reassembled)` must equal the
+  `blob_id` that the metadata binds. Confirm nothing reaches disk before
+  that check, on every path that reads content (`writeRemote`, the merge in
+  `resolveConflict`, `versionBytes` for history), and that a failure skips
+  the op without wedging the cursor (`chunks.test.ts`, last case).
+- **Chunks from the local file.** `fetchContent` takes chunks the file being
+  replaced already holds from disk, re-chunked and re-hashed at that
+  moment, and `gatherLocalPlain` takes whole contents the device holds
+  under another path (a rename elsewhere), re-hashed before use. Both skip
+  the download and the per-chunk AEAD check. Is the keyed hash plus the
+  final whole-file check sufficient for locally sourced bytes?
+- **Memory a single op controls.** `fetchContent` holds every distinct
+  chunk it fetched and then allocates `meta.size`. `MAX_CHUNKS` is 4096 and
+  a chunk decrypts to at most 4 MiB. `meta.size` is authenticated but, on
+  this path, not capped: the 1 GiB `MAX_PLAIN` ceiling lives in
+  `decryptBlob`, which a chunked file never passes through as a whole. A
+  key holder who uploads many distinct chunks, or names a huge size, can
+  make every device fetch, hold or try to allocate that much before the
+  size check fails. Members
+  are inside the trust boundary (assumption 2), but check that the failure
+  is a skipped op and not a crash loop before the cursor moves, as the
+  sixth review found for inflate.
+- **What the list leaks.** The server learns which blobs form one version
+  and in what order, on top of sizes and timing it already saw. Chunk
+  boundaries depend on content, so chunk sizes are a fingerprint of the
+  file. The gear table is `HKDF(K_id, "obsync/cdc/v1")`, so someone holding
+  a candidate file but not the key cannot compute its boundaries. Judge
+  that claim: sizes still leak something (a file's total, how much of it
+  changed between versions, and which chunks two files share). `K_id` is
+  never rotated, so a removed device keeps the table.
+- **Deduplication oracle, extended.** `blobs/missing` already told a member
+  whether an exact file exists (area A). It now answers per chunk. The
+  server cannot test a guess without `K_id`; confirm.
+- **Server liveness.** `op_chunks(vault_id, blob_id, seq)` is what keeps a
+  chunk alive: `DeadBlobs` and `DeleteDeadBlob` now have four NOT EXISTS
+  clauses (head by `blob_id`, recent op by `blob_id`, head through
+  `op_chunks`, recent op through `op_chunks`). Look for a chunk that a live
+  version needs and the sweep removes: an op posted during the sweep, a
+  chunk shared by a dead and a live version, a restore that makes an old
+  version the head again (`chunks_test.go`; `chunks.test.ts` rotation and
+  restore case).
+- **Blobs before ops.** `contentPresent` requires every chunk when `chunks`
+  is present and ignores `blob_id` then. Confirm an op cannot name chunks
+  from another vault, and that `validateOp` (64-hex ids, at most 4096,
+  never on a deletion) is reached on every insert path including `Restore`.
+- **Cost of a chunked op on the server.** One op can add 4096 `op_chunks`
+  rows and 4096 lookups inside the write transaction, and a request carries
+  up to 1000 ops. Judge whether a member can stall other writers.
+- **Restore to a point in time** re-emits a chunked version with its
+  stored list and skips it when any chunk is missing. The list it re-emits
+  is the one a client supplied; nothing re-validates it.
+- **Rotation.** Chunks are re-encrypted as blobs by the existing worklist.
+  Confirm a rotation interrupted between chunks of one file leaves it
+  readable (each chunk carries its own epoch).
+- **Old clients.** A 0.x plugin asks for the blob under a chunked version's
+  `blob_id`, gets a 404 and skips the file. Confirm it cannot then push its
+  stale copy over the chunked head as if healing it (the "re-push over an
+  unusable head" path in `applyBatch`).
+
+### I. Reset and conflict review (0.2.1, 1.0.1; `engine.ts`, `modals.ts`)
+
+- **Reset this device to the server's copy** makes the device's files match
+  the server's heads, uploads nothing, and moves every local version it
+  replaces, and every file that exists only locally, to
+  `.trash/obsync-reset-<time>/<path>`. It is a local command only: the
+  command palette and a settings button, both behind a confirmation
+  dialog. Nothing in the protocol, the WebSocket hints or the
+  `obsidian://obsync-join` handler can start it. Confirm that, and note
+  that a third-party plugin able to run commands by id would still meet the
+  dialog. Then consider it under assumption 1: a server that lies about its
+  heads (or was rolled back) turns a reset into "park my newer files". They
+  are parked, not deleted; is the dialog's text clear enough about trusting
+  the server at that moment? Check the park path cannot leave the vault and
+  that a failure midway degrades to the ordinary, conflict-preserving sync
+  (`reset-to-server.test.ts`).
+- **Unsyncable names** (`? * : < > " | \`, control characters) are now
+  reported once per file. The notice text contains the local file name;
+  confirm it is rendered as text.
+- **Conflict review dialog.** `conflictFiles()` lists every synced path
+  containing ` (conflict `, and `conflictOrigin` parses the name back to
+  the file it claims to be a copy of. Both the name and the content can be
+  written by any vault member, so a member can create a file that the
+  dialog presents as "another version" of an arbitrary note, with a **Keep
+  other version** button that overwrites that note. The overwritten
+  content stays in history and the write is an ordinary edit, but judge
+  whether the dialog should tell real conflict copies from look-alikes
+  (the engine knows which ones it made). Confirm file names and diff lines
+  are inserted as text, never as HTML.
+
 ### G. Supply chain and build
 
 - Plugin runtime dependencies: `node-diff3` (merge) and `qrcode-generator`
@@ -269,6 +435,18 @@ and the local filesystem.
 - The bundle test `plugin/test/bundle-mobile.test.ts` proves no Node
   module beyond a guarded `os.hostname()` is bundled. Confirm `require` is
   not reachable from synced content in any other way.
+- Releases are built in CI from the tag with provenance
+  (`.github/workflows/release.yml`). The Linux jobs, the release build
+  among them, run on a third-party runner service (WarpBuild, label
+  `warp-ubuntu-latest-x64-4x`); macOS and Windows run on GitHub's runners.
+  The release artefacts users install through BRAT are therefore produced
+  on infrastructure outside GitHub. Weigh that against the attestation.
+- The server ships as a Docker image built on the host by
+  `server/deploy/deploy.sh` (distroless, non-root). Backups go off-site
+  with restic; the bucket credentials and the restic password sit in a
+  root-only file on the host. A backup is ciphertext, token hashes and
+  public keys, so check only that nothing else has crept into the data
+  directory.
 
 ## What the reviewer should produce
 
@@ -286,7 +464,8 @@ and the local filesystem.
 
 ```sh
 cd server && go test ./...                         # includes security_test.go
-cd plugin && npm ci && npm test                    # crypto vectors, path validation, Node e2e
+cd plugin && npm ci && npm test                    # crypto vectors, path validation, Node e2e,
+                                                   # chunks, reset, keychain-secret, conflict-review
 # real-Obsidian suites need a desktop Obsidian binary and xvfb:
 OBSIDIAN_BIN=$(which obsidian) XVFB_RUN=$(which xvfb-run) npx vitest run
 ```

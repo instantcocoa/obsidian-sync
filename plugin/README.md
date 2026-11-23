@@ -39,12 +39,15 @@ Pairs with the `obsync` server in `../server`. Design and rationale are in
    either scan the QR code with the device's camera (it opens Obsidian,
    which asks before joining) or open the plugin's settings, paste the link
    into **Join or create with a link** and press **Connect**. A notice confirms the
-   join and the status bar shows `obsync ✓`. The link is single-use and
+   join and the status bar shows `obsync ✓` (a phone has no status bar: tap
+   the obsync ribbon icon or run **Show sync status**). The link is single-use and
    expires in one hour (a key rotation ends it early). Notices about routine sync events (a conflict
    resolved, a synced plugin enabled) can be turned off under **Sync
-   notices**; errors and decisions are always shown. On a desktop the vault
-   keys go into the OS keychain at this point without asking; a phone is
-   offered a PIN once (**Protect keys** changes either later). Every device
+   notices**; errors and decisions are always shown. The vault keys are
+   sealed at this point without asking: by the OS keychain on a desktop, by
+   the device keychain on a phone or tablet running Obsidian 1.11.4 or
+   newer. An older mobile Obsidian is offered a PIN once instead
+   (**Protect keys** changes any of this later). Every device
    is told when a new device joins the vault; if it was not you, remove it
    under **Manage devices** and the keys rotate.
 5. Optional but recommended: **Set recovery passphrase** so a new device can
@@ -55,7 +58,12 @@ Pairs with the `obsync` server in `../server`. Design and rationale are in
 There is nothing else to configure. Everything syncs, in both directions,
 immediately, with conflicts handled without dialogs. The "two minutes" is
 the part after the server is running and the plugin is installed; budget
-another ten for the first time through the build and install steps.
+another ten for the first time through the build and install steps. The
+repository's root `README.md` walks through the same setup one tap at a
+time, with what you should see after each step.
+
+Every device of a vault must run 1.0 or newer. 1.0 stores large files as
+chunks (see "Large files" below), which an older plugin cannot read.
 
 ## What syncs
 
@@ -78,6 +86,23 @@ device. Patterns are gitignore-style. Add a line like
 device, or `Private/` to keep a folder off a particular device. Exclusions
 are per device; the server still holds the files.
 
+**Names that cannot sync.** A file or folder whose name contains one of
+`? * : < > " | \` or a control character stays on the device where it is.
+Those characters are refused on every platform, so that a vault never holds
+a file some device cannot create. The plugin says so once per file, naming
+it; rename the file inside Obsidian and it syncs.
+
+**Large files.** A file of at most 1 MiB travels as one encrypted blob. A
+larger one is cut into chunks at points chosen from its content (256 KiB to
+4 MiB each, about 1.25 MiB on average), and each chunk is encrypted and
+stored separately. An edit uploads and downloads only the chunks it
+touched, and identical chunks are stored once across versions and files.
+A device verifies the reassembled file against its authenticated size and
+content id before writing anything. One version can have at most 4096
+chunks (several GiB). Files are still read whole into memory. A rename or
+copy made on another device costs no download: the device writes the
+content it already holds under the new name. `../DESIGN.md` §6.9.
+
 After a remote change under `.obsidian`, the plugin reloads affected
 community plugins, CSS snippets and themes in place, enables or disables
 plugins to match `community-plugins.json`, and shows one notice asking for a
@@ -93,7 +118,17 @@ Two devices editing the same file while offline:
 - Anything else: the other device's version stays at the path and yours is
   saved next to it as `name (conflict <device> <date> <time>).md` (a second
   one in the same minute gets a number: `… <time> 2).md`). A notice tells
-  you; **Show conflicts** lists them.
+  you; **Show conflicts** opens the review dialog.
+
+**Reviewing conflicts.** **Show conflicts** lists every conflict copy with
+the file it belongs to, the device and time it came from and, for text, the
+lines only one side has. Three buttons per copy: **Keep current** deletes
+the copy, **Keep other version** makes the copy the file (what was there
+stays in the server's history) and deletes the copy, **Open both** opens
+the two side by side. Each choice is an ordinary edit or delete, so it
+syncs to the other devices like any other. A text file above 1 MiB is
+merged only when the version both sides started from is still stored as
+one blob; otherwise a concurrent edit makes a conflict copy.
 
 Nothing you wrote is ever discarded: it is at its path, in a conflict copy,
 or in the server's history. That holds across restarts, crashes, lost sync
@@ -110,7 +145,24 @@ looks like.
 Every version of every file stays on the server for 90 days (configurable),
 and the list of versions forever. **Show history for current file** lets you
 save any old version; **Restore vault to a point in time** rewinds the whole
-vault as new history, so it can be undone.
+vault as new history, so it can be undone. Restore is a plugin command
+only: the server does the work but the request needs the vault keys, which
+the server never holds.
+
+**When a device has drifted.** Two commands, opposite in intent, both under
+Settings → Advanced as well:
+
+- **Rebuild local sync state** forgets what this device thinks it has
+  synced and works it out again by hashing every file. Every local
+  difference is kept: merged, uploaded, or saved as a conflict copy. Safe to
+  run at any time.
+- **Reset this device to the server's copy** is one-way. This device's files
+  become exactly what the server has and nothing is uploaded. Every local
+  version the server's copy replaces, and every file that exists only here,
+  is moved to `.trash/obsync-reset-<time>/` inside the vault at its own
+  path, not deleted. Use it when the other devices are right and this one
+  is not. It asks before it does anything, and it can only be started on the
+  device itself.
 
 ## Devices and keys
 
@@ -155,29 +207,48 @@ Settings → "Protect keys" chooses how the vault keys and device token are
 stored on this device:
 
 - **None**: in the plugin's `data.json`, protected only by disk encryption.
-  The default on mobile.
+  Never the default where a keychain exists.
 - **PIN at launch**: the key store is sealed under a PIN-derived key
   (PBKDF2, 600k iterations). Works on every platform. Someone who gets the
-  file can try PINs offline at GPU speed, so the minimum is 6 characters
+  file can try PINs offline at GPU speed, so the minimum is 8 characters
   and a long one (a short phrase) is what actually stops them. Obsidian
   prompts at startup; "Unlock vault keys" prompts again.
-- **OS keychain** (desktop): a random wrapping key is stored in the macOS
-  Keychain, Windows DPAPI, or Linux libsecret via Electron's `safeStorage`.
-  No prompt. Resists anyone who gets the file but not your login session.
-  Offered only when a real keychain backend exists. On macOS, **Require
-  Touch ID** adds a prompt before the keychain is used.
+- **OS keychain** (desktop, the default there): a random wrapping key is
+  stored in the macOS Keychain, Windows DPAPI, or Linux libsecret via
+  Electron's `safeStorage`. No prompt. Resists anyone who gets the file but
+  not your login session. Offered only when a real keychain backend exists.
+  On macOS, **Require Touch ID** adds a prompt before the keychain is used.
+- **Device keychain** (phones and tablets, the default there on Obsidian
+  1.11.4 or newer): a random wrapping key is kept in Obsidian's own secret
+  storage, which on iOS is an item in the system Keychain and on Android a
+  value encrypted by the Android Keystore. `data.json` then holds only
+  ciphertext, so a copied vault folder, a file-sharing pull or another sync
+  tool carries nothing usable, and nothing is typed. Obsidian writes the
+  entry in the background and reports no failure, so the plugin keeps the
+  previous form of the keys beside the new one until a later launch has
+  read the entry back, then drops it; a write that never landed reverts to
+  what was there before. If the entry is ever gone (Obsidian reinstalled, a
+  restore without the keychain) the sealed keys are left untouched and the
+  plugin says to join again with an invite or the recovery passphrase. Two
+  limits: any other plugin running in Obsidian on that device can read the
+  entry, as it can read your notes; and the entry shows under Obsidian's
+  Settings → Keychain, where deleting it locks this vault on this device.
+  Confirmed on an iPhone (iOS 27, Obsidian 1.15.1) on 2026-11-23; not yet
+  run on Android or an iPad. `../DESIGN.md` §5.5a.
 
 Biometrics through WebAuthn are not possible: Obsidian's `app://` origin is
 not allowed to use public-key credentials, as verified in the test suite.
 
 ## Commands
 
-Sync now · Show conflicts · Generate invite link for another device ·
-Manage devices · Set recovery passphrase · Rotate vault keys · Restore vault
-to a point in time · Show history for current file · Rebuild local sync
-state · Apply held deletions · Unlock vault keys · Re-upload current file
-to the server (the repair when another device reports it "could not apply
-the latest version" of a file).
+Show sync status · Sync now · Show conflicts (the review dialog) ·
+Generate invite link for another device · Manage devices · Set recovery
+passphrase · Rotate vault keys · Restore vault to a point in time · Show
+history for current file · Rebuild local sync state · Reset this device to
+the server's copy · Apply held deletions · Unlock vault keys · Accept
+server restore (after the server was restored from a backup taken before a
+key rotation) · Re-upload current file to the server (the repair when
+another device reports it "could not apply the latest version" of a file).
 
 ## Status bar
 
@@ -186,6 +257,12 @@ pending · `… ` scanning · `⚠ offline` will retry · `✗` error (hover for
 message; "removed from the vault" means another device removed this one) ·
 `re-encrypting N` a key rotation is re-encrypting data · `🔒` keys locked,
 run "Unlock vault keys".
+
+Phones and tablets have no status bar. There the obsync icon in the ribbon
+menu carries the same state in its label, tapping it (or the command **Show
+sync status**) says it in a notice with the number of conflict copies
+waiting, and going offline or stopping shows a notice once per change of
+state.
 
 ## Mobile status
 
@@ -208,8 +285,9 @@ directions with no conflict copy, `workspace-mobile.json` never synced,
 Home/resume and force-stop/relaunch, airplane mode (the edit arrived 2.4 s
 after reconnecting), concurrent edits (non-overlapping merged; overlapping
 gave exactly one `(conflict phone …)` sibling, no dialog), PIN protection
-(the keychain option is shown as unavailable; wrong PIN refused, right PIN
-resumes), removal from the desktop (the phone shows the removed message,
+(the desktop keychain option is shown as unavailable; wrong PIN refused,
+right PIN resumes; this run predates the device keychain method, which has
+not been run on Android), removal from the desktop (the phone shows the removed message,
 stops, stays removed across a relaunch, rejoins with a new link), the
 recovery passphrase (a wrong one is refused), no crash in `logcat`, and an
 8 MB attachment adding 8.4 MB to the app's PSS. What needed fixing, all on
@@ -230,8 +308,12 @@ with Obsidian on Linux joining the same vault (`test/ios-devices.test.ts`,
 `test/linux-joins.test.ts`, `../docs/IOS-DEVICE-TESTING.md`). Two things
 to know on iOS: Obsidian asks "Trust author and enable plugins" once per
 vault when the plugin arrives from outside the app, and sync runs only
-while Obsidian is in the foreground, as iOS suspends it otherwise. Treat
-the first install on your own device as a test and keep a backup.
+while Obsidian is in the foreground, as iOS suspends it otherwise. The
+device keychain method was checked separately on an iPhone 18,1 (iOS
+27.0.1, Obsidian 1.15.1) on 2026-11-23: a vault created on the phone, the
+settings showing Device keychain, Obsidian force-quit and reopened, and a
+new note uploaded with nothing typed. Treat the first install on your own
+device as a test and keep a backup.
 
 ## Development
 
@@ -246,7 +328,7 @@ npm run dev       # watch mode
 Layout:
 
 ```
-src/core/      platform-free: crypto, engine, merge, paths, transport, admin
+src/core/      platform-free: crypto, engine, chunks, merge, paths, transport, admin
 src/obsidian/  Obsidian glue: filesystem adapter, settings, modals, hooks, main
 test/          vitest; e2e.test.ts spawns ../server and runs multi-device scenarios
 test/vectors.json  pinned wire-format vectors for a second implementation
@@ -262,6 +344,17 @@ Three layers of tests:
   `test/convergence.test.ts`: seeded random histories on three devices with
   restarts, crashes, state loss and server outages, checked for convergence
   and for no lost write;
+- `test/chunks.test.ts`: the chunker (bounds, determinism, an insertion
+  moving few boundaries, a different key moving all of them) and large
+  files through the real server: an edit moving only the changed chunks,
+  history, rename, a concurrent edit of a large binary, garbage collection,
+  key rotation, restore to a point in time, and a tampered chunk list
+  refused. `test/rename-no-download.test.ts`: a rename, move or copy made
+  elsewhere downloads nothing. `test/reset-to-server.test.ts`: the one-way
+  reset. `test/conflict-review.test.ts`: the helpers behind the review
+  dialog. `test/keychain-secret.test.ts`: the device keychain method
+  against a transcription of Obsidian's secret storage class, including a
+  write that never lands and an entry that disappears;
 - `test/obsidian.test.ts` and `test/obsidian-ui.test.ts`: the plugin as
   shipped inside real Obsidian, headless, driven over the DevTools protocol.
   Two Obsidian instances create a vault, invite, join, sync notes through
@@ -273,7 +366,11 @@ Three layers of tests:
   engine restarts never produce config conflicts, and verifies that
   passphrase brute force is throttled while a correct join still works,
   and enables PIN protection, reloads the plugin, and checks it comes up
-  locked, refuses a wrong PIN, and unlocks with the right one.
+  locked, refuses a wrong PIN, and unlocks with the right one. It also
+  runs the device keychain method against real Obsidian's own secret
+  storage (forced on for the test, since desktop normally uses the OS
+  keychain method): sealed, reopened on reload with no prompt, locked when
+  the entry is deleted behind the plugin's back, removed on switching away.
   `test/obsidian-config.test.ts` reproduces the one config conflict ever
   seen (a joining device's own `app.json`, rewritten by Obsidian itself,
   differing from the vault's) with the adoption rule switched off, then

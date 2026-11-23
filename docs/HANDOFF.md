@@ -1,7 +1,10 @@
 # Handoff: picking up obsync
 
 Paste everything below the line to an agent that is continuing this project.
-Written 2026-10-25 at commit `4fc0152` on `main`.
+Written 2026-10-25 at commit `4fc0152` on `main`. The status, the summary
+of 0.2.0 to 1.0.1 and the to-do list were rewritten on 2026-11-23 for
+release 1.0.1; the sections in between are the record of how it got there
+and are left as written.
 
 ---
 
@@ -23,19 +26,24 @@ use `rg`, never `grep`; never run `find /`. Commit messages end with the
 attribution lines your session was given; use a heredoc, never a
 double-quoted `-m` (backticks get command-substituted).
 
-## Status in one paragraph
+## Status in one paragraph (2026-11-23, release 1.0.1)
 
-Everything verifiable on a Linux desktop is done, green, and pushed. The
-full gate at `4fc0152` is: `cd server && go test ./...` ok, and from
-`plugin/` 60 vitest tests across 8 files pass, including three suites that
-drive two real Obsidian 1.12.7 instances under xvfb. Two independent agent
-reviews ran (a security review and a first-time-user walkthrough); every
-finding was fixed, regression-tested, and pushed. Two things remain that
-only a person or a different machine can do: a run on an actual iOS or
-Android device, and a security review by a human specialist. Briefs for both
-are already written: `docs/MOBILE-TEST-PROMPT.md` and
-`docs/SECURITY-REVIEW-GUIDE.md`. `DESIGN.md` lines 10 to 16 state this
-status honestly; keep that paragraph true.
+obsync is released as 1.0.1 and in real use. The production server runs in
+Docker behind Caddy on the owner's host, with a nightly local snapshot and
+an encrypted off-site copy (`server/deploy/`, `server/README.md`). The
+owner's main vault is live on it (a Mac and an iPhone, with a recovery
+passphrase set; the server's own count of three includes the recovery
+identity) after a move from Self-hosted LiveSync; LiveSync's CouchDB is
+stopped with its data kept for a trial period of some days
+(`docs/MIGRATION-FROM-LIVESYNC.md` has the backups taken first and how to
+go back). The gate is `go test ./...` in `server/` and 268 vitest tests in
+`plugin/` without a desktop Obsidian, plus the real-Obsidian suites in CI
+on Linux, macOS and Windows. Since the thirteen agent review rounds of
+early November, 0.2.0 to 1.0.1 added an admin page, a hidden admin page,
+device-keychain key protection on phones, a one-way reset, chunked storage
+for large files and a conflict review dialog. **None of that newer work has
+had an adversarial review round**, and no human specialist has reviewed
+anything. `docs/SECURITY-REVIEW-GUIDE.md` says where to start.
 
 ## What is done (so you do not redo it)
 
@@ -44,8 +52,9 @@ Server (Go 1.26, SQLite via modernc, coder/websocket):
   blobs, epochs and rotation, invites, recovery identity, GC and restore.
 - Every write requires the vault authority token (`X-Obsync-Vault-Auth`,
   DESIGN §5.8). A device token alone is read-only. Claim rules: a device may
-  claim only as the sole device on an empty vault; admins install it with
-  `obsync vault auth`. Tested in `security_test.go`
+  claim only as the sole device on an empty vault; the operator installs it
+  on the host with `obsync vault auth` (a CLI command; there has been no
+  admin token and no admin route on the device API since 0.2.0). Tested in `security_test.go`
   (`TestTokenOnlyAttackerCannotDestroyOrEscalate`, `TestAuthorityClaimRules`).
 - Tokens hashed at rest, constant-time compare, no tokens in query strings,
   WebSocket auth via the `Sec-WebSocket-Protocol` list, revocation cuts open
@@ -70,11 +79,12 @@ Plugin (TypeScript, esbuild, WebCrypto only):
 - Onboarding UX after the walkthrough: readable network and 401 errors,
   confirmations, copyable vault id, device rename with hostname default,
   "Write protection (vault authority)" row, notices on join/create/leave/set
-  recovery, PIN minimum 6, http-to-non-localhost confirmation, docs that
-  match the UI.
+  recovery, PIN minimum 6 (8 since the twelfth review),
+  http-to-non-localhost confirmation, docs that match the UI.
 - `plugin/test/bundle-mobile.test.ts`: static proof that the production
-  bundle needs nothing a Capacitor WebView lacks. This is the only mobile
-  evidence that exists.
+  bundle needs nothing a Capacitor WebView lacks. When this was written it
+  was the only mobile evidence; the Android and iOS device runs below came
+  after.
 - Conflict and recovery proof: `plugin/test/conflict-recovery.test.ts` (31
   scenarios, one per row of `docs/CONFLICT-RECOVERY-MATRIX.md`) and
   `plugin/test/convergence.test.ts` (seeded random three-device histories
@@ -144,7 +154,113 @@ Obsidian; everything found is fixed and merged:
 - Reports with verbatim evidence: `plugin/.cache/agent-{win,mac,android}/REPORT.md`
   on the original machine (gitignored).
 
-## What needs to be done
+## 0.2.0 to 1.0.1 (2026-11-16 to 2026-11-23)
+
+What changed after the review rounds recorded further down, newest last.
+DESIGN.md has the reasoning for each; the READMEs describe the result.
+
+- **0.2.0, no admin token.** A vault is made by its first device redeeming
+  a one-time create link (`obsync vault create` on the host, or the `/admin`
+  page after a WebAuthn sign-in with a security key). Every admin bearer
+  route is gone. Then the admin page was hidden: every `/admin` path is the
+  plain 404 of an unknown path until the browser has followed a register
+  link minted on the host (DESIGN §5.9, `admin_test.go`).
+- **Deployment.** `server/Dockerfile` and `server/deploy/`: a compose
+  service behind a shared Caddy, `deploy.sh`, a nightly snapshot timer
+  (SQLite online backup plus hard-linked blobs, fourteen kept) and an
+  off-site step that pushes each snapshot with restic to an S3-compatible
+  bucket when `/etc/obsync/offsite.env` exists. A restore from the bucket
+  was drilled once and matched the local snapshot byte for byte.
+- **DESIGN §4.5 corrected.** Restore to a point in time is a plugin command
+  only, by design: the route needs the vault authority token, which the
+  server never holds. There is no server CLI for it and there should not
+  be one.
+- **0.2.1.** "Reset this device to the server's copy": the one-way
+  recovery. Local differences are moved to `.trash/obsync-reset-<time>/`,
+  nothing is uploaded (`engine.resetToServer`, `reset-to-server.test.ts`).
+  File names that can never sync (`? * : < > " | \`) are reported once per
+  file; they used to be skipped in silence. The device-test harness
+  (`RemoteServer` in `plugin/test/ios-harness.ts`) gained a compose mode
+  and refuses the production service name.
+- **0.2.2.** Key protection method `secret`: on phones and tablets the
+  wrapping key lives in Obsidian's `app.secretStorage` (the iOS Keychain,
+  the Android Keystore), default on mobile from Obsidian 1.11.4, PIN still
+  available. The previous form of the keys is kept until a later launch
+  reads the key back (DESIGN §5.5a, `keychain-secret.test.ts`, a
+  real-Obsidian case in `obsidian-ui.test.ts`). Verified by hand on an
+  iPhone 18,1, iOS 27.0.1, Obsidian 1.15.1 on 2026-11-23: vault created,
+  app force-quit and reopened, a note written with nothing typed.
+- **Engine, between 0.2.2 and 1.0.** A rename or copy made on another
+  device costs the receiver no download (`rename-no-download.test.ts`);
+  blobs up to 256 KiB upload three times as wide as large ones.
+- **1.0.0, chunks.** A file over 1 MiB is cut by content into chunks of
+  256 KiB to 4 MiB, each an ordinary blob; the op carries the ordered
+  `chunks` list and keeps `blob_id` as the id of the whole content; the
+  server's table `op_chunks` makes blobs-before-ops, the sweep and
+  restore-to-time honour it; a reader verifies the reassembled content
+  against the authenticated size and `blob_id`; the gear table is keyed
+  (DESIGN §6.9, `chunks.test.ts`, server `chunks_test.go`). Files of 1 MiB
+  or less are unchanged and old vaults carry on, but every device of a
+  vault must run 1.0 or newer.
+- **1.0.1.** "Show conflicts" is a review dialog: per conflict copy the
+  file it belongs to, the device and time, the differing lines, and Keep
+  current / Keep other version / Open both (`ConflictModal`,
+  `conflict-review.test.ts`). Phones, which have no status bar, get a
+  ribbon icon, a "Show sync status" command and a notice when sync goes
+  offline or stops.
+- **CI.** `.github/workflows/platforms.yml` and `release.yml`: the Linux
+  jobs run on WarpBuild (`runs-on: warp-ubuntu-latest-x64-4x`), macOS and
+  Windows on GitHub's runners. Releases are built in CI from the tag.
+- **A comparison with Self-hosted LiveSync** was run by a separate agent
+  (measured for obsync, derived from source and issues for LiveSync). It
+  judged obsync ahead on correctness and performance, and listed what the
+  items above then fixed: no conflict review, re-download on rename, whole
+  files re-sent for an edit.
+
+## What needs to be done (2026-11-23)
+
+1. **Human security review.** Still open, and now also the first hostile
+   look at everything since 0.2.0. Hand `docs/SECURITY-REVIEW-GUIDE.md` to
+   a specialist; areas E, H and I are the unreviewed ones. When findings
+   come back, fix them in the style of the existing rounds: a failing test
+   first (`security_test.go` for the server, a `plugin/test/` file for the
+   plugin), then the fix, then a DESIGN §5.7/§5.8 update if the threat
+   model changes. An agent round over 0.2.0 to 1.0.1 in the style of the
+   thirteen below would be cheap and has not been run.
+2. **The trial.** The owner is running the real vault on obsync for some
+   days before retiring LiveSync. Do not delete the CouchDB data, the
+   pre-migration backups or the restic snapshot tagged
+   `pre-obsync-migration` until the owner says the trial is over. The
+   owner's second vault is not connected yet.
+3. **Server-side commit batching.** A first upload is bounded by the
+   server: every blob PUT is its own SQLite transaction with a full sync
+   (about 110 files a second on loopback, about 24 a second measured over
+   the internet). The client now uploads small blobs wider; grouping the
+   blob-row commits on the server is the real fix. The `putBlob` handler's
+   ordering (file first, row after, previous bytes kept until the row
+   commits) is deliberate crash-safety from the review rounds: change it
+   only with tests for each interleaving.
+4. **A separate test instance for the device suite.** `ios-devices.test.ts`
+   stops the server and replaces its data directory. The harness has a
+   compose mode for that (`IOS_SERVER_MODE=compose`, service `obsync-test`
+   by default) but no such service is deployed. It needs its own compose
+   service, data directory and hostname; never point the suite at the
+   production service.
+5. **On-device verification that is still missing.** The device keychain
+   method on Android and on an iPad; chunked files on any phone; the
+   conflict review dialog and the ribbon status icon as rendered UI (only
+   their logic is tested).
+6. **Known limits to keep honest in the docs.** Files are read whole into
+   memory on every platform; a text file over 1 MiB merges only when its
+   base version is one blob; the first launch after a phone switches from
+   no protection to the device keychain still has the keys in the clear in
+   `data.json` (the fallback copy), until that launch has confirmed the
+   keychain entry.
+
+## The review rounds and device runs of 2026-11-07 and 2026-11-08
+
+Kept as the record. Everything in this list is done.
+
 
 1. **iOS on a device: done 2026-11-07.** A physical iPhone 13 Pro (iOS 26)
    and iPad Pro (iPadOS 17) on the owner's Mac, driven over USB
@@ -405,24 +521,21 @@ Obsidian; everything found is fixed and merged:
    (`CONVERGENCE_SEEDS=100-159`, 180 runs) and 60,000 merge-fuzz histories
    (`MERGE_FUZZ_SEED=20261108 MERGE_FUZZ_ROUNDS=60000`) found no history
    that fails to converge or loses a write.
-2. **Human security review.** Hand `docs/SECURITY-REVIEW-GUIDE.md` to a
-   specialist. When findings come back, fix them in the style of the
-   existing review rounds: a failing test first (`security_test.go` for the
-   server, `plugin/test/e2e.test.ts` or `merge-paths.test.ts` for the
-   plugin), then the fix, then a DESIGN §5.7/§5.8 update if the threat model
-   changes. If the owner decides the two agent reviews suffice, remove "and
-   a security review by a human specialist" from `DESIGN.md` and say so in
-   the commit.
-3. **Optional, owner's call:** a GitHub release with `main.js`,
-   `manifest.json`, `styles.css` so BRAT can install it; a `versions.json`
-   bump; CI running the Go and Node suites on push.
-
 Do not reopen these settled decisions: honest-but-curious server, read-only
 device tokens with the vault authority token for writes, names under the
 identity key, skip-and-report for bad ops, config adoption on first sync.
 If a finding touches one, extend DESIGN.md rather than redesign.
 
-## How the previous session ended
+## How the 2026-11-23 session ended
+
+The owner's main vault had just been moved onto the production server and
+a phone joined; 1.0.0 and 1.0.1 were released the same day on top of it.
+The last CI run before this was written was green on Linux; the macOS job
+had failed once on 1.0.0 in the settings-screen onboarding test and passed
+on the commits either side, which reads as one of the known slow-runner
+waits but was not proven. Check the latest run before trusting that.
+
+## How the 2026-10-25 session ended
 
 A Stop hook enforcing the goal rejected every stop for the two user-only
 items. The agent exhausted what was possible locally (including checking

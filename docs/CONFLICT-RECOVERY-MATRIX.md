@@ -82,11 +82,45 @@ five devices on four files for 40 rounds (nearly every sync conflicts), and
 three devices that sync only one round in five for 36 rounds (long offline
 divergence before every reconciliation).
 
+## Reset, renames and large files (0.2.1 to 1.0.1)
+
+These rows have their own test files, named in each row, not
+`conflict-recovery.test.ts`. All run against the real Go server.
+
+| # | Situation | Outcome | Test |
+| --- | --- | --- | --- |
+| 41 | A device has drifted (local edits, a local deletion, local-only files, a file the server has since deleted) and the user runs **Reset this device to the server's copy** | The device ends byte-identical to the server; nothing is uploaded; every local version that was replaced, and every local-only file, is under `.trash/obsync-reset-<time>/` at its own path with exact bytes; no conflict copies; edits flow both ways again afterwards. On a device that already matches it is a no-op | `reset-to-server.test.ts` |
+| 42 | A file is renamed, moved into a folder, or copied on another device | The receiving device writes the content from its own disk: zero blob downloads, bytes exact. A local file that changed since it was synced is not trusted as a source | `rename-no-download.test.ts` |
+| 43 | A 12 MiB file is synced, then 100 bytes in its middle change | It travels as chunks; the edit uploads at most two chunks and the reader downloads at most two, taking the rest from the file it already has; the first version is still whole in history; a rename of it moves nothing | `chunks.test.ts` |
+| 44 | A large binary edited on two devices at once | First to sync wins the path; the other's bytes are a sibling, both bit-exact on every device, as for any binary (row 6) | `chunks.test.ts` |
+| 45 | The chunk list of a version arrives reordered, shortened or padded | Refused: nothing is written. With the honest list the file arrives intact | `chunks.test.ts` |
+| 46 | A device is removed (key rotation, every chunk re-encrypted) while a large file exists; then the vault is restored to a time before that file's second version | A device that joins after the rotation reads the file; the restore brings the first version back on every device | `chunks.test.ts` |
+| 47 | Garbage collection with no retention, with live and superseded chunked versions | Chunks of every live version survive and a fresh device reads the files; chunks only a superseded version used are dropped | `chunks.test.ts`, server `chunks_test.go` |
+| 48 | An op lists a chunk that was never uploaded, or lists chunks on a deletion, or lists more than 4096 | Refused by the server, like an op whose blob is missing | server `chunks_test.go` |
+
+A file name no device can carry (`? * : < > " | \` or a control character)
+is not a conflict and not an error: the file stays where it is and the
+plugin names it once in a notice. Before 0.2.1 it was skipped in silence.
+
+Conflict copies are reviewed with **Show conflicts** (1.0.1): each copy
+with the file it belongs to, the device and time, the differing lines, and
+**Keep current**, **Keep other version** or **Open both**. Every choice is
+an ordinary edit or delete. `conflict-review.test.ts` covers the name
+parsing and the line comparison behind it; the dialog itself has not been
+driven in real Obsidian by a test.
+
 ## Not covered by a test here
 
 - Android beyond the emulator's twelve scenarios and the physical Pixel 7
   run (install, join, sync both ways, attachments, backgrounding). iOS is
   covered on physical devices, see the iOS section below.
+- The device keychain method on Android and on an iPad. It is covered by
+  `keychain-secret.test.ts` (against a transcription of Obsidian's secret
+  storage), by a real-Obsidian desktop case in `obsidian-ui.test.ts`, and
+  by one manual run on an iPhone (iOS section).
+- Chunked files on a physical phone, and a file large enough to press on
+  a phone's memory. Files are read whole into memory on every platform.
+- The conflict review dialog and the ribbon status icon as rendered UI.
 
 ## macOS (plugin/test/obsidian-macos.test.ts, real Obsidian 1.14.5; Intel EC2 Mac on macOS 15.8, and Apple silicon on GitHub's macos-15 runner (macos-14 until GitHub retired that label on 2026-11-07) in CI)
 
@@ -166,6 +200,18 @@ Then `plugin/test/linux-joins.test.ts`: real Obsidian 1.14.5 on Linux
 settings tab, received the vault with its conflict copies and the 12 MB
 attachment, verified the three-way merged note, and wrote a note that
 reached both devices: four platforms in one vault.
+
+**Device keychain, checked by hand on 2026-11-23.** iPhone 18,1, iOS
+27.0.1, Obsidian 1.15.1 from the App Store, plugin 0.2.2 installed through
+BRAT, against the production server over HTTPS. The phone created a vault
+from a create link scanned as a QR code and uploaded its first 9 ops;
+Settings → obsync → Protect keys read "Device keychain"; Obsidian was
+force-quit and reopened; a new note was created. The server recorded 4
+more ops from the same device three minutes after the first batch, with
+nothing typed on the phone, so the wrapping key had been written to the
+iOS Keychain and read back on the next launch. This was not driven by the
+USB harness: the phone would not pair with the Mac. The same phone then
+joined the owner's real vault as its second device.
 
 Driver problems this run found (not product bugs): WebCrypto refuses more
 than 64 KB of random bytes per call; devicectl's app-container file domain

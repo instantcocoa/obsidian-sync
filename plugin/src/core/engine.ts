@@ -1442,6 +1442,9 @@ export class Engine {
     const ids = op.chunks ?? [];
     if (ids.length === 0) return this.decryptFetched(blobId, await this.fetchBlob(blobId, blobs), meta.size);
     if (ids.length > MAX_CHUNKS) throw new Error(`op ${op.seq} lists ${ids.length} chunks; refusing it`);
+    // The size comes from a vault member's metadata and is about to be
+    // allocated: it cannot exceed what this many chunks can hold.
+    if (!Number.isSafeInteger(meta.size) || meta.size < 0 || meta.size > ids.length * CHUNK_MAX) throw new Error(`op ${op.seq} claims ${meta.size} bytes in ${ids.length} chunks; refusing it`);
     const have = new Map<string, Uint8Array>();
     if (devPath) {
       try {

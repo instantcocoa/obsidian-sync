@@ -178,6 +178,67 @@ describe.skipIf(!OBSIDIAN_BIN)("real Obsidian, settings UI onboarding, rate limi
     expect(clear.sealed).toBeNull();
   }, 150_000);
 
+  it("device keychain protection against Obsidian's real secret storage: sealed, confirmed on reload, removed on switch", async () => {
+    // app.secretStorage exists from Obsidian 1.11.4; older pins skip.
+    const has = await a.eval((_p, app) => typeof (app as any).secretStorage?.setSecret === "function");
+    if (!has) return;
+    await a.eval(() => void ((globalThis as any).__obsyncSecretOnDesktop = true));
+    expect((await a.eval((plugin) => plugin.protectionOptions())).find((o: { method: string }) => o.method === "secret").available).toBe(true);
+    await a.eval((plugin) => plugin.setProtection("secret"));
+    const file = join(a.vault, ".obsidian/plugins/obsync/data.json");
+    let onDisk = JSON.parse(await fsp.readFile(file, "utf8"));
+    expect(onDisk.sealed.method).toBe("secret");
+    expect(onDisk.identity).toBeNull();
+    expect(onDisk.protection.fallback).toBeTruthy(); // kept until the key has been read back
+    const id: string = onDisk.protection.secretId;
+    expect(id).toMatch(/^obsync-[0-9a-f]+-[0-9a-f]+$/);
+    // The key is in Obsidian's own store, 32 bytes of hex, under our id.
+    expect(await a.eval((_p, app, i) => (app as any).secretStorage.listSecrets().includes(i), id)).toBe(true);
+    expect(await a.eval((_p, app, i) => /^[0-9a-f]{64}$/.test((app as any).secretStorage.getSecret(i)), id)).toBe(true);
+
+    // Reload as at startup: opens by itself, no prompt, and the fallback copy is dropped.
+    await a.eval(async (_p, app) => {
+      await app.plugins.disablePlugin("obsync");
+      await app.plugins.enablePlugin("obsync");
+    });
+    expect(await a.waitFor(() => Boolean((globalThis as any).app.plugins.plugins.obsync?.engine) && !(globalThis as any).app.plugins.plugins.obsync.locked, 30_000)).toBe(true);
+    expect(await a.eval(() => document.querySelectorAll('.modal input[type="password"]').length)).toBe(0);
+    const raw = await fsp.readFile(file, "utf8");
+    onDisk = JSON.parse(raw);
+    expect(onDisk.protection.fallback).toBeUndefined();
+    expect(onDisk.identity).toBeNull();
+    expect(raw).not.toContain("dv_"); // nothing of the keys in the clear
+    // And it syncs.
+    await a.eval((_p, app) => app.vault.create("After keychain.md", "sealed by the keychain\n"));
+    expect(await b.waitForFile("After keychain.md", "sealed by the keychain\n")).not.toBeNull();
+
+    // The entry deleted behind the plugin's back (a reinstall): locked, sealed keys untouched.
+    const savedKey: Promise<string> = a.eval((_p, app, i) => (app as any).secretStorage.getSecret(i), id);
+    await savedKey;
+    const before = await fsp.readFile(file, "utf8");
+    await a.eval((_p, app, i) => (app as any).secretStorage.deleteSecret(i), id);
+    await a.eval(async (_p, app) => {
+      await app.plugins.disablePlugin("obsync");
+      await app.plugins.enablePlugin("obsync");
+    });
+    expect(await a.waitFor(() => (globalThis as any).app.plugins.plugins.obsync?.locked === true, 15_000)).toBe(true);
+    expect(await fsp.readFile(file, "utf8")).toBe(before);
+    // Put the entry back (what a keychain restore would do) and it opens again.
+    const key = JSON.parse(before).protection.secretId;
+    expect(key).toBe(id);
+    await a.eval((_p, app, i, v) => (app as any).secretStorage.setSecret(i, v), id, await savedKey);
+    await a.eval((plugin) => void plugin.unlock());
+    expect(await a.waitFor(() => Boolean((globalThis as any).app.plugins.plugins.obsync.engine) && !(globalThis as any).app.plugins.plugins.obsync.locked, 30_000)).toBe(true);
+
+    // Back to none: the keychain entry is removed with it.
+    await a.eval((plugin) => plugin.setProtection("none"));
+    expect(await a.eval((_p, app, i) => (app as any).secretStorage.listSecrets().includes(i), id)).toBe(false);
+    const clear = JSON.parse(await fsp.readFile(file, "utf8"));
+    expect(clear.identity).not.toBeNull();
+    expect(clear.sealed).toBeNull();
+    await a.eval(() => void ((globalThis as any).__obsyncSecretOnDesktop = false));
+  }, 180_000);
+
   it("recovery passphrase brute force is throttled; the UI reports it", async () => {
     await a.eval((plugin) => plugin.setRecovery("correct horse battery staple"));
     const vaultId = (await a.eval((p) => p.settings.identity)).vaultId;

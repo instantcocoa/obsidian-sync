@@ -92,7 +92,10 @@ function secretStore(app: unknown): SecretStore | null {
 }
 
 export function secretStorageAvailable(app: unknown): boolean {
-  return Platform.isMobile && secretStore(app) !== null;
+  // Mobile only; the end-to-end suite sets the global to exercise the same
+  // code against desktop Obsidian's real secret storage.
+  const forced = (globalThis as { __obsyncSecretOnDesktop?: boolean }).__obsyncSecretOnDesktop === true;
+  return (Platform.isMobile || forced) && secretStore(app) !== null;
 }
 
 /** Ids are lowercase alphanumerics and dashes, 64 at most (Obsidian's rule). */

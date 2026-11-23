@@ -687,6 +687,33 @@ bar for someone who does not know to bypass our code. `none` resists nothing
 beyond disk encryption. The settings UI says so in those words. Switching
 methods re-seals; the server and wire format are untouched.
 
+**Device keychain on phones and tablets (0.2.2).** Obsidian 1.11.4 added
+`app.secretStorage`. Its documentation describes only the desktop, so the
+mobile behaviour here is read from Obsidian 1.15.1's own code: on iOS and
+Android it is the Capacitor SecureStorage plugin, one generic-password item
+in the iOS Keychain (accessible when the device is unlocked; iCloud Keychain
+synchronisation is never switched on) or an Android-Keystore-encrypted
+preference, holding every secret of every vault, loaded into memory before
+plugins start. Method `secret` puts a random 32-byte wrapping key there
+under `obsync-<vault>-<device>` and seals the identity in `data.json` with
+it, exactly as method `safe` does with Electron's safeStorage on the desktop.
+A copied vault folder, an iTunes file-sharing pull or another sync tool then
+carries only ciphertext, and nothing is typed. It is the default on a phone
+when available; the PIN remains as the alternative and the only option on
+older Obsidian.
+
+Two properties shape the implementation. `setSecret` returns before the
+native write finishes and reports no failure, so the previous form of the
+keys stays in `data.json` as `protection.fallback` until a later launch has
+read the wrapping key back from the keychain; only then is it removed. A
+write that never landed therefore reverts to the previous protection
+instead of costing the device its keys. And a keychain that has lost the
+entry (Obsidian reinstalled, a restore without the keychain) leaves the
+sealed keys untouched and says to join again with an invite or the recovery
+passphrase. What it does not defend against: another plugin running in
+Obsidian on the same device, which can read any secret, as it can read the
+notes. Not yet confirmed by a run on a physical device.
+
 ### 5.6 Full re-key (replaces `K_id`)
 
 Needed only if `K_id` itself is believed compromised. It is a new vault:

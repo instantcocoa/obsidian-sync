@@ -32,7 +32,7 @@ import { ObsyncSettingTab } from "./settings";
 import { ConfirmModal, ListModal, PromptModal, ShowSecretModal, InviteModal, confirmPlainHttp } from "./modals";
 import { deriveWrapKeyFromPin, newWrapKey, open as openKeystore, seal as sealKeystore, type ProtectionMethod, type SealedKeystore } from "../core/keystore";
 import { fromB64, randomBytes } from "../core/encoding";
-import { promptTouchId, safeStorageAvailable, safeUnwrap, safeWrap, touchIdAvailable } from "./protection";
+import { promptTouchId, safeStorageAvailable, safeUnwrap, safeWrap, secretDrop, secretGet, secretId, secretPut, secretStorageAvailable, touchIdAvailable } from "./protection";
 
 interface Protection {
   method: ProtectionMethod;
@@ -40,6 +40,14 @@ interface Protection {
   touchId: boolean;
   /** method "safe": the random wrapping key, encrypted by the OS keychain (base64). */
   safeWrap?: string;
+  /** method "secret": the id under which Obsidian's secret storage (the device keychain on a phone) holds the random wrapping key. */
+  secretId?: string;
+  /**
+   * method "secret", until a later launch has read the wrapping key back
+   * from the keychain: how the keys were stored before the switch, kept so
+   * a keychain write that never landed cannot cost the device its keys.
+   */
+  fallback?: { method: ProtectionMethod; identity?: Identity | null; sealed?: SealedKeystore | null };
 }
 
 interface Settings {
@@ -256,6 +264,7 @@ export default class ObsyncPlugin extends Plugin {
       { method: "none", label: "None (keys in data.json, protected only by disk encryption)", available: true },
       { method: "pin", label: "PIN at launch (PBKDF2-wrapped; works everywhere)", available: true },
       { method: "safe", label: "OS keychain (Keychain / DPAPI / libsecret; desktop only)", available: safeStorageAvailable() },
+      { method: "secret", label: "Device keychain (iOS Keychain / Android Keystore, through Obsidian)", available: secretStorageAvailable(this.app) },
     ];
   }
 
@@ -270,10 +279,22 @@ export default class ObsyncPlugin extends Plugin {
   async setProtection(method: ProtectionMethod, opts: { pin?: string; touchId?: boolean } = {}): Promise<void> {
     if (!this.settings.identity) throw new Error("not connected");
     const p: Protection = { method, touchId: false };
+    const was = this.settings.protection;
+    if (was.method === "secret" && was.secretId && method !== "secret") secretDrop(this.app, was.secretId);
     if (method === "pin") {
       if (!opts.pin || opts.pin.length < MIN_PIN_LENGTH) throw new Error(`PIN must be at least ${MIN_PIN_LENGTH} characters`);
       this.pinSalt = randomBytes(16);
       this.wrapKey = await deriveWrapKeyFromPin(opts.pin, this.pinSalt);
+    } else if (method === "secret") {
+      if (!secretStorageAvailable(this.app)) throw new Error("the device keychain is not available here (needs Obsidian 1.11.4 or newer on a phone or tablet)");
+      // Obsidian writes the keychain item in the background and reports
+      // nothing, so what protected the keys until now stays on disk beside
+      // the new seal until a later launch has read the secret back.
+      p.fallback = was.method === "secret" && was.fallback ? was.fallback : { method: was.method, identity: was.method === "none" ? this.settings.identity : null, sealed: was.method === "none" ? null : await this.sealedNow() };
+      p.secretId = secretId(this.settings.identity.vaultId, this.settings.identity.deviceId);
+      this.wrapKey = newWrapKey();
+      secretPut(this.app, p.secretId, this.wrapKey);
+      this.pinSalt = undefined;
     } else if (method === "safe") {
       if (!safeStorageAvailable()) throw new Error("OS keychain protection is not available on this device (no keychain backend)");
       this.wrapKey = newWrapKey();
@@ -287,13 +308,60 @@ export default class ObsyncPlugin extends Plugin {
     await this.saveSettings();
   }
 
+  /** The keys as they are sealed right now (for the fallback copy kept across a switch to the device keychain). */
+  private async sealedNow(): Promise<SealedKeystore | null> {
+    const s = this.settings;
+    if (s.protection.method === "none" || !s.identity || !this.wrapKey) return s.sealed ?? null;
+    return sealKeystore(s.identity, s.protection.method, this.wrapKey, s.protection.method === "pin" ? this.pinSalt : undefined);
+  }
+
+  /**
+   * Method "secret" at launch. The keychain answers: open with it, and drop
+   * the fallback copy now that the write is known to have landed. It does
+   * not (the write never landed, the app was reinstalled, the phone was
+   * restored without its keychain): go back to the fallback if there is
+   * one; otherwise stay locked and say how to get back in. The sealed keys
+   * are never erased here.
+   */
+  private async unlockFromSecret(): Promise<void> {
+    const s = this.settings;
+    const key = s.protection.secretId ? secretGet(this.app, s.protection.secretId) : null;
+    if (key) {
+      s.identity = await openKeystore<Identity>(s.sealed!, key);
+      this.wrapKey = key;
+      if (s.protection.fallback) {
+        delete s.protection.fallback;
+        await this.saveSettings();
+      }
+      return;
+    }
+    const fb = s.protection.fallback;
+    if (!fb) throw new Error("the device keychain no longer holds this vault's key (Obsidian reinstalled, or the device restored from a backup). The keys cannot be opened here: leave the vault under Advanced and join again with an invite link or the recovery passphrase");
+    // The keychain write never landed. Put things back as they were.
+    s.protection = { method: fb.method, touchId: false };
+    s.sealed = fb.sealed ?? null;
+    if (fb.method === "none") {
+      s.identity = fb.identity ?? null;
+      this.wrapKey = null;
+      await this.saveSettings();
+      new Notice("obsync: the device keychain did not keep the vault key, so key protection is off again. Choose a method under Protect keys.", 12000);
+      return;
+    }
+    await this.saveData({ ...s, identity: null });
+    new Notice("obsync: the device keychain did not keep the vault key; the previous protection is back in force.", 12000);
+    throw new Error("unlock with the previous method");
+  }
+
   /** Unlock a sealed identity (prompting as the method requires) and start the engine. */
   async unlock(): Promise<boolean> {
     const s = this.settings;
     if (s.identity) return true;
     if (!s.sealed) return false;
     try {
-      if (s.sealed.method === "safe") {
+      if (s.sealed.method === "secret") {
+        await this.unlockFromSecret();
+        if (!s.identity) return false;
+      } else if (s.sealed.method === "safe") {
         if (s.protection.touchId) await promptTouchId("unlock your obsync vault keys");
         if (!s.protection.safeWrap) throw new Error("keychain entry missing");
         this.wrapKey = safeUnwrap(s.protection.safeWrap);
@@ -470,6 +538,12 @@ export default class ObsyncPlugin extends Plugin {
           await this.setProtection("safe", { touchId: false });
           this.routineNotice("obsync: vault keys are stored in the OS keychain. Change this under Protect keys.");
         }
+        return;
+      }
+      if (secretStorageAvailable(this.app)) {
+        // Obsidian 1.11.4+: the phone's own keychain, no PIN to type.
+        await this.setProtection("secret");
+        this.routineNotice("obsync: vault keys are sealed with this device's keychain. Add a PIN instead under Protect keys if you prefer.");
         return;
       }
       const want = await ConfirmModal.ask(

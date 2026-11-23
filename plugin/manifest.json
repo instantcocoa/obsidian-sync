@@ -1,7 +1,7 @@
 {
   "id": "obsync",
   "name": "obsync",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "minAppVersion": "1.4.0",
   "description": "Simple, fast, end-to-end encrypted vault sync, including .obsidian. Self-hosted.",
   "author": "obsync",

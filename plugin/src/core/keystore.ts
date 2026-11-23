@@ -22,7 +22,7 @@
 import { concat, fromB64, b64, fromUtf8, randomBytes, utf8 } from "./encoding";
 import { PBKDF2_ITERATIONS, CryptoError } from "./crypto";
 
-export type ProtectionMethod = "none" | "pin" | "safe";
+export type ProtectionMethod = "none" | "pin" | "safe" | "secret";
 
 export interface SealedKeystore {
   v: 1;
@@ -49,7 +49,7 @@ async function aes(key: Uint8Array): Promise<CryptoKey> {
   return crypto.subtle.importKey("raw", B(key), "AES-GCM", false, ["encrypt", "decrypt"]);
 }
 
-export async function seal(identity: unknown, method: "pin" | "safe", wrapKey: Uint8Array, salt?: Uint8Array): Promise<SealedKeystore> {
+export async function seal(identity: unknown, method: "pin" | "safe" | "secret", wrapKey: Uint8Array, salt?: Uint8Array): Promise<SealedKeystore> {
   const nonce = randomBytes(12);
   const ct = new Uint8Array(await crypto.subtle.encrypt({ name: "AES-GCM", iv: B(nonce), additionalData: B(AAD) }, await aes(wrapKey), B(utf8(JSON.stringify(identity)))));
   const out: SealedKeystore = { v: 1, method, nonce: b64(nonce), ct: b64(ct) };

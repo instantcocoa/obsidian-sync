@@ -172,7 +172,7 @@ export class ObsyncSettingTab extends PluginSettingTab {
     new Setting(el)
       .setName("Protect keys")
       .setDesc(
-        "How the vault keys are stored on this device. None: in data.json, safe only if the disk is encrypted. PIN: asked at every launch; someone with the file can try PINs offline, so a short PIN only slows them down and a long one stops them. OS keychain: unlocked by your login session; resists anyone with the file but not your session. Touch ID (macOS) adds a prompt before the keychain is used.",
+        "How the vault keys are stored on this device. None: in data.json, safe only if the disk is encrypted. PIN: asked at every launch; someone with the file can try PINs offline, so a short PIN only slows them down and a long one stops them. OS keychain: unlocked by your login session; resists anyone with the file but not your session. Device keychain (phones and tablets, Obsidian 1.11.4+): the key that opens data.json lives in the iOS Keychain or Android Keystore through Obsidian, so a copied vault folder is useless and nothing is typed; other plugins in Obsidian on this device could read it, as they could read your notes. Touch ID (macOS) adds a prompt before the keychain is used.",
       )
       .addDropdown((d) => {
         for (const o of this.plugin.protectionOptions()) if (o.available || o.method === current) d.addOption(o.method, o.label);
@@ -186,7 +186,7 @@ export class ObsyncSettingTab extends PluginSettingTab {
               if (!r) return this.display();
               if (r[0] !== r[1]) throw new Error("PINs differ");
               await this.plugin.setProtection("pin", { pin: r[0] });
-            } else await this.plugin.setProtection(v as "none" | "safe", { touchId: s.protection.touchId });
+            } else await this.plugin.setProtection(v as "none" | "safe" | "secret", { touchId: s.protection.touchId });
             new Notice("obsync: key protection updated.");
           } catch (e) {
             new Notice(`obsync: ${(e as Error).message}`, 8000);

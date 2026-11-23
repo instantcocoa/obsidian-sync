@@ -17,7 +17,7 @@ env:
 
 jobs:
   server:
-    runs-on: ubuntu-latest
+    runs-on: depot-ubuntu-24.04
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
@@ -37,7 +37,7 @@ jobs:
   # Known-vulnerability scan of the server's Go dependencies, from a runner
   # with egress to vuln.go.dev (the review sandboxes could not reach it).
   govulncheck:
-    runs-on: ubuntu-latest
+    runs-on: depot-ubuntu-24.04
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: golang/govulncheck-action@032d45514ae346b1db93c04b0c90b841c370344f # v1.1.0
@@ -50,7 +50,7 @@ jobs:
   # plugins in. Crypto vectors, a sync round trip with a conflict, and the
   # WebSocket live channel, against the real server. Not an iOS device run.
   webkit:
-    runs-on: ubuntu-latest
+    runs-on: depot-ubuntu-24.04
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -73,7 +73,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-15, windows-latest]
+        os: [depot-ubuntu-24.04, depot-macos-15, depot-windows-2025]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     steps:
@@ -151,3 +151,19 @@ jobs:
             plugin/.cache/obsidian-e2e/logs/*.log
             plugin/.cache/obsidian-e2e/**/vault/.obsidian/plugins/obsync/*.json
           if-no-files-found: ignore
+
+  # The server image, built on Depot's builders (no push: this only proves
+  # the Dockerfile still builds; kratz builds its own copy at deploy time).
+  image:
+    runs-on: depot-ubuntu-24.04
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: depot/setup-action@v1
+      - uses: depot/build-push-action@v1
+        with:
+          project: pbdv2fsr2l
+          context: ./server
+          push: false

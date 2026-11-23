@@ -134,12 +134,12 @@ const identity = {
   keyring: { current: 1, keys: { 1: "vault-key-bytes" } },
 };
 
-type P = InstanceType<typeof ObsyncPlugin> & { startEngine: () => Promise<void>; wrapKey: Uint8Array | null };
+type P = InstanceType<typeof ObsyncPlugin>;
 
 async function launch(native: FakeNative): Promise<P> {
   const app = { vault: { configDir: ".obsidian", adapter: {} }, workspace: { on: () => ({}), onLayoutReady: () => {} }, secretStorage: new FakeSecretStorage(native) };
   const plugin = new ObsyncPlugin(app as never, { id: "obsync", dir: ".obsidian/plugins/obsync" } as never) as P;
-  plugin.startEngine = async () => {};
+  (plugin as unknown as { startEngine: () => Promise<void> }).startEngine = async () => {};
   await plugin.loadSettings();
   return plugin;
 }

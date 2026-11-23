@@ -2,6 +2,7 @@ package api_test
 
 import (
 	"context"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -110,5 +111,42 @@ func TestChunkListsDoNotInflatePages(t *testing.T) {
 	e.do("GET", "/v1/vaults/"+v+"/snapshot", a.token, nil, nil).expect(t, 200).json(t, &snap)
 	if !snap.More || ids(snap.Ops) > 32768 {
 		t.Fatalf("snapshot page: more=%v ids=%d", snap.More, ids(snap.Ops))
+	}
+}
+
+// History pages leave chunk lists out and mark those ops `chunked`; the op
+// route returns one op whole, only within its vault (review 16, R3).
+func TestHistoryOmitsChunkListsAndOpRouteReturnsThem(t *testing.T) {
+	e := newEnv(t)
+	v, a, _ := e.setup()
+	c := strings.Repeat("c", 64)
+	e.upload(v, a, c, blob(1, "one chunk")).expect(t, 201)
+	whole := strings.Repeat("f", 64)
+	o := put("big", &whole, 0)
+	o.Chunks = []string{c, c, c}
+	r := e.ops(v, a, o).Results[0]
+	if r.Seq == 0 {
+		t.Fatalf("%+v", r)
+	}
+	var h struct {
+		Ops  []store.Op `json:"ops"`
+		More bool       `json:"more"`
+	}
+	e.do("GET", "/v1/vaults/"+v+"/history?path_id="+o.PathID, a.token, nil, nil).expect(t, 200).json(t, &h)
+	if len(h.Ops) != 1 || !h.Ops[0].Chunked || len(h.Ops[0].Chunks) != 0 || h.More {
+		t.Fatalf("history: %+v", h)
+	}
+	var one store.Op
+	e.do("GET", "/v1/vaults/"+v+"/ops/"+strconv.FormatInt(r.Seq, 10), a.token, nil, nil).expect(t, 200).json(t, &one)
+	if len(one.Chunks) != 3 || one.OpID != o.OpID {
+		t.Fatalf("op route: %+v", one)
+	}
+	e.do("GET", "/v1/vaults/"+v+"/ops/999999", a.token, nil, nil).expect(t, 404)
+	e.do("GET", "/v1/vaults/"+v+"/ops/abc", a.token, nil, nil).expect(t, 400)
+	// Another vault's device cannot read it.
+	v2, b := e.newVault()
+	e.do("GET", "/v1/vaults/"+v2+"/ops/"+strconv.FormatInt(r.Seq, 10), b.token, nil, nil).expect(t, 404)
+	if got := e.do("GET", "/v1/vaults/"+v+"/ops/"+strconv.FormatInt(r.Seq, 10), b.token, nil, nil); got.code == 200 {
+		t.Fatal("a device of another vault read the op")
 	}
 }

@@ -84,6 +84,8 @@ export interface WireOp {
   blob_id: string | null;
   /** A large file's content as chunk blobs, in order (1.0); blob_id is then the id of the whole content and names no blob. */
   chunks?: string[];
+  /** Set in history pages, which leave chunk lists out; `op()` returns the op whole. */
+  chunked?: boolean;
   meta_enc: string; // base64
   meta_epoch: number;
   base_seq: number;
@@ -429,8 +431,12 @@ export class Client {
   }
 
   async getOp(vaultId: string, seq: number): Promise<WireOp | undefined> {
-    // There is no single-op route; history by path is the lookup. Callers
-    // that need an op by seq keep it from the feed. Provided for symmetry.
+    try {
+      return await this.json<WireOp>("GET", `/v1/vaults/${vaultId}/ops/${seq}`);
+    } catch (e) {
+      if (!(e instanceof HttpError) || (e.status !== 404 && e.status !== 405)) throw e;
+    }
+    // A server before 1.0.5 has no single-op route: read it from the feed.
     const f = await this.changes(vaultId, seq - 1, { limit: 1 });
     return f.ops[0]?.seq === seq ? f.ops[0] : undefined;
   }

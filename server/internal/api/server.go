@@ -202,6 +202,7 @@ func (s *Server) routes() {
 	m.HandleFunc("GET /v1/vaults/{v}/ops", s.device(s.opsQuery))
 	m.HandleFunc("PATCH /v1/vaults/{v}/ops/{seq}/meta", s.authority(s.patchMeta))
 	m.HandleFunc("GET /v1/vaults/{v}/history", s.device(s.history))
+	m.HandleFunc("GET /v1/vaults/{v}/ops/{seq}", s.device(s.oneOp))
 	m.HandleFunc("POST /v1/vaults/{v}/restore", s.authority(s.restore))
 }
 
@@ -1227,11 +1228,12 @@ func (s *Server) history(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "path_id required")
 		return
 	}
-	// Paged newest first: `before` is the lowest seq of the previous page.
-	// A page ends at maxListLimit ops or at the chunk-id budget, and `more`
-	// says whether older versions remain, so a member's few ops with long
-	// chunk lists cannot hide a file's earlier history from a client that
-	// keeps asking.
+	// Paged newest first: `before` is the lowest seq of the previous page,
+	// `more` says whether older versions remain. Chunk lists are left out
+	// (`chunked` marks the ops that have one; GET .../ops/{seq} returns one
+	// whole), so a page costs at most maxListLimit small rows however long a
+	// member makes its lists, and a few such ops cannot push a file's earlier
+	// versions out of reach.
 	ops, err := s.st.HistoryBefore(r.Context(), r.PathValue("v"), pid, qInt(r, "before", 0), maxListLimit+1)
 	if err != nil {
 		s.fail(w, err)
@@ -1241,10 +1243,28 @@ func (s *Server) history(w http.ResponseWriter, r *http.Request) {
 	if more {
 		ops = ops[:maxListLimit]
 	}
-	if cut, was := capChunkIDs(ops); was {
-		ops, more = cut, true
+	for i := range ops {
+		if len(ops[i].Chunks) > 0 {
+			ops[i].Chunks, ops[i].Chunked = nil, true
+		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ops": ops, "more": more})
+}
+
+// oneOp returns one op of the vault, chunk list included: what a client
+// needs to read a version it found in a history page.
+func (s *Server) oneOp(w http.ResponseWriter, r *http.Request) {
+	seq, err := strconv.ParseInt(r.PathValue("seq"), 10, 64)
+	if err != nil || seq <= 0 {
+		writeErr(w, http.StatusBadRequest, "bad seq")
+		return
+	}
+	o, err := s.st.GetOp(r.Context(), r.PathValue("v"), seq)
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, o)
 }
 
 func (s *Server) restore(w http.ResponseWriter, r *http.Request) {

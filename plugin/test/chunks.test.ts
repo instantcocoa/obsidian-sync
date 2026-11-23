@@ -125,7 +125,10 @@ describe("large files through the real server", () => {
     // The first version is still whole in history.
     const ops = await sb.client.history(sb.identity.vaultId, await sb.vc.pathId("video.bin"));
     const first = ops.sort((x, y) => x.seq - y.seq)[0];
-    expect(first.chunks!.length).toBe(chunks);
+    // History pages leave chunk lists out; the op route has it whole, and
+    // versionBytes fetches it by itself.
+    expect(first.chunked).toBe(true);
+    expect((await sb.client.getOp(sb.identity.vaultId, first.seq))!.chunks!.length).toBe(chunks);
     expect(same(await b.engine.versionBytes(first), big)).toBe(true);
 
     // Rename on A: nothing uploaded, nothing downloaded.

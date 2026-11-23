@@ -1115,11 +1115,14 @@ type Op struct {
 	// is not secret (sizes are visible anyway) and not trusted by clients,
 	// which check the reassembled content against BlobID; the server needs
 	// it to know which blobs a version keeps alive.
-	Chunks    []string `json:"chunks,omitempty"`
-	MetaEnc   []byte   `json:"meta_enc"`
-	MetaEpoch int64    `json:"meta_epoch"`
-	BaseSeq   int64    `json:"base_seq"`
-	CreatedAt int64    `json:"created_at"`
+	Chunks []string `json:"chunks,omitempty"`
+	// Chunked marks an op whose chunk list was left out of a listing (the
+	// history pages); GET /v1/vaults/{v}/ops/{seq} returns it whole.
+	Chunked   bool   `json:"chunked,omitempty"`
+	MetaEnc   []byte `json:"meta_enc"`
+	MetaEpoch int64  `json:"meta_epoch"`
+	BaseSeq   int64  `json:"base_seq"`
+	CreatedAt int64  `json:"created_at"`
 }
 
 type OpResult struct {

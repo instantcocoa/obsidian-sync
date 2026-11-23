@@ -89,7 +89,7 @@ describe("review 15: the crash guard holds on every path", () => {
     await a.sync();
     // Fetching any chunk of the oversized versions kills the app.
     const bombChunks = new Set<string>();
-    for (let i = 0; i < N; i++) for (const o of await sa.client.history(sa.identity.vaultId, await sa.vc.pathId(`big/b${i}.bin`))) for (const c of o.chunks ?? []) bombChunks.add(c);
+    for (let i = 0; i < N; i++) for (const o of await sa.client.history(sa.identity.vaultId, await sa.vc.pathId(`big/b${i}.bin`))) for (const c of (await sa.client.getOp(sa.identity.vaultId, o.seq))?.chunks ?? []) bombChunks.add(c);
     const die = (ev: { kind: string; id: string }) => ev.kind === "get" && bombChunks.has(ev.id);
     let dir: string | undefined;
     const triesBySeq = new Map<number, number>();
@@ -127,7 +127,7 @@ describe("review 15: the crash guard holds on every path", () => {
     await a.write("Daily.md", text(1536 * 1024, 7));
     await a.sync();
     const pid = await sa.vc.pathId("Daily.md");
-    const head = (await sa.client.history(sa.identity.vaultId, pid)).reduce((x, y) => (y.seq > x.seq ? y : x));
+    const head = (await sa.client.getOp(sa.identity.vaultId, (await sa.client.history(sa.identity.vaultId, pid)).reduce((x, y) => (y.seq > x.seq ? y : x)).seq))!;
     const chunkIds = new Set(head.chunks);
     const die = (ev: { kind: string; id: string }) => ev.kind === "get" && chunkIds.has(ev.id);
     let kills = 0;

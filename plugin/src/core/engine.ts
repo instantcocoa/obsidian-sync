@@ -81,7 +81,15 @@ export interface State {
    * (a phone killed for memory); twice for the same op and the op is skipped,
    * so one oversized version cannot crash a device at every launch.
    */
-  applying?: { seq: number; path?: string; tries: number };
+  applying?: { seq: number; path?: string; tries: number; size?: number };
+  /**
+   * The smallest version size (bytes, at least CEILING_FLOOR) that has
+   * stopped the app twice on this device. Versions this size or larger are
+   * skipped without being tried, so a member's many oversized versions cost a
+   * device two crashes in all, not two each. Rebuild local sync state clears
+   * it; a server restore does not (it is about this device, not the log).
+   */
+  ceiling?: number;
   /** Before 1.0.4: ops skipped by seq. Read once and dropped (skips now live on the file entry). */
   poisoned?: number[];
   /** Conflict copies this device made itself (vault path → time), so the review dialog can tell them from look-alikes. */
@@ -347,8 +355,8 @@ export class Engine {
     const a = this.state.applying;
     if (a && a.tries >= 2 && a.path) {
       // The app died twice while writing this version: skip it from now on.
-      const e = this.state.files[a.path];
-      this.state.files[a.path] = e ? { ...e, skip: Math.max(e.skip ?? 0, a.seq) } : { hash: null, seq: 0, size: 0, mtime: 0, skip: a.seq };
+      this.markSkip(a.path, a.seq);
+      if (a.size !== undefined && a.size >= Engine.CEILING_FLOOR) this.state.ceiling = Math.min(this.state.ceiling ?? Infinity, a.size);
       delete this.state.applying;
       this.log("error", `op ${a.seq} for ${a.path} stopped the app twice while being applied; skipping it`);
     }
@@ -802,6 +810,7 @@ export class Engine {
           continue;
         }
         const meta = await this.decodeOp(head);
+        if (meta) Object.assign(head, await this.full(head));
         if (!meta) {
           delete d[logical]; // decodeOp reported why
           continue;
@@ -838,7 +847,7 @@ export class Engine {
       if (op.seq >= bad.seq) continue;
       if (op.seq <= have) break;
       const meta = await this.decodeOp(op, () => {});
-      if (meta) return { op, meta };
+      if (meta) return { op: await this.full(op), meta };
     }
     return null;
   }
@@ -1191,6 +1200,9 @@ export class Engine {
       if (this.state.files[d.logical]?.hash === d.op.blob_id) continue;
       if (this.localPlain.has(d.op.blob_id)) continue; // already on this device under another name
       if (d.op.chunks?.length) continue; // chunked: fetched chunk by chunk when applied, reusing what the old file holds
+      // A large single blob is fetched inside the crash guard when applied,
+      // not ahead of it: the download and its inflate are what can kill a phone.
+      if ((d.meta?.size ?? 0) > CHUNK_THRESHOLD) continue;
       if (!uses.has(d.op.blob_id)) queue.push(d.op.blob_id);
       uses.set(d.op.blob_id, (uses.get(d.op.blob_id) ?? 0) + 1);
       counted.add(d);
@@ -1321,11 +1333,57 @@ export class Engine {
    * abandoned and the decision remade, so the edit becomes a merge or a
    * sibling instead of being overwritten.
    */
+  /** Versions below this size never set the ceiling: two routine kills during a small download must not block every larger file. */
+  static readonly CEILING_FLOOR = 64 * 1024 * 1024;
+
+  private markSkip(logical: string, seq: number): void {
+    const e = this.state.files[logical];
+    this.state.files[logical] = e ? { ...e, skip: Math.max(e.skip ?? 0, seq) } : { hash: null, seq: 0, size: 0, mtime: 0, skip: seq };
+  }
+
   private skipReported = new Set<string>();
   private reportSkip(logical: string): void {
     if (this.skipReported.has(logical)) return;
     this.skipReported.add(logical);
-    this.hooks.onSkipped?.(this.device(logical), "a version of this file stopped the app twice while it was being written (probably too large for this device's memory), so this device skipped it; the next version will be tried");
+    this.hooks.onSkipped?.(this.device(logical), 'the newest version of this file is too large for this device to load (it stopped the app before), so it was skipped. A later version will be tried; "Rebuild local sync state" tries again now');
+  }
+
+  /** Upload a local edit of a path whose head this device skipped, as a conflict copy beside it. */
+  private async keepEditBeside(p: { logical: string; bytes?: Uint8Array }): Promise<void> {
+    this.dirty.delete(p.logical);
+    if (!p.bytes) {
+      this.reportSkip(p.logical);
+      return;
+    }
+    const sib = await this.siblingFor(p.logical, p.bytes);
+    const dev = this.device(sib);
+    if (!(await this.fs.stat(dev))) await this.fs.write(dev, p.bytes, Date.now());
+    (this.state.siblings ??= {})[sib] = Date.now();
+    this.markDirty(sib);
+    this.hooks.onSkipped?.(this.device(p.logical), `the newest version of this file is too large for this device to load, so your edit is saved and synced as ${dev}`);
+  }
+
+  /** A version found in a history page, with its chunk list fetched if the page left it out. */
+  private async full(op: WireOp): Promise<WireOp> {
+    if (!op.chunked || op.chunks?.length) return op;
+    const f = await this.client.getOp(this.cfg.vaultId, op.seq);
+    if (!f || f.op_id !== op.op_id || f.path_id !== op.path_id || f.blob_id !== op.blob_id) throw new Error(`op ${op.seq} could not be read whole from the server`);
+    return f;
+  }
+
+  /**
+   * Whether a remote version must not be loaded here: this path already
+   * skipped it, or it is at least as large as a version that crashed this
+   * device (marks the path when so).
+   */
+  private tooBig(logical: string, op: WireOp, size: number): boolean {
+    const e = this.state.files[logical];
+    if (e?.skip !== undefined && op.seq <= e.skip) return true;
+    if (this.state.ceiling !== undefined && size >= this.state.ceiling && op.blob_id) {
+      this.markSkip(logical, op.seq);
+      return true;
+    }
+    return false;
   }
 
   private guardDepth = 0;
@@ -1338,20 +1396,26 @@ export class Engine {
    * that can hold a large version in memory goes through here: applying a
    * remote op, and resolving a push conflict against one.
    */
-  private async guarded<T>(logical: string, op: WireOp, fn: () => Promise<T>): Promise<T> {
+  private async guarded(logical: string, op: WireOp, size: number, fn: () => Promise<void>): Promise<void> {
+    // Any version large enough to hurt, chunked or not: a single blob can
+    // inflate to the same size (round 16, R1).
+    const big = !!op.blob_id && ((op.chunks?.length ?? 0) > 0 || op.chunked === true || size > CHUNK_THRESHOLD);
     // Nothing to guard for a version already written or already skipped
     // here: arming for it would overwrite the record of the one that is
     // actually crashing, and its count would never reach two.
     const e = this.state.files[logical];
-    if (!op.chunks?.length || this.guardDepth > 0 || (e && (e.seq >= op.seq || (e.skip ?? 0) >= op.seq))) return fn();
+    if (!big || this.guardDepth > 0 || (e && (e.seq >= op.seq || (e.skip ?? 0) >= op.seq))) return fn();
+    if (this.tooBig(logical, op, size)) {
+      this.reportSkip(logical);
+      return;
+    }
     const prev = this.state.applying;
-    this.state.applying = { seq: op.seq, path: logical, tries: prev && prev.seq === op.seq && prev.path === logical ? prev.tries + 1 : 1 };
+    this.state.applying = { seq: op.seq, path: logical, size, tries: prev && prev.seq === op.seq && prev.path === logical ? prev.tries + 1 : 1 };
     await this.flushState();
     this.guardDepth++;
     try {
-      const r = await fn();
+      await fn();
       delete this.state.applying;
-      return r;
     } catch (e) {
       delete this.state.applying;
       throw e;
@@ -1363,7 +1427,7 @@ export class Engine {
   private async applyRemote(logical: string, op: WireOp, meta: FileMeta, blobs: BlobCache): Promise<void> {
     for (let attempt = 0; ; attempt++) {
       try {
-        return await this.guarded(logical, op, () => this.applyRemoteOnce(logical, op, meta, blobs));
+        return await this.guarded(logical, op, meta.size, () => this.applyRemoteOnce(logical, op, meta, blobs));
       } catch (e) {
         if (!(e instanceof ConcurrentLocalEdit) || attempt >= 4) throw e;
         this.log("info", `${this.device(logical)} changed while a remote version was being applied; deciding again`);
@@ -1601,8 +1665,9 @@ export class Engine {
       if (!(err instanceof HttpError && err.status === 404)) throw err;
     }
     const ops = await this.client.history(this.cfg.vaultId, await this.vc.pathId(logical));
-    const op = ops.find((o) => o.blob_id === hash && o.chunks?.length);
-    if (!op) throw new Error(`the base version of ${logical} is no longer on the server`);
+    const listed = ops.find((o) => o.blob_id === hash && (o.chunks?.length || o.chunked));
+    if (!listed) throw new Error(`the base version of ${logical} is no longer on the server`);
+    const op = await this.full(listed);
     const meta = await this.vc.decryptMeta(op.path_id, fromB64(op.meta_enc));
     if (meta.path.normalize("NFC") !== logical || (meta.blob !== undefined && meta.blob !== op.blob_id)) throw new Error(`the base version of ${logical} has an inconsistent record`);
     return this.fetchContent(op, meta);
@@ -1632,7 +1697,8 @@ export class Engine {
     if (!op.blob_id) throw new Error("that version is a deletion");
     const meta = await this.vc.decryptMeta(op.path_id, fromB64(op.meta_enc));
     if (meta.blob !== undefined && meta.blob !== op.blob_id) throw new Error("that version's record is inconsistent");
-    return this.fetchContent(op, meta);
+    if (this.state.ceiling !== undefined && meta.size >= this.state.ceiling) throw new Error("that version is too large for this device to load");
+    return this.fetchContent(await this.full(op), meta);
   }
 
   /** Download (if needed), decrypt, verify, and write a remote put to disk. */
@@ -1857,19 +1923,19 @@ export class Engine {
         this.state.cursorOp = p.op.op_id;
       }
     } else if (r.conflict) {
-      const skipped = this.state.files[p.logical]?.skip;
-      if (skipped !== undefined && r.conflict.seq <= skipped) {
-        // The head is a version this device skipped: resolving against it
-        // would load it again. The local edit stays on disk, unsynced.
-        this.reportSkip(p.logical);
-        this.dirty.delete(p.logical);
-        return;
-      }
       let meta: FileMeta | null = null;
       try {
         meta = await this.vc.decryptMeta(r.conflict.path_id, fromB64(r.conflict.meta_enc));
       } catch (e) {
         this.log("error", `conflict head for ${p.logical} cannot be decrypted; our version will replace it`, e);
+      }
+      if (meta && this.tooBig(p.logical, r.conflict, meta.size)) {
+        // The head is a version this device cannot load. Resolving against it
+        // would load it; dropping the edit would lose it (round 16, R2). The
+        // edit goes up as a conflict copy instead, like any edit that could
+        // not be merged, and the path waits for a later version.
+        await this.keepEditBeside(p);
+        return;
       }
       // The head the server hands back gets the same checks as a pulled op:
       // its metadata must be ours by path and must name the blob the row
@@ -1901,7 +1967,7 @@ export class Engine {
         if (honest) {
           if (p.bytes) {
             try {
-              await this.guarded(p.logical, honest.op, () => this.resolveConflict(p.logical, p.bytes!, p.op.blob_id!, honest.op, honest.meta, undefined, p.st ?? null));
+              await this.guarded(p.logical, honest.op, honest.meta.size, () => this.resolveConflict(p.logical, p.bytes!, p.op.blob_id!, honest.op, honest.meta, undefined, p.st ?? null));
             } catch (e) {
               if (!(e instanceof ConcurrentLocalEdit)) throw e;
               this.markDirty(p.logical);
@@ -1937,7 +2003,7 @@ export class Engine {
         // next round re-reads it and resolves against the real head.
         try {
           const head = r.conflict;
-          await this.guarded(p.logical, head, () => this.resolveConflict(p.logical, p.bytes!, p.op.blob_id!, head, meta, undefined, p.st ?? null));
+          await this.guarded(p.logical, head, meta.size, () => this.resolveConflict(p.logical, p.bytes!, p.op.blob_id!, head, meta, undefined, p.st ?? null));
         } catch (e) {
           if (!(e instanceof ConcurrentLocalEdit)) throw e;
           this.log("info", `${this.device(p.logical)} changed while its push was in flight; resolving next round`);

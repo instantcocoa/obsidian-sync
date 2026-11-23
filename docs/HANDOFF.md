@@ -26,9 +26,9 @@ use `rg`, never `grep`; never run `find /`. Commit messages end with the
 attribution lines your session was given; use a heredoc, never a
 double-quoted `-m` (backticks get command-substituted).
 
-## Status in one paragraph (2026-11-23, release 1.0.4)
+## Status in one paragraph (2026-11-23, release 1.0.5)
 
-obsync is released as 1.0.4 and in real use. The production server runs in
+obsync is released as 1.0.5 and in real use. The production server runs in
 Docker behind Caddy on the owner's host, with a nightly local snapshot and
 an encrypted off-site copy (`server/deploy/`, `server/README.md`). The
 owner's main vault is live on it (a Mac and an iPhone, with a recovery
@@ -244,6 +244,17 @@ DESIGN.md has the reasoning for each; the READMEs describe the result.
   the last good addresses (N7). The keychain-confirming restart waits for 30
   s without an edit (N8). Still open: streaming chunked writes to disk so a
   phone never holds a large file in memory (the root of N1 to N3).
+- **1.0.5, sixteenth review fixed** (`plugin/test/review16.test.ts`, server
+  `chunks_test.go`; report graded server 4.0, plugin 3.0). The crash guard
+  covers any version over 1 MiB, single blobs that inflate included, and
+  large single blobs are fetched inside it (R1). A crash on a version of
+  64 MiB or more sets a per-device size ceiling, so many oversized versions
+  or re-posts cost two crashes in all (R4); a server answering "rewound"
+  clears skip marks but not the ceiling (R5). Edits to a skipped path go up
+  as a conflict copy with a notice (R2). History pages leave chunk lists out
+  and a new route returns one op whole, so junk cannot crowd out real
+  versions (R3). The keychain restart also waits while an editor has focus.
+  Docs corrected (R6). Root cause still open: streaming chunked writes.
 
 ## What needs to be done (2026-11-23)
 

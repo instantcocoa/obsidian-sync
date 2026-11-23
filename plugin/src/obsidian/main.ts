@@ -395,7 +395,14 @@ export default class ObsyncPlugin extends Plugin {
     // restart waits for sync to be idle and for 30 s without a saved edit
     // (Obsidian saves within two seconds of typing). After ten minutes of
     // steady editing it gives up: the next launch confirms just the same.
-    const quiet = () => this.engine?.getStatus().phase === "idle" && Date.now() - this.lastEdit > 30_000;
+    // Obsidian saves about two seconds after typing stops, so a note being
+    // typed in right now may hold keystrokes the 30 s rule cannot see: never
+    // restart while an editor or a text field has the focus.
+    const typing = () => {
+      const el = document.activeElement;
+      return !!el && typeof (el as Element).closest === "function" && !!(el as Element).closest(".cm-editor, input, textarea, [contenteditable='true']");
+    };
+    const quiet = () => this.engine?.getStatus().phase === "idle" && Date.now() - this.lastEdit > 30_000 && !typing();
     const tick = () => {
       if (this.unloaded || !this.settings.protection.pending) return;
       if (!quiet()) return void (Date.now() - t0 < 600_000 && window.setTimeout(tick, 5000));

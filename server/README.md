@@ -340,7 +340,8 @@ hex chars.
 | `PATCH` | `/v1/vaults/{v}/ops/{seq}/meta` | **authority**. `{meta_enc, meta_epoch}`; higher epoch only |
 | `GET` | `/v1/vaults/{v}/ops?meta_epoch_lt=E` | `{seqs}` re-encryption worklist |
 | `GET` | `/v1/vaults/{v}/ops?from=ms&to=ms` | op log by time |
-| `GET` | `/v1/vaults/{v}/history?path_id=…` | ops for a path, newest first, 5000 or a chunk-id budget per page; `before=SEQ` pages back, `more` says older versions remain |
+| `GET` | `/v1/vaults/{v}/history?path_id=…` | ops for a path, newest first, 5000 per page; `before=SEQ` pages back, `more` says older versions remain; chunk lists are left out and marked `chunked` |
+| `GET` | `/v1/vaults/{v}/ops/{seq}` | one op whole, chunk list included |
 | `POST` | `/v1/vaults/{v}/restore` | **authority**. `{at: ms}` → re-emits older heads, chunk lists included; a version whose blob or any chunk is gone is skipped; `{emitted, skipped_path_ids}`. There is no CLI for this on purpose: the route needs the vault authority token, which the server never holds, so only the plugin's **Restore vault to a point in time** can ask (DESIGN.md §4.5) |
 
 Invariants enforced server-side: a `put` needs its blob uploaded first, or

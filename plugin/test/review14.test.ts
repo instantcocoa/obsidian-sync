@@ -124,7 +124,7 @@ describe("review 14: chunked content is bounded before it is fetched or allocate
     await b.sync();
     const vault = sa.identity.vaultId;
     const all = new Set<string>();
-    for (let i = 0; i < 3; i++) for (const o of await sa.client.history(vault, await sa.vc.pathId(`video${i}.bin`))) for (const c of o.chunks ?? []) all.add(c);
+    for (let i = 0; i < 3; i++) for (const o of await sa.client.history(vault, await sa.vc.pathId(`video${i}.bin`))) for (const c of (await sa.client.getOp(vault, o.seq))?.chunks ?? []) all.add(c);
     await a.write("t.bin", noise(1_500_000, 8));
     await a.sync();
     const feed = sb.client.changes.bind(sb.client);

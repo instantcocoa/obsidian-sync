@@ -1,6 +1,6 @@
 {
   "name": "obsync",
-  "version": "1.0.4",
+  "version": "1.0.5",
   "description": "Simple, fast, end-to-end encrypted vault sync for Obsidian, including .obsidian",
   "private": true,
   "type": "module",

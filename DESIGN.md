@@ -327,7 +327,8 @@ blobs    (vault_id, blob_id, epoch, ct_size, created_at, last_ref_at)
 | `GET` | `/v1/vaults/{v}/blobs?epoch_lt=E` | Blob IDs still encrypted under an old epoch (re-encryption worklist). |
 | `POST` | `/v1/vaults/{v}/ops` | Body: `[op…]`. Each op is CAS-checked and either `{seq}` or `{conflict: headOp}`. Applied atomically per op, not per batch. An op may carry `chunks`, the ordered blob ids of a large file's content (§6.9); every one must be uploaded first. |
 | `PATCH` | `/v1/vaults/{v}/ops/{seq}/meta` | Replace `meta_enc` with a higher `meta_epoch` (re-encryption). Nothing else about an op can change. Vault authority required. |
-| `GET` | `/v1/vaults/{v}/history?path_id=…` | All ops for a path (versions UI, restore). |
+| `GET` | `/v1/vaults/{v}/history?path_id=…` | All ops for a path (versions UI, restore), newest first, paged with `before`; chunk lists left out (`chunked`). |
+| `GET` | `/v1/vaults/{v}/ops/{seq}` | One op whole, chunk list included. |
 | `GET` | `/v1/vaults/{v}/ops?from=T` | Op log by time, for "restore vault to T" tooling. |
 | `POST` | `/v1/vaults/{v}/restore` | `{at: ms}`: re-emit, as new `put` ops, the head every path had at `at` (§4.5). Vault authority required, so only a member device can rewind. |
 
@@ -1253,15 +1254,24 @@ ceiling every download has), or whose list is longer than
 `size / CHUNK_MIN + 1` or shorter than `size / CHUNK_MAX`. It then fetches
 in list order through a window of four, decrypts each chunk against the
 room left in the file, writes it into place, and stops at the first chunk
-that overruns or is too short for its position. Everything that can hold a chunked version in memory (applying it,
-merging against it, resolving a push conflict with it, writing it to disk)
-first saves `applying = {seq, path, tries}`; an app killed inside (a phone
+that overruns or is too short for its position. Everything that can hold a large version in memory (any version over
+1 MiB, chunked or a single blob that inflates, since 1.0.5: applying it,
+merging against it, resolving a push conflict with it, writing it to disk;
+large single blobs are no longer prefetched ahead of this) first saves
+`applying = {seq, path, size, tries}`; an app killed inside (a phone
 out of memory) finds it at the next start, and a version that has stopped
 the app twice is marked skipped on its own path, reported, and never loaded
 again on that device; the next version of the file is applied as usual, and
 a server restore clears the marks (sequence numbers are re-issued). Since
 1.0.4 (fifteenth review) the mark lives on the file entry, not in a capped
-list a batch of 51 such versions could overflow. The server keeps pages of the feed, the snapshot and a history to
+list a batch of 51 such versions could overflow. Since 1.0.5 (sixteenth
+review) a crash on a version of 64 MiB or more also sets a per-device
+ceiling: later versions that large are skipped without being tried, so a
+member's many oversized versions (or re-posts of one) cost a device two
+crashes in all. A local edit of a skipped path is uploaded as a conflict copy
+beside it, with a notice, instead of staying on the device. Rebuild local
+sync state clears the marks and the ceiling. History pages leave chunk lists
+out (`chunked: true`); `GET /v1/vaults/{v}/ops/{seq}` returns one op whole. The server keeps pages of the feed, the snapshot and a history to
 32,768 chunk ids. A merge whose base is a chunked version reads that base
 from the path's history like any chunked download.
 

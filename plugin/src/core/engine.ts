@@ -213,6 +213,8 @@ export class Engine {
   private pullFirstRounds = 0;
   /** Paths whose current bytes must be pushed even if unchanged, to supersede a head nobody can read. */
   private supersede = new Set<string>();
+  /** Device folders a remote deletion took a file out of; removed after the pull if left empty (see pruneEmptied). */
+  private emptied = new Set<string>();
   private healAfterBatch: { logical: string; seq: number; at: number }[] = [];
   private kickTimer: ReturnType<typeof setTimeout> | null = null;
   private pollTimer: ReturnType<typeof setInterval> | null = null;
@@ -360,6 +362,12 @@ export class Engine {
       delete this.state.applying;
       this.log("error", `op ${a.seq} for ${a.path} stopped the app twice while being applied; skipping it`);
     }
+    // Folders emptied by another device's deletions before this version
+    // removed them (or before a crash) are still there: queue the parents of
+    // every tombstone that is not our own for the first sync's sweep.
+    for (const [logical, f] of Object.entries(this.state.files)) {
+      if (f.hash === null && f.by !== this.cfg.deviceId && !this.excluded(logical)) this.noteEmptied(this.device(logical));
+    }
   }
 
   private saveChain: Promise<void> = Promise.resolve();
@@ -428,8 +436,12 @@ export class Engine {
           if (e && e.hash !== null) continue;
           await this.discardLocal(st.path);
           await this.fs.remove(st.path);
+          this.noteEmptied(st.path);
           if (e) this.dirty.delete(logical);
         }
+        // "Identical to the server" includes the folders: the ones the
+        // snapshot's tombstones and the removals above left empty go too.
+        await this.pruneEmptied();
       } finally {
         this.serverWins = null;
         await this.flushState();
@@ -704,6 +716,7 @@ export class Engine {
           await this.retryDeferred();
           try {
             await this.pull();
+            await this.pruneEmptied();
             for (const p of this.pullFirst) this.markDirty(p);
             this.pullFirst.clear();
             await this.push();
@@ -1003,6 +1016,41 @@ export class Engine {
       if (feed.cursor_op_id) this.state.cursorOp = feed.cursor_op_id;
       this.scheduleSave();
       if (!feed.more) break;
+    }
+  }
+
+  private noteEmptied(devPath: string): void {
+    const i = devPath.lastIndexOf("/");
+    if (i > 0) this.emptied.add(devPath.slice(0, i));
+  }
+
+  /**
+   * Folders are not synced, only files. A folder moved or deleted elsewhere
+   * arrives as deletions of everything in it, which would leave the folder
+   * itself behind, empty, on this device for good. After a pull (so a
+   * rename inside the folder has already put its new name back), remove
+   * each folder a remote deletion emptied, then its parents while they are
+   * empty too. Never a root-level dot folder (the config dir, .trash).
+   */
+  private async pruneEmptied(): Promise<void> {
+    if (!this.fs.removeFolderIfEmpty || this.emptied.size === 0) return;
+    const dirs = [...this.emptied].sort((a, b) => b.length - a.length);
+    this.emptied.clear();
+    const kept = new Set<string>();
+    for (const start of dirs) {
+      for (let dir = start; dir; dir = dir.slice(0, Math.max(0, dir.lastIndexOf("/")))) {
+        if (kept.has(dir) || (dir.startsWith(".") && !dir.includes("/"))) break;
+        let gone = false;
+        try {
+          gone = await this.fs.removeFolderIfEmpty(dir);
+        } catch (e) {
+          this.log("warn", `could not remove the emptied folder ${dir}`, e);
+        }
+        if (!gone) {
+          kept.add(dir);
+          break;
+        }
+      }
     }
   }
 
@@ -1466,6 +1514,9 @@ export class Engine {
     if (op.blob_id === null) {
       // Remote deletion.
       if (!st) {
+        // Nothing to delete, but the folder may be here and empty: a first
+        // snapshot or a reset meets tombstones for files it never had.
+        this.noteEmptied(devPath);
         this.state.files[logical] = { hash: null, seq: op.seq, at: op.created_at, size: 0, mtime: 0 };
         this.dirty.delete(logical);
       } else if (diskHash !== (e?.hash ?? null) && !this.serverWins) {
@@ -1478,6 +1529,7 @@ export class Engine {
         this.state.inflight[logical] = { blob: null, seq: op.seq, size: 0, mtime: 0 };
         await this.flushState();
         await this.fs.remove(devPath);
+        this.noteEmptied(devPath);
         delete this.state.inflight[logical];
         this.state.files[logical] = { hash: null, seq: op.seq, at: op.created_at, size: 0, mtime: 0 };
         this.dirty.delete(logical);
@@ -1916,7 +1968,15 @@ export class Engine {
   private async settle(p: { logical: string; op: OpInput; bytes?: Uint8Array; st?: FileStat }, r: OpResult): Promise<void> {
     if (r.seq && !r.conflict && !r.error) {
       this.state.files[p.logical] = { hash: p.op.blob_id, seq: r.seq, at: r.created_at, size: p.st?.size ?? 0, mtime: p.st?.mtime ?? 0, by: this.cfg.deviceId };
-      this.dirty.delete(p.logical);
+      // The file may have been saved again between prepareLocalOp and here
+      // (an editor autosaves every couple of seconds; a push is a network
+      // round trip). The watcher's markDirty for that save was a no-op, as
+      // the path was still dirty, so clearing the flag now would drop the
+      // edit until the next full scan. Keep it dirty unless the disk still
+      // shows what was pushed; the push loop's next round sends the rest.
+      const now = await this.fs.stat(this.device(p.logical));
+      const same = p.st ? !!now && now.size === p.st.size && now.mtime === p.st.mtime : !now;
+      if (same) this.dirty.delete(p.logical);
       // The server's cursor can jump past our own op; keep cursor in step so we do not re-pull it.
       if (r.seq === this.state.cursor + 1) {
         this.state.cursor = r.seq;

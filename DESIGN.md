@@ -1114,9 +1114,13 @@ is for *exclusions*, where over-matching is harmless. Whether a write may
 land is decided by asking the volume instead: a path that resolves to an
 existing entry no folder lists under exactly that spelling is refused and
 reported rather than replacing that entry's bytes, while names the volume
-keeps apart (`café.md` and `cafe.md` on APFS) stay apart here too. A
-case-only folder rename arrives as deletes and puts and Obsidian leaves the
-emptied folder behind; an empty parent folder that exists only under another
+keeps apart (`café.md` and `cafe.md` on APFS) stay apart here too. Folders
+are not synced, so since 1.0.6 a folder that remote deletions (or a reset to
+the server's copy) leave holding nothing but OS junk is removed after the
+pull, with its emptied parents; without that a folder moved on one device
+stayed behind empty on every other. A
+case-only folder rename arrives as deletes and puts and can still meet an
+emptied folder (one the user recreated, or within one batch); an empty parent folder that exists only under another
 casing is renamed to the requested spelling before the put, so the files do
 not land under the old name forever. Failure isolation is one rule for every
 consumer of remote rows: the applier skips an unapplicable op; a conflict

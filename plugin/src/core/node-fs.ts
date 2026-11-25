@@ -184,6 +184,15 @@ export class NodeFS implements VaultFS {
     await fsp.rm(this.abs(path), { force: true });
   }
 
+  async removeFolderIfEmpty(path: string): Promise<boolean> {
+    const abs = this.abs(path);
+    const st = await fsp.stat(abs).catch(() => null);
+    if (!st) return true;
+    if (!st.isDirectory() || !(await this.emptyExceptJunk(abs))) return false;
+    await fsp.rm(abs, { recursive: true, force: true });
+    return true;
+  }
+
   onChange(cb: (path: string) => void): () => void {
     // Recursive fs.watch is supported on Linux since Node 20 and on macOS/Windows.
     try {

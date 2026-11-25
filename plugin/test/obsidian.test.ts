@@ -89,6 +89,25 @@ describe.skipIf(!OBSIDIAN_BIN)("inside real Obsidian", () => {
     expect([...(await fsp.readFile(join(b.vault, "pic.bin")))]).toEqual([0, 255, 1, 254, 137, 80, 78, 71]);
   }, 120_000);
 
+  it("a folder moved on A is moved on B: the old folder does not stay behind empty", async () => {
+    await a.eval(async (_p, app) => {
+      await app.vault.createFolder("Cocoa");
+      await app.vault.createFolder("Cocoa/deep");
+      await app.vault.create("Cocoa/plan.md", "plan\n");
+      await app.vault.create("Cocoa/deep/todo.md", "todo\n");
+      await app.vault.createFolder("Projects");
+    });
+    expect(await b.waitForFile("Cocoa/deep/todo.md", "todo\n")).not.toBeNull();
+    expect(await b.waitForFile("Cocoa/plan.md", "plan\n")).not.toBeNull();
+    await a.eval((_p, app) => app.fileManager.renameFile(app.vault.getAbstractFileByPath("Cocoa"), "Projects/Cocoa"));
+    expect(await b.waitForFile("Projects/Cocoa/deep/todo.md", "todo\n")).not.toBeNull();
+    expect(await b.waitForFile("Projects/Cocoa/plan.md", "plan\n")).not.toBeNull();
+    if (!(await b.waitForGone("Cocoa"))) throw new Error(`Cocoa/ is still on B\nB: ${await b.diagnostics()}`);
+    // And from B's file explorer, not only from its disk.
+    expect(await b.waitFor(() => !(globalThis as any).app.vault.getAbstractFileByPath("Cocoa"), 15_000)).toBe(true);
+    expect(await b.eval((_p, app) => Boolean(app.vault.getAbstractFileByPath("Projects/Cocoa/deep/todo.md")))).toBe(true);
+  }, 150_000);
+
   it("config-dir files written to disk on A reach B (raw event / dot scan path)", async () => {
     await fsp.mkdir(join(a.vault, ".obsidian/snippets"), { recursive: true });
     await fsp.writeFile(join(a.vault, ".obsidian/snippets/obsync-test.css"), "body { --obsync: 1; }\n");

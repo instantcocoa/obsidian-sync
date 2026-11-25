@@ -34,6 +34,13 @@ export interface VaultFS {
   /** Remove a file; implementations may move it to a trash. */
   remove(path: string): Promise<void>;
   /**
+   * Optional: remove the folder at `path` if it holds nothing but OS junk
+   * and (recursively) such folders; true when it is gone afterwards. Folders
+   * are not synced, so a folder moved or deleted on one device would
+   * otherwise stay behind, empty, on every other one.
+   */
+  removeFolderIfEmpty?(path: string): Promise<boolean>;
+  /**
    * Optional: the reason `write(path)` would be refused because the volume
    * resolves `path`, or a folder on the way to it, to an existing entry
    * spelled differently (see the refusal messages), or null. Lets the engine

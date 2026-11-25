@@ -114,7 +114,11 @@ describe("the fold-clash refusal refuses names the volume keeps apart", () => {
       await a.sync(); // deletes
       await b.sync();
       expect(await b.exists("Notes/a.md")).toBe(false);
-      expect(existsSync(join(b.dir, "Notes"))).toBe(true); // the empty folder lingers, as on a real device
+      // Since 1.0.6 the emptied folder is removed after the pull. One that
+      // lingers anyway (left by an older version, or recreated empty by the
+      // user) must still not trap the puts under the old spelling.
+      expect(existsSync(join(b.dir, "Notes"))).toBe(false);
+      await fsp.mkdir(join(b.dir, "Notes"));
 
       await a.rawWrite("notes/a.md", utf8("one\n"));
       await a.rawWrite("notes/b.md", utf8("two\n"));

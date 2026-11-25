@@ -344,6 +344,25 @@ export class ObsidianFS implements VaultFS {
     await (this.app.vault.adapter as AdapterExt).reconcileInternalFile?.(path).catch(() => {});
   }
 
+  async removeFolderIfEmpty(path: string): Promise<boolean> {
+    path = this.checked(path);
+    if (!(await this.app.vault.adapter.exists(path))) return true;
+    const st = await this.app.vault.adapter.stat(path).catch(() => null);
+    if (st?.type !== "folder") return false;
+    // Only under exactly this spelling (see remove): on a case-insensitive
+    // volume "notes" also answers for the "Notes" a rename just filled.
+    const i = path.lastIndexOf("/");
+    const siblings = await this.app.vault.adapter.list(i < 0 ? "" : path.slice(0, i));
+    if (!siblings.folders.some((f) => normalizePath(f) === path)) return false;
+    if (!(await this.emptyExceptJunk(path))) return false;
+    const f = this.app.vault.getAbstractFileByPath(path);
+    // Through the vault when it knows the folder, so the file explorer
+    // updates at once; permanently, since there is nothing in it to trash.
+    if (f instanceof TFolder) await this.app.vault.delete(f, true);
+    else await this.app.vault.adapter.rmdir(path, true);
+    return !(await this.app.vault.adapter.exists(path));
+  }
+
   onChange(cb: (path: string) => void): () => void {
     const v = this.app.vault;
     const refs = [

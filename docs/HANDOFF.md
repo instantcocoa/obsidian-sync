@@ -26,9 +26,9 @@ use `rg`, never `grep`; never run `find /`. Commit messages end with the
 attribution lines your session was given; use a heredoc, never a
 double-quoted `-m` (backticks get command-substituted).
 
-## Status in one paragraph (2026-11-23, release 1.0.5)
+## Status in one paragraph (2026-11-25, release 1.0.6)
 
-obsync is released as 1.0.5 and in real use. The production server runs in
+obsync is released as 1.0.6 and in real use. The production server runs in
 Docker behind Caddy on the owner's host, with a nightly local snapshot and
 an encrypted off-site copy (`server/deploy/`, `server/README.md`). The
 owner's main vault is live on it (a Mac and an iPhone, with a recovery
@@ -244,6 +244,18 @@ DESIGN.md has the reasoning for each; the READMEs describe the result.
   the last good addresses (N7). The keychain-confirming restart waits for 30
   s without an edit (N8). Still open: streaming chunked writes to disk so a
   phone never holds a large file in memory (the root of N1 to N3).
+- **1.0.6, two bugs from real use** (`plugin/test/prune-emptied-folders.test.ts`,
+  `settle-concurrent-save.test.ts`, one case in `obsidian.test.ts`). Only
+  files are synced, so a folder moved or deleted on one device stayed behind
+  empty on the others, and a reset to the server's copy kept it too: a
+  folder that remote deletions (or a reset) leave empty is now removed after
+  the pull, with its emptied parents, and folders an older version left
+  behind are swept at the next start. A folder kept empty on purpose goes
+  too once another device deletes the last file in it. Separately, a save
+  that landed while the previous save of the same note was being pushed was
+  dropped until the next start (`settle()` cleared the dirty flag
+  unconditionally); it now stays dirty unless the disk still shows what was
+  pushed.
 - **1.0.5, sixteenth review fixed** (`plugin/test/review16.test.ts`, server
   `chunks_test.go`; report graded server 4.0, plugin 3.0). The crash guard
   covers any version over 1 MiB, single blobs that inflate included, and

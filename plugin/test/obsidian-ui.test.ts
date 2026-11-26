@@ -189,26 +189,42 @@ describe.skipIf(!OBSIDIAN_BIN)("real Obsidian, settings UI onboarding, rate limi
     let onDisk = JSON.parse(await fsp.readFile(file, "utf8"));
     expect(onDisk.sealed.method).toBe("secret");
     expect(onDisk.identity).toBeNull();
-    const seen = await a.eval(async (_p, app) => ({
-      capacitor: typeof (globalThis as any).Capacitor,
-      mobile: (globalThis as any).app?.isMobile,
-      platform: navigator.platform,
-      secrets: (app as any).secretStorage?.listSecrets?.(),
-    }));
-    expect(onDisk.protection.fallback, `protection on disk: ${JSON.stringify({ ...onDisk.protection, fallback: undefined })}\nrenderer: ${JSON.stringify(seen)}`).toBeTruthy(); // kept until the key has been read back
+    // Where the renderer can read Obsidian's native secret store back (Linux
+    // desktop has a Capacitor bridge; macOS and Windows do not), the write is
+    // confirmed at once and nothing is kept. Where it cannot, the previous
+    // form stays on disk until a later launch has read the key.
+    const confirmedAtOnce = !onDisk.protection.fallback;
+    if (confirmedAtOnce) expect(onDisk.protection.pending).toBeUndefined();
+    else expect(onDisk.protection.pending).toBeTruthy();
     const id: string = onDisk.protection.secretId;
     expect(id).toMatch(/^obsync-[0-9a-f]+-[0-9a-f]+$/);
     // The key is in Obsidian's own store, 32 bytes of hex, under our id.
     expect(await a.eval((_p, app, i) => (app as any).secretStorage.listSecrets().includes(i), id)).toBe(true);
     expect(await a.eval((_p, app, i) => /^[0-9a-f]{64}$/.test((app as any).secretStorage.getSecret(i)), id)).toBe(true);
 
-    // Reload as at startup: opens by itself, no prompt, and the fallback copy is dropped.
-    await a.eval(async (_p, app) => {
-      await app.plugins.disablePlugin("obsync");
-      await app.plugins.enablePlugin("obsync");
-    });
-    expect(await a.waitFor(() => Boolean((globalThis as any).app.plugins.plugins.obsync?.engine) && !(globalThis as any).app.plugins.plugins.obsync.locked, 30_000)).toBe(true);
-    expect(await a.eval(() => document.querySelectorAll('.modal input[type="password"]').length)).toBe(0);
+    const reload = async () => {
+      await a.eval(async (_p, app) => {
+        await app.plugins.disablePlugin("obsync");
+        await app.plugins.enablePlugin("obsync");
+      });
+      expect(await a.waitFor(() => Boolean((globalThis as any).app.plugins.plugins.obsync?.engine) && !(globalThis as any).app.plugins.plugins.obsync.locked, 30_000)).toBe(true);
+      expect(await a.eval(() => document.querySelectorAll('.modal input[type="password"]').length)).toBe(0);
+    };
+    if (confirmedAtOnce) {
+      await reload();
+    } else {
+      // A plugin reload in the context that wrote the entry opens by itself
+      // but confirms nothing: Obsidian may still hold the secret only in
+      // memory, so the fallback copy stays (unlockFromSecret).
+      await reload();
+      expect(JSON.parse(await fsp.readFile(file, "utf8")).protection.fallback).toBeTruthy();
+      // An app relaunch is a new JavaScript context. The per-context nonce
+      // lives on globalThis, so dropping it is what a relaunch looks like to
+      // the plugin: the key was found in a context that did not write it, the
+      // entry is confirmed, and the fallback copy is dropped.
+      await a.eval(() => void delete (globalThis as any).__obsyncSecretContext);
+      await reload();
+    }
     const raw = await fsp.readFile(file, "utf8");
     onDisk = JSON.parse(raw);
     expect(onDisk.protection.fallback).toBeUndefined();

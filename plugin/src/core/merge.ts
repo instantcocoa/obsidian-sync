@@ -12,12 +12,96 @@
  *   same key changed on both sides to different values is a conflict.
  */
 
-import { diff3MergeRegions } from "node-diff3";
+import { diffIndices } from "node-diff3";
 import { fromUtf8, isValidUtf8, utf8 } from "./encoding";
 
 export interface MergeResult {
   ok: boolean;
   merged?: Uint8Array;
+}
+
+interface Region {
+  stable: boolean;
+  bufferContent?: string[];
+  aContent?: string[];
+  bContent?: string[];
+}
+
+/**
+ * node-diff3's diffIndices, after cutting the lines the two buffers share at
+ * both ends. Its LCS scans a candidate list that grows with the file, so it
+ * is quadratic: a 250,000-line note took 63 s to merge on a laptop and 166 s
+ * on a CI runner, and a phone would stall for minutes, although each side
+ * had changed one line. Edits are local, so the trimmed middle is small.
+ */
+function diffTrimmed(o: string[], x: string[]): ReturnType<typeof diffIndices<string>> {
+  let head = 0;
+  const max = Math.min(o.length, x.length);
+  while (head < max && o[head] === x[head]) head++;
+  let tail = 0;
+  while (tail < max - head && o[o.length - 1 - tail] === x[x.length - 1 - tail]) tail++;
+  const hunks = diffIndices(o.slice(head, o.length - tail), x.slice(head, x.length - tail));
+  for (const h of hunks) {
+    h.buffer1[0] += head;
+    h.buffer2[0] += head;
+  }
+  return hunks;
+}
+
+/**
+ * node-diff3's diff3MergeRegions (same regions, same boundaries) over
+ * diffTrimmed. Only the stable regions and the two sides of an unstable one
+ * are produced: the caller merges clean regions and refuses the rest.
+ */
+function mergeRegions(a: string[], o: string[], b: string[]): Region[] {
+  type Hunk = { ab: "a" | "b"; oStart: number; oLength: number; abStart: number; abLength: number };
+  const hunks: Hunk[] = [];
+  for (const [ab, x] of [["a", a], ["b", b]] as const) {
+    for (const h of diffTrimmed(o, x)) hunks.push({ ab, oStart: h.buffer1[0], oLength: h.buffer1[1], abStart: h.buffer2[0], abLength: h.buffer2[1] });
+  }
+  // Array.prototype.sort is stable, as the library's sort relies on: hunks of
+  // `a` stay ahead of hunks of `b` that start at the same line.
+  hunks.sort((x, y) => x.oStart - y.oStart);
+  const results: Region[] = [];
+  let curr = 0;
+  const advanceTo = (end: number) => {
+    if (end > curr) {
+      results.push({ stable: true, bufferContent: o.slice(curr, end) });
+      curr = end;
+    }
+  };
+  let i = 0;
+  while (i < hunks.length) {
+    const first = hunks[i++];
+    const regionStart = first.oStart;
+    let regionEnd = first.oStart + first.oLength;
+    const inRegion = [first];
+    advanceTo(regionStart);
+    while (i < hunks.length && hunks[i].oStart <= regionEnd) {
+      regionEnd = Math.max(regionEnd, hunks[i].oStart + hunks[i].oLength);
+      inRegion.push(hunks[i++]);
+    }
+    if (inRegion.length === 1) {
+      if (first.abLength > 0) results.push({ stable: true, bufferContent: (first.ab === "a" ? a : b).slice(first.abStart, first.abStart + first.abLength) });
+    } else {
+      const bounds = { a: [a.length, -1, o.length, -1], b: [b.length, -1, o.length, -1] };
+      for (const h of inRegion) {
+        const bd = bounds[h.ab];
+        bd[0] = Math.min(h.abStart, bd[0]);
+        bd[1] = Math.max(h.abStart + h.abLength, bd[1]);
+        bd[2] = Math.min(h.oStart, bd[2]);
+        bd[3] = Math.max(h.oStart + h.oLength, bd[3]);
+      }
+      const aStart = bounds.a[0] + (regionStart - bounds.a[2]);
+      const aEnd = bounds.a[1] + (regionEnd - bounds.a[3]);
+      const bStart = bounds.b[0] + (regionStart - bounds.b[2]);
+      const bEnd = bounds.b[1] + (regionEnd - bounds.b[3]);
+      results.push({ stable: false, aContent: a.slice(aStart, aEnd), bContent: b.slice(bStart, bEnd) });
+    }
+    curr = regionEnd;
+  }
+  advanceTo(o.length);
+  return results;
 }
 
 export function mergeText(base: Uint8Array, local: Uint8Array, remote: Uint8Array): MergeResult {
@@ -27,13 +111,14 @@ export function mergeText(base: Uint8Array, local: Uint8Array, remote: Uint8Arra
   // node-diff3's diff3Merge does this with push(...region): an unchanged
   // region of a large note is hundreds of thousands of lines, past the
   // engine's argument limit, so a merge of a big file threw. The same walk
-  // over its regions, with loops. A region both sides changed identically
+  // over its regions, with loops, and with the diffs cut down to the lines
+  // that changed (mergeRegions). A region both sides changed identically
   // is not a conflict (excludeFalseConflicts).
   const out: string[] = [];
-  for (const r of diff3MergeRegions(lines(ls), lines(bs), lines(rs))) {
+  for (const r of mergeRegions(lines(ls), lines(bs), lines(rs))) {
     let take: string[];
-    if (r.stable) take = r.bufferContent;
-    else if (r.aContent.length === r.bContent.length && r.aContent.every((x, i) => x === r.bContent[i])) take = r.aContent;
+    if (r.stable) take = r.bufferContent!;
+    else if (r.aContent!.length === r.bContent!.length && r.aContent!.every((x, i) => x === r.bContent![i])) take = r.aContent!;
     else return { ok: false };
     for (const l of take) out.push(l);
   }

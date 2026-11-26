@@ -189,7 +189,13 @@ describe.skipIf(!OBSIDIAN_BIN)("real Obsidian, settings UI onboarding, rate limi
     let onDisk = JSON.parse(await fsp.readFile(file, "utf8"));
     expect(onDisk.sealed.method).toBe("secret");
     expect(onDisk.identity).toBeNull();
-    expect(onDisk.protection.fallback).toBeTruthy(); // kept until the key has been read back
+    const seen = await a.eval(async (_p, app) => ({
+      capacitor: typeof (globalThis as any).Capacitor,
+      mobile: (globalThis as any).app?.isMobile,
+      platform: navigator.platform,
+      secrets: (app as any).secretStorage?.listSecrets?.(),
+    }));
+    expect(onDisk.protection.fallback, `protection on disk: ${JSON.stringify({ ...onDisk.protection, fallback: undefined })}\nrenderer: ${JSON.stringify(seen)}`).toBeTruthy(); // kept until the key has been read back
     const id: string = onDisk.protection.secretId;
     expect(id).toMatch(/^obsync-[0-9a-f]+-[0-9a-f]+$/);
     // The key is in Obsidian's own store, 32 bytes of hex, under our id.
